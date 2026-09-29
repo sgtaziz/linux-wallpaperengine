@@ -1,5 +1,6 @@
 #include <map>
 #include <memory>
+#include <system_error>
 
 #include "Container.h"
 
@@ -97,7 +98,8 @@ Adapter& Container::resolveAdapterForFile (const std::filesystem::path& path) co
     }
 
     throw std::filesystem::filesystem_error (
-	"Cannot find requested file in any of the mountpoints", path, std::error_code ()
+	"Cannot find requested file in any of the mountpoints", path,
+	std::make_error_code (std::errc::no_such_file_or_directory)
     );
 }
 

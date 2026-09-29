@@ -1,4 +1,6 @@
 #include "CPass.h"
+#include "PositionUniform.h"
+#include "UniformArrayUpload.h"
 #include <sstream>
 #include <utility>
 
@@ -8,6 +10,8 @@
 #include "WallpaperEngine/Data/Model/Material.h"
 
 #include "WallpaperEngine/Render/CFBO.h"
+#include "WallpaperEngine/Render/TextureAnimation.h"
+#include "WallpaperEngine/Render/UserTextureSelection.h"
 #include "WallpaperEngine/Render/Objects/CImage.h"
 
 #include "WallpaperEngine/Render/Shaders/Variables/ShaderVariable.h"
@@ -39,6 +43,17 @@ std::string textureSizeLabel (const std::shared_ptr<const TextureProvider>& text
     }
 
     return std::to_string (texture->getRealWidth ()) + "x" + std::to_string (texture->getRealHeight ());
+}
+
+const PropertySceneTexture* sceneTextureSelection (const CRenderable& renderable, const std::string& name) {
+    const auto& properties = renderable.getScene ().getScene ().project.properties;
+    const auto it = properties.find (name);
+    return it == properties.end () ? nullptr : dynamic_cast<const PropertySceneTexture*> (it->second.get ());
+}
+
+bool isMediaSystemTexture (const UserTextureSelector& selector) {
+    return selector.source == UserTextureSource::System
+        && (selector.name == "$mediaThumbnail" || selector.name == "$mediaPreviousThumbnail");
 }
 }
 
@@ -100,7 +115,7 @@ std::shared_ptr<const TextureProvider> CPass::resolveTexture (
     }
 
     // a bind named "previous" is just another way of telling it to use whatever texture there was already
-    if (it->second == "previous") {
+    if (it->second == "previous" || it->second == "prev") {
 	return this->m_previousInput ?: (previous ?: expected);
     }
 
@@ -116,6 +131,29 @@ std::shared_ptr<const CFBO> CPass::resolveFBO (const std::string& name) const {
     }
 
     return fbo;
+}
+
+std::shared_ptr<const TextureProvider> CPass::resolveChainTexture (const TextureChainEntry& entry) const {
+    if (entry.selection != nullptr) {
+        return resolveUserTextureSelection (
+            *entry.selection, entry.selectedValue, entry.texture,
+            [this] (const std::string& selected) {
+                try {
+                    return this->getContext ().resolveTexture (selected);
+                } catch (const std::runtime_error& ex) {
+                    sLog.error ("Cannot resolve selected scene texture ", selected, ": ", ex.what ());
+                    return std::shared_ptr<const TextureProvider> {};
+                }
+            },
+            [this, &entry] () {
+                return entry.next == nullptr ? std::shared_ptr<const TextureProvider> {}
+                    : this->resolveChainTexture (*entry.next);
+            }
+        );
+    }
+    if (entry.texture && !entry.texture->isReady () && entry.fallbackTexture &&
+        entry.fallbackTexture->isReady ()) return entry.fallbackTexture;
+    return entry.resourceName.empty () ? entry.texture : this->resolveFBO (entry.resourceName);
 }
 
 void CPass::setupRenderFramebuffer () const {
@@ -142,6 +180,25 @@ void CPass::setupRenderFramebuffer () const {
 	default:
 	    glDisable (GL_BLEND);
 	    break;
+    }
+    // Native copybackground=false toggles this state across the whole child
+    // traversal, including a child's intermediate effect targets.
+    const bool maxChildAlpha = this->m_renderable.getScene ().isMaxAlphaCompositionScope ();
+    glBlendEquationSeparate (GL_FUNC_ADD, maxChildAlpha ? GL_MAX : GL_FUNC_ADD);
+    if (maxChildAlpha && this->getBlendingMode () != BlendingMode_Unknown) {
+	switch (this->getBlendingMode ()) {
+	    case BlendingMode_Translucent:
+		glBlendFuncSeparate (GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE);
+		break;
+	    case BlendingMode_Additive:
+		glBlendFuncSeparate (GL_SRC_ALPHA, GL_ONE, GL_ONE, GL_ONE);
+		break;
+	    case BlendingMode_Normal:
+		glBlendFuncSeparate (GL_ONE, GL_ZERO, GL_ONE, GL_ONE);
+		break;
+	    default:
+		break;
+	}
     }
 
     switch (this->m_pass.depthtest) {
@@ -184,12 +241,19 @@ void CPass::setupRenderTexture () {
 
     auto texture0 = this->resolveTexture0 ();
     const auto animation = this->resolveTextureAnimationState (texture0);
+    if (m_textureFrameOverride && getContext ().getApp ().getContext ().settings.render.debug.passLog)
+        sLog.out ("Particle page binding: ordinal=", *m_textureFrameOverride,
+                  " animated=", texture0 != nullptr && texture0->isAnimated (),
+                  " frames=", texture0 != nullptr ? texture0->getFrames ().size () : 0,
+                  " source=", texture0 == m_renderable.getTexture (),
+                  " page=", animation.currentTexture);
 
     this->bindTextureUnit (0, texture0, animation.currentTexture);
     this->bindTextureOverrides (animation.currentTexture, texture0);
 
     if (texture0 != nullptr) {
 	this->m_texture0Resolution = *texture0->getResolution ();
+        this->m_textureResolutions[0] = this->m_texture0Resolution;
     }
 
     // used in animations when one of the frames is vertical instead of horizontal
@@ -207,6 +271,7 @@ void CPass::setupRenderTexture () {
 }
 
 std::shared_ptr<const TextureProvider> CPass::resolveTexture0 () {
+    if (m_texture0Override) return m_texture0Override;
     auto texture0 = this->resolveTexture (this->m_input, 0, this->m_input);
     const auto it = this->m_textures.find (0);
 
@@ -214,10 +279,10 @@ std::shared_ptr<const TextureProvider> CPass::resolveTexture0 () {
 	return texture0;
     }
 
-    auto& chain = it->second;
+    auto chain = it->second;
 
     do {
-	texture0 = chain->texture;
+	texture0 = this->resolveChainTexture (*chain);
 
 	if (texture0 == nullptr) {
 	    if (this->m_previousInput != nullptr && this->m_previousInput->isReady ()) {
@@ -251,27 +316,23 @@ CPass::resolveTextureAnimationState (const std::shared_ptr<const TextureProvider
 	return state;
     }
 
-    double currentRenderTime = fmod (
-	static_cast<double> (this->getContext ().getDriver ().getRenderTime ()), this->m_renderable.getAnimationTime ()
-    );
-
-    for (const auto& frameCur : texture->getFrames ()) {
-	currentRenderTime -= frameCur->frametime;
-
-	if (currentRenderTime > 0.0f) {
-	    continue;
-	}
-
-	state.currentTexture = frameCur->frameNumber;
-	state.translation.x = frameCur->x / texture->getTextureWidth (state.currentTexture);
-	state.translation.y = frameCur->y / texture->getTextureHeight (state.currentTexture);
-
-	state.rotation.x = frameCur->width1 / static_cast<float> (texture->getTextureWidth (state.currentTexture));
-	state.rotation.y = frameCur->width2 / static_cast<float> (texture->getTextureWidth (state.currentTexture));
-	state.rotation.z = frameCur->height2 / static_cast<float> (texture->getTextureHeight (state.currentTexture));
-	state.rotation.w = frameCur->height1 / static_cast<float> (texture->getTextureHeight (state.currentTexture));
-	break;
-    }
+    const auto& frames = texture->getFrames ();
+    const auto* frame = m_textureFrameOverride && texture == m_renderable.getTexture ()
+        && *m_textureFrameOverride < frames.size ()
+            ? frames[*m_textureFrameOverride].get ()
+            : frameAtTime (frames,
+                static_cast<double> (this->getContext ().getDriver ().getRenderTime ()));
+    if (frame == nullptr)
+        return state;
+    state.currentTexture = frame->frameNumber;
+    const float width = static_cast<float> (texture->getTextureWidth (state.currentTexture));
+    const float height = static_cast<float> (texture->getTextureHeight (state.currentTexture));
+    state.translation.x = frame->x / width;
+    state.translation.y = frame->y / height;
+    state.rotation.x = frame->width1 / width;
+    state.rotation.y = frame->width2 / width;
+    state.rotation.z = frame->height2 / height;
+    state.rotation.w = frame->height1 / height;
 
     return state;
 }
@@ -285,10 +346,11 @@ void CPass::bindTextureUnit (int index, const std::shared_ptr<const TextureProvi
     glBindTexture (GL_TEXTURE_2D, texture->getTextureID (frame));
 }
 
-void CPass::bindTextureOverrides (uint32_t currentTexture, std::shared_ptr<const TextureProvider>& texture0) const {
+void CPass::bindTextureOverrides (uint32_t currentTexture, std::shared_ptr<const TextureProvider>& texture0) {
     for (auto [index, chain] : this->m_textures) {
+	if (index == 0 && m_texture0Override) continue;
 	// find the expected texture
-	auto expectedTexture = chain->texture;
+	auto expectedTexture = this->resolveChainTexture (*chain);
 
 	do {
 	    if (expectedTexture == nullptr) {
@@ -306,7 +368,7 @@ void CPass::bindTextureOverrides (uint32_t currentTexture, std::shared_ptr<const
 	    }
 
 	    chain = chain->next;
-	    expectedTexture = chain == nullptr ? nullptr : chain->texture;
+	    expectedTexture = chain == nullptr ? nullptr : this->resolveChainTexture (*chain);
 	} while (chain != nullptr);
 
 	if (expectedTexture == nullptr && this->m_previousInput != nullptr && this->m_previousInput->isReady ()) {
@@ -317,7 +379,10 @@ void CPass::bindTextureOverrides (uint32_t currentTexture, std::shared_ptr<const
 	    expectedTexture = this->m_input;
 	}
 
-	this->bindTextureUnit (index, expectedTexture, index == 0 ? currentTexture : 0);
+	const uint32_t frame = index == 0 ? currentTexture
+	    : this->resolveTextureAnimationState (expectedTexture).currentTexture;
+	this->bindTextureUnit (index, expectedTexture, frame);
+	if (expectedTexture != nullptr) this->m_textureResolutions[index] = *expectedTexture->getResolution ();
 
 	if (index == 0) {
 	    texture0 = expectedTexture;
@@ -339,7 +404,7 @@ void CPass::setupRenderReferenceUniforms () {
 		glUniform1i (value->id, *static_cast<const int*> (*value->value));
 		break;
 	    case Vector4:
-		glUniform4fv (value->id, 1, glm::value_ptr (*static_cast<const glm::vec4*> (*value->value)));
+		uploadVec4Array (value->id, static_cast<const glm::vec4*> (*value->value), 1);
 		break;
 	    case Vector3:
 		glUniform3fv (value->id, 1, glm::value_ptr (*static_cast<const glm::vec3*> (*value->value)));
@@ -348,9 +413,7 @@ void CPass::setupRenderReferenceUniforms () {
 		glUniform2fv (value->id, 1, glm::value_ptr (*static_cast<const glm::vec2*> (*value->value)));
 		break;
 	    case Matrix4:
-		glUniformMatrix4fv (
-		    value->id, 1, GL_FALSE, glm::value_ptr (*static_cast<const glm::mat4*> (*value->value))
-		);
+		uploadMat4Array (value->id, static_cast<const glm::mat4*> (*value->value), 1);
 		break;
 	    case Matrix3:
 		glUniformMatrix3fv (
@@ -362,6 +425,9 @@ void CPass::setupRenderReferenceUniforms () {
 }
 
 void CPass::setupRenderUniforms () {
+    const auto& scene = m_renderable.getScene ();
+    m_sceneTexelSize = {1.0f / scene.getWidth (), 1.0f / scene.getHeight ()};
+    m_sceneTexelSizeHalf = m_sceneTexelSize * 0.5f;
     // add uniforms
     for (const auto& value : this->m_uniforms | std::views::values) {
 	switch (value->type) {
@@ -374,24 +440,27 @@ void CPass::setupRenderUniforms () {
 	    case Integer:
 		glUniform1iv (value->id, value->count, static_cast<const int*> (value->value));
 		break;
-	    // TODO: THESE MIGHT NEED SPECIAL TREATMENT? IDK ONLY SUPPORT 1 FOR NOW
 	    case Vector4:
-		glUniform4fv (value->id, 1, glm::value_ptr (*static_cast<const glm::vec4*> (value->value)));
+		uploadVec4Array (value->id, static_cast<const glm::vec4*> (value->value), value->count);
 		break;
 	    case Vector3:
-		glUniform3fv (value->id, 1, glm::value_ptr (*static_cast<const glm::vec3*> (value->value)));
+		glUniform3fv (value->id, value->count, glm::value_ptr (*static_cast<const glm::vec3*> (value->value)));
 		break;
 	    case Vector2:
-		glUniform2fv (value->id, 1, glm::value_ptr (*static_cast<const glm::vec2*> (value->value)));
+		if (value->authoredPosition && value->count == 1) {
+		    const auto converted = positionUniformForPass (
+		        *static_cast<const glm::vec2*> (value->value), m_texcoordTopV, m_texcoordBottomV);
+		    glUniform2fv (value->id, 1, glm::value_ptr (converted));
+		} else {
+		    glUniform2fv (value->id, value->count, glm::value_ptr (*static_cast<const glm::vec2*> (value->value)));
+		}
 		break;
 	    case Matrix4:
-		glUniformMatrix4fv (
-		    value->id, 1, GL_FALSE, glm::value_ptr (*static_cast<const glm::mat4*> (value->value))
-		);
+		uploadMat4Array (value->id, static_cast<const glm::mat4*> (value->value), value->count);
 		break;
 	    case Matrix3:
 		glUniformMatrix3fv (
-		    value->id, 1, GL_FALSE, glm::value_ptr (*static_cast<const glm::mat3*> (value->value))
+		    value->id, value->count, GL_FALSE, glm::value_ptr (*static_cast<const glm::mat3*> (value->value))
 		);
 		break;
 	}
@@ -515,6 +584,14 @@ void CPass::setDestination (std::shared_ptr<const CFBO> drawTo) { this->m_drawTo
 
 void CPass::setInput (std::shared_ptr<const TextureProvider> input) { this->m_input = std::move (input); }
 
+void CPass::setTexture0Override (std::shared_ptr<const TextureProvider> texture) {
+    m_texture0Override = std::move (texture);
+}
+
+void CPass::setTextureFrameOverride (std::optional<uint32_t> frame) {
+    m_textureFrameOverride = frame;
+}
+
 void CPass::setPreviousInput (std::shared_ptr<const TextureProvider> input) {
     this->m_previousInput = std::move (input);
 }
@@ -529,13 +606,21 @@ void CPass::setModelViewProjectionMatrixInverse (const glm::mat4* projection) {
 
 void CPass::setModelMatrix (const glm::mat4* model) { this->m_modelMatrix = model; }
 
+void CPass::setNormalModelMatrix (const glm::mat3* normalModel) {
+    this->m_normalModelMatrix = normalModel ? normalModel : &m_identityNormalModelMatrix;
+}
+
 void CPass::setViewProjectionMatrix (const glm::mat4* viewProjection) { this->m_viewProjectionMatrix = viewProjection; }
 
 void CPass::setBlendingMode (BlendingMode blendingmode) { this->m_blendingmode = blendingmode; }
 
 BlendingMode CPass::getBlendingMode () const { return this->m_blendingmode; }
 
-void CPass::setTexCoord (GLuint texcoord) { this->a_TexCoord = texcoord; }
+void CPass::setTexCoord (GLuint texcoord, float topV, float bottomV) {
+    this->a_TexCoord = texcoord;
+    this->m_texcoordTopV = topV;
+    this->m_texcoordBottomV = bottomV;
+}
 
 void CPass::setPosition (GLuint position) { this->a_Position = position; }
 
@@ -617,15 +702,38 @@ void CPass::setupShaders () {
 	= this->m_override.shaderOverride.has_value () ? this->m_override.shaderOverride.value () : this->m_pass.shader;
 
     TextureMap passTextures = this->m_pass.textures;
-    for (const auto& [index, texture] : this->m_pass.usertextures) {
-	passTextures.insert_or_assign (index, texture);
+    TextureMap overrideTextures = this->m_override.textures;
+    const auto addSelectedTexture = [this] (
+	TextureMap& textures, int index, const UserTextureSelector& selector
+    ) {
+	if (isMediaSystemTexture (selector)) {
+            textures.insert_or_assign (index, selector.name);
+            return;
+        }
+	if (selector.source != UserTextureSource::Ordinary) return;
+        const auto* selection = sceneTextureSelection (this->m_renderable, selector.name);
+        if (selection == nullptr || selection->getString ().empty ()) return;
+        try {
+            if (this->getContext ().resolveTexture (selection->getString ()) != nullptr) {
+                textures.insert_or_assign (index, selection->getString ());
+            }
+        } catch (const std::runtime_error&) {
+            // The authored slot texture remains the shader's fallback.
+        }
+    };
+    for (const auto& [index, selector] : this->m_pass.usertextures) {
+        addSelectedTexture (passTextures, index, selector);
+    }
+    for (const auto& [index, selector] : this->m_override.usertextures) {
+        addSelectedTexture (overrideTextures, index, selector);
     }
 
+    ComboMap sceneCombos = m_override.combos;
+    sceneCombos.insert_or_assign ("LIGHTS_POINT", m_renderable.getScene ().getPointLightCount ());
     this->m_shader = new Render::Shaders::Shader (
-	this->m_renderable.getAssetLocator (), shaderName, this->m_combos, this->m_override.combos, passTextures,
-	this->m_override.textures, this->m_override.constants
+	this->m_renderable.getAssetLocator (), shaderName, this->m_combos, sceneCombos, passTextures,
+	overrideTextures, this->m_override.constants, &this->m_pass.constants
     );
-
     const auto [vertex, fragment]
 	= Shaders::GLSLContext::get ().toGlsl (this->m_shader->vertex (), this->m_shader->fragment ());
 
@@ -709,6 +817,7 @@ void CPass::setupTextureUniforms () {
 	    this->m_textures[index] = std::make_shared<TextureChainEntry> (TextureChainEntry {
 		.texture = texture,
 		.next = nullptr,
+		.resourceName = textureName.starts_with ("_rt_") || textureName.starts_with ("_alias_") ? textureName : "",
 	    });
 	} catch (std::runtime_error& ex) {
 	    sLog.error ("Cannot resolve texture ", textureName, " for fragment shader ", ex.what ());
@@ -725,6 +834,7 @@ void CPass::setupTextureUniforms () {
 	    const auto chain = std::make_shared<TextureChainEntry> (TextureChainEntry {
 		.texture = texture,
 		.next = it != this->m_textures.end () ? it->second : nullptr,
+		.resourceName = textureName.starts_with ("_rt_") || textureName.starts_with ("_alias_") ? textureName : "",
 	    });
 
 	    this->m_textures[index] = chain;
@@ -743,6 +853,7 @@ void CPass::setupTextureUniforms () {
 	    const auto chain = std::make_shared<TextureChainEntry> (TextureChainEntry {
 		.texture = texture,
 		.next = it != this->m_textures.end () ? it->second : nullptr,
+		.resourceName = textureName.starts_with ("_rt_") || textureName.starts_with ("_alias_") ? textureName : "",
 	    });
 
 	    this->m_textures[index] = chain;
@@ -751,22 +862,31 @@ void CPass::setupTextureUniforms () {
 	}
     }
 
-    for (const auto& [index, textureName] : this->m_pass.usertextures) {
-	try {
-	    auto texture = textureName.find ("_rt_") == 0 || textureName.find ("_alias_") == 0
-		? this->resolveFBO (textureName)
-		: this->getContext ().resolveTexture (textureName);
-
-	    const auto it = this->m_textures.find (index);
-	    const auto chain = std::make_shared<TextureChainEntry> (TextureChainEntry {
-		.texture = texture,
-		.next = it != this->m_textures.end () ? it->second : nullptr,
-	    });
-
-	    this->m_textures[index] = chain;
-	} catch (std::runtime_error& ex) {
-	    sLog.error ("Cannot resolve user texture ", textureName, " for pass ", ex.what ());
-	}
+    for (const auto& [index, selector] : this->m_pass.usertextures) {
+        if (isMediaSystemTexture (selector)) {
+            const auto it = this->m_textures.find (index);
+            this->m_textures[index] = std::make_shared<TextureChainEntry> (TextureChainEntry {
+                .texture = this->getContext ().resolveTexture (selector.name),
+                .fallbackTexture = selector.name == "$mediaPreviousThumbnail"
+                    ? this->getContext ().resolveTexture ("$mediaThumbnail") : nullptr,
+                .next = it != this->m_textures.end () ? it->second : nullptr,
+            });
+            continue;
+        }
+        if (selector.source != UserTextureSource::Ordinary) {
+            sLog.error ("Unsupported user texture source in pass: slot=", index, " name=", selector.name,
+                        " source=", selector.source == UserTextureSource::System ? "system" : "usershortcut",
+                        "; retaining authored texture");
+            continue;
+        }
+        const auto* selection = sceneTextureSelection (this->m_renderable, selector.name);
+        if (selection == nullptr) continue;
+        const auto it = this->m_textures.find (index);
+        this->m_textures[index] = std::make_shared<TextureChainEntry> (TextureChainEntry {
+            .texture = nullptr,
+            .next = it != this->m_textures.end () ? it->second : nullptr,
+            .selection = selection,
+        });
     }
 
     // override any texture
@@ -780,6 +900,7 @@ void CPass::setupTextureUniforms () {
 	    const auto chain = std::make_shared<TextureChainEntry> (TextureChainEntry {
 		.texture = texture,
 		.next = it != this->m_textures.end () ? it->second : nullptr,
+		.resourceName = textureName.starts_with ("_rt_") || textureName.starts_with ("_alias_") ? textureName : "",
 	    });
 
 	    this->m_textures[index] = chain;
@@ -788,31 +909,41 @@ void CPass::setupTextureUniforms () {
 	}
     }
 
-    for (const auto& [index, textureName] : this->m_override.usertextures) {
-	try {
-	    auto texture = textureName.find ("_rt_") == 0 || textureName.find ("_alias_") == 0
-		? this->resolveFBO (textureName)
-		: this->getContext ().resolveTexture (textureName);
-
-	    const auto it = this->m_textures.find (index);
-	    const auto chain = std::make_shared<TextureChainEntry> (TextureChainEntry {
-		.texture = texture,
-		.next = it != this->m_textures.end () ? it->second : nullptr,
-	    });
-
-	    this->m_textures[index] = chain;
-	} catch (std::runtime_error& ex) {
-	    sLog.error ("Cannot resolve user texture ", textureName, " for override ", ex.what ());
-	}
+    for (const auto& [index, selector] : this->m_override.usertextures) {
+        if (isMediaSystemTexture (selector)) {
+            const auto it = this->m_textures.find (index);
+            this->m_textures[index] = std::make_shared<TextureChainEntry> (TextureChainEntry {
+                .texture = this->getContext ().resolveTexture (selector.name),
+                .fallbackTexture = selector.name == "$mediaPreviousThumbnail"
+                    ? this->getContext ().resolveTexture ("$mediaThumbnail") : nullptr,
+                .next = it != this->m_textures.end () ? it->second : nullptr,
+            });
+            continue;
+        }
+        if (selector.source != UserTextureSource::Ordinary) {
+            sLog.error ("Unsupported user texture source in pass override: slot=", index, " name=", selector.name,
+                        " source=", selector.source == UserTextureSource::System ? "system" : "usershortcut",
+                        "; retaining authored texture");
+            continue;
+        }
+        const auto* selection = sceneTextureSelection (this->m_renderable, selector.name);
+        if (selection == nullptr) continue;
+        const auto it = this->m_textures.find (index);
+        this->m_textures[index] = std::make_shared<TextureChainEntry> (TextureChainEntry {
+            .texture = nullptr,
+            .next = it != this->m_textures.end () ? it->second : nullptr,
+            .selection = selection,
+        });
     }
 
     // binds are set last as they're the most important to be set
     for (const auto& [index, bind] : this->m_binds) {
-	const auto texture = bind == "previous" ? nullptr : this->resolveFBO (bind);
+	const auto texture = bind == "previous" || bind == "prev" ? nullptr : this->resolveFBO (bind);
 	const auto it = this->m_textures.find (index);
 	const auto chain = std::make_shared<TextureChainEntry> (TextureChainEntry {
 	    .texture = texture,
 	    .next = it != this->m_textures.end () ? it->second : nullptr,
+	    .resourceName = bind == "previous" || bind == "prev" ? "" : bind,
 	});
 
 	this->m_textures[index] = chain;
@@ -838,8 +969,9 @@ void CPass::setupTextureUniforms () {
 
 	namestream << "g_Texture" << textureIndex << "Resolution";
 
-	texture = this->resolveTexture (expectedTexture->texture, textureIndex, texture);
-	this->addUniform (namestream.str (), texture->getResolution ());
+	texture = this->resolveTexture (this->resolveChainTexture (*expectedTexture), textureIndex, texture);
+	this->m_textureResolutions[textureIndex] = *texture->getResolution ();
+	this->addUniform (namestream.str (), &this->m_textureResolutions[textureIndex]);
     }
 
     this->addUniform ("g_Texture0Resolution", &this->m_texture0Resolution);
@@ -851,19 +983,25 @@ void CPass::setupUniforms () {
     const auto& renderable = this->m_renderable;
     const auto& scene = this->m_renderable.getScene ();
     const auto& sceneData = this->m_renderable.getScene ().getScene ();
-    const auto& recorder = this->m_renderable.getScene ().getAudioContext ().getRecorder ();
+    const auto& spectrum = scene.getAudioSpectrum ();
 
     // lighting variables
-    this->addUniform ("g_LightAmbientColor", sceneData.colors.ambient->value->getVec3 ());
-    this->addUniform ("g_LightSkylightColor", sceneData.colors.skylight->value->getVec3 ());
+    this->addUniform ("g_LightAmbientColor", &sceneData.colors.ambient->value->getVec3 ());
+    this->addUniform ("g_LightSkylightColor", &sceneData.colors.skylight->value->getVec3 ());
+    if (scene.getPointLightCount () > 0) {
+	this->addUniform ("g_LPoint_Color", scene.getPointLightColors (), scene.getPointLightCount ());
+	this->addUniform ("g_LPoint_Origin", scene.getPointLightOrigins (), scene.getPointLightCount ());
+    }
+    this->addUniform ("g_LightsPosition", scene.getLegacyLightPositions (), 4);
+    this->addUniform ("g_LightsColorRadius", scene.getLegacyLightColors (), 4);
     // register variables like brightness and alpha with some default value
-    this->addUniform ("g_Brightness", renderable.getBrightness ());
-    this->addUniform ("g_UserAlpha", renderable.getUserAlpha ());
-    this->addUniform ("g_Alpha", renderable.getAlpha ());
-    this->addUniform ("g_Color", renderable.getColor ());
-    this->addUniform ("g_Color4", renderable.getColor4 ());
+    this->addUniform ("g_Brightness", &renderable.getBrightness ());
+    this->addUniform ("g_UserAlpha", &renderable.getUserAlpha ());
+    this->addUniform ("g_Alpha", &renderable.getAlpha ());
+    this->addUniform ("g_Color", &renderable.getColor ());
+    this->addUniform ("g_Color4", &renderable.getColor4 ());
     if (!this->m_uniforms.contains ("g_CompositeColor")) {
-	this->addUniform ("g_CompositeColor", renderable.getCompositeColor ());
+	this->addUniform ("g_CompositeColor", &renderable.getCompositeColor ());
     }
     // add some external variables
     this->addUniform ("g_Time", &g_Time);
@@ -874,20 +1012,20 @@ void CPass::setupUniforms () {
     this->addUniform ("g_EffectModelViewProjectionMatrix", &this->m_modelViewProjectionMatrix);
     this->addUniform ("g_ModelMatrix", &this->m_modelMatrix);
     this->addUniform ("g_EffectModelMatrix", &this->m_modelMatrix);
-    this->addUniform ("g_NormalModelMatrix", glm::identity<glm::mat3> ());
+    this->addUniform ("g_NormalModelMatrix", &this->m_normalModelMatrix);
     this->addUniform ("g_ViewProjectionMatrix", &this->m_viewProjectionMatrix);
     this->addUniform ("g_PointerPosition", scene.getMousePosition ());
     this->addUniform ("g_PointerPositionLast", scene.getMousePositionLast ());
     this->addUniform ("g_EffectTextureProjectionMatrix", glm::mat4 (1.0));
     this->addUniform ("g_EffectTextureProjectionMatrixInverse", glm::mat4 (1.0));
-    this->addUniform ("g_TexelSize", glm::vec2 (1.0 / scene.getWidth (), 1.0 / scene.getHeight ()));
-    this->addUniform ("g_TexelSizeHalf", glm::vec2 (0.5 / scene.getWidth (), 0.5 / scene.getHeight ()));
-    this->addUniform ("g_AudioSpectrum16Left", recorder.audio16, 16);
-    this->addUniform ("g_AudioSpectrum16Right", recorder.audio16, 16);
-    this->addUniform ("g_AudioSpectrum32Left", recorder.audio32, 32);
-    this->addUniform ("g_AudioSpectrum32Right", recorder.audio32, 32);
-    this->addUniform ("g_AudioSpectrum64Left", recorder.audio64, 64);
-    this->addUniform ("g_AudioSpectrum64Right", recorder.audio64, 64);
+    this->addUniform ("g_TexelSize", &m_sceneTexelSize);
+    this->addUniform ("g_TexelSizeHalf", &m_sceneTexelSizeHalf);
+    this->addUniform ("g_AudioSpectrum16Left", spectrum.audio16[0].data (), 16);
+    this->addUniform ("g_AudioSpectrum16Right", spectrum.audio16[1].data (), 16);
+    this->addUniform ("g_AudioSpectrum32Left", spectrum.audio32[0].data (), 32);
+    this->addUniform ("g_AudioSpectrum32Right", spectrum.audio32[1].data (), 32);
+    this->addUniform ("g_AudioSpectrum64Left", spectrum.audio64[0].data (), 64);
+    this->addUniform ("g_AudioSpectrum64Right", spectrum.audio64[1].data (), 64);
 }
 
 void CPass::addAttribute (const std::string& name, GLint type, GLint elements, const GLuint* value) {
@@ -1021,6 +1159,10 @@ void CPass::addUniform (const ShaderVariable* value, const DynamicValue* setting
     } else {
 	sLog.error ("Cannot convert setting dynamic value  to ", value->getName (), ". Using default value");
     }
+    if (value->is<ShaderVariableVector2> ()) {
+        if (const auto it = m_uniforms.find (value->getName ()); it != m_uniforms.end ())
+            it->second->authoredPosition = value->isPosition ();
+    }
 }
 
 void CPass::addUniform (const std::string& name, int value) { this->addUniform (name, UniformType::Integer, value); }
@@ -1057,20 +1199,20 @@ void CPass::addUniform (const std::string& name, glm::vec2 value) {
     this->addUniform (name, UniformType::Vector2, value);
 }
 
-void CPass::addUniform (const std::string& name, const glm::vec2* value) {
-    this->addUniform (name, UniformType::Vector2, value, 1);
+void CPass::addUniform (const std::string& name, const glm::vec2* value, int count) {
+    this->addUniform (name, UniformType::Vector2, value, count);
 }
 
 void CPass::addUniform (const std::string& name, const glm::vec2** value) {
-    this->addUniform (name, UniformType::Vector2, value, 1);
+    this->addUniform (name, UniformType::Vector2, value);
 }
 
 void CPass::addUniform (const std::string& name, glm::vec3 value) {
     this->addUniform (name, UniformType::Vector3, value);
 }
 
-void CPass::addUniform (const std::string& name, const glm::vec3* value) {
-    this->addUniform (name, UniformType::Vector3, value, 1);
+void CPass::addUniform (const std::string& name, const glm::vec3* value, int count) {
+    this->addUniform (name, UniformType::Vector3, value, count);
 }
 
 void CPass::addUniform (const std::string& name, const glm::vec3** value) {
@@ -1081,8 +1223,8 @@ void CPass::addUniform (const std::string& name, const glm::vec4 value) {
     this->addUniform (name, UniformType::Vector4, value);
 }
 
-void CPass::addUniform (const std::string& name, const glm::vec4* value) {
-    this->addUniform (name, UniformType::Vector4, value, 1);
+void CPass::addUniform (const std::string& name, const glm::vec4* value, int count) {
+    this->addUniform (name, UniformType::Vector4, value, count);
 }
 
 void CPass::addUniform (const std::string& name, const glm::vec4** value) {
@@ -1093,8 +1235,8 @@ void CPass::addUniform (const std::string& name, const glm::mat3& value) {
     this->addUniform (name, UniformType::Matrix3, value);
 }
 
-void CPass::addUniform (const std::string& name, const glm::mat3* value) {
-    this->addUniform (name, UniformType::Matrix3, value, 1);
+void CPass::addUniform (const std::string& name, const glm::mat3* value, int count) {
+    this->addUniform (name, UniformType::Matrix3, value, count);
 }
 
 void CPass::addUniform (const std::string& name, const glm::mat3** value) {
@@ -1105,8 +1247,8 @@ void CPass::addUniform (const std::string& name, const glm::mat4 value) {
     this->addUniform (name, UniformType::Matrix4, value);
 }
 
-void CPass::addUniform (const std::string& name, const glm::mat4* value) {
-    this->addUniform (name, UniformType::Matrix4, value, 1);
+void CPass::addUniform (const std::string& name, const glm::mat4* value, int count) {
+    this->addUniform (name, UniformType::Matrix4, value, count);
 }
 
 void CPass::addUniform (const std::string& name, const glm::mat4** value) {

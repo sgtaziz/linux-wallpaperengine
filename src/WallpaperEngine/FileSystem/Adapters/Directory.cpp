@@ -48,8 +48,9 @@ bool DirectoryAdapter::exists (const std::filesystem::path& path) const {
 	}
 
 	return true;
-    } catch (std::filesystem::filesystem_error&) {
-	return false;
+    } catch (const std::filesystem::filesystem_error& e) {
+	if (e.code () == std::errc::no_such_file_or_directory) return false;
+	throw;
     }
 }
 

@@ -9,11 +9,13 @@ using namespace WallpaperEngine::Render;
 using namespace WallpaperEngine::Scripting;
 
 ScriptableObject::ScriptableObject (Wallpapers::CScene& scene, const Object& object) : CObject (scene, object) {
-    // register common dynamic values
-    this->registerProperty ("origin", *object.origin->value);
-    this->registerProperty ("scale", *object.groupScale->value);
-    this->registerProperty ("angles", *object.groupAngles->value);
-    this->registerProperty ("visible", *object.groupVisible->value);
+    // Concrete objects register the values their render/simulation paths read.
+    // Generic group values can differ from typed values with the same name.
+}
+
+ScriptableObject::~ScriptableObject () {
+    m_lifetime->object = nullptr;
+    this->getScene ().getScriptEngine ().unregisterObject (*this);
 }
 
 DynamicValue& ScriptableObject::getProperty (const std::string& name) {
@@ -31,13 +33,14 @@ const std::map<std::string, ScriptableObject::PropertyEntry>& ScriptableObject::
 }
 
 void ScriptableObject::registerProperty (const std::string& name, DynamicValue& value) {
+    const auto existing = this->m_properties.find (name);
+    if (existing != this->m_properties.end ()) {
+	if (&existing->second.value != &value)
+	    sLog.exception ("Conflicting script property '", name, "' on object '", this->getObject ().name, "'");
+	return;
+    }
     auto inserted = this->m_properties.emplace (
 	name, PropertyEntry { .key = name + "_" + std::to_string (this->getId ()), .value = value }
     );
-
-    if (!inserted.second) {
-	return;
-    }
-
     this->getScene ().getScriptEngine ().queueScript (inserted.first->second.key, inserted.first->second.value, *this);
 }

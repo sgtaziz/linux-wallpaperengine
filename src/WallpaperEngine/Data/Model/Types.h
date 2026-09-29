@@ -16,6 +16,8 @@ struct ImageAnimationLayer;
 class Object;
 class Sound;
 class Image;
+class SceneModel;
+class ScenePointLight;
 struct ImageEffect;
 struct ImageEffectPassOverride;
 class Particle;
@@ -49,6 +51,8 @@ using VideoUniquePtr = std::unique_ptr<Video>;
 using ObjectUniquePtr = std::unique_ptr<Object>;
 using SoundUniquePtr = std::unique_ptr<Sound>;
 using ImageUniquePtr = std::unique_ptr<Image>;
+using SceneModelUniquePtr = std::unique_ptr<SceneModel>;
+using ScenePointLightUniquePtr = std::unique_ptr<ScenePointLight>;
 using ParticleUniquePtr = std::unique_ptr<Particle>;
 using TextUniquePtr = std::unique_ptr<Text>;
 using MaterialUniquePtr = std::unique_ptr<Material>;
@@ -64,4 +68,14 @@ using ModelUniquePtr = std::unique_ptr<ModelStruct>;
 using ObjectList = std::vector<ObjectUniquePtr>;
 using ComboMap = std::map<std::string, int>;
 using TextureMap = std::map<int, std::string>;
+
+enum class UserTextureSource { Ordinary = 0, System = 1, UserShortcut = 2 };
+
+struct UserTextureSelector {
+    std::string name;
+    UserTextureSource source = UserTextureSource::Ordinary;
+    bool keepAspect = false;
+};
+
+using UserTextureMap = std::map<int, UserTextureSelector>;
 }

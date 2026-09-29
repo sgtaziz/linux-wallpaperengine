@@ -3,9 +3,13 @@
 #include <chrono>
 #include <functional>
 #include <map>
+#include <memory>
+#include <optional>
+#include <cstdint>
 #include <string>
 
 namespace WallpaperEngine::Media {
+struct MediaArtwork;
 class MediaSource {
 public:
     enum PlaybackState {
@@ -20,6 +24,8 @@ public:
 	std::string artist;
 	std::string album;
 	std::optional<std::string> url;
+	bool thumbnailAvailable = false;
+	std::shared_ptr<const MediaArtwork> artwork;
 	double duration;
 	double position;
 	bool available;

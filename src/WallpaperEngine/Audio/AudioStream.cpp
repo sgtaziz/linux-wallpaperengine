@@ -9,14 +9,14 @@
 using namespace WallpaperEngine::Audio;
 
 int audio_read_thread (void* arg) {
-    SDL_mutex* waitMutex = SDL_CreateMutex ();
     auto* stream = static_cast<AudioStream*> (arg);
     AVPacket* packet = av_packet_alloc ();
-    int ret = 0;
-
-    if (waitMutex == nullptr) {
-	sLog.exception ("Cannot create mutex for audio playback waiting");
+    if (packet == nullptr) {
+	stream->markReaderFinished ();
+	return AVERROR (ENOMEM);
     }
+    int ret = 0;
+    bool queuedSinceSeek = false;
 
     while (ret >= 0 && stream->getAudioContext ().getApplicationContext ().state.general.keepRunning
 	   && stream->isInitialized ()) {
@@ -24,37 +24,38 @@ int audio_read_thread (void* arg) {
 	if (stream->getQueueSize () >= MAX_QUEUE_SIZE
 	    || (stream->getQueuePacketCount () > MIN_FRAMES
 		&& (av_q2d (stream->getTimeBase ()) * stream->getQueueDuration () > 1.0))) {
-	    SDL_LockMutex (waitMutex);
-	    SDL_CondWaitTimeout (stream->getWaitCondition (), waitMutex, 10);
-	    SDL_UnlockMutex (waitMutex);
+	    SDL_Delay (10);
 	    continue;
 	}
 
 	ret = av_read_frame (stream->getFormatContext (), packet);
 
 	if (ret == AVERROR_EOF) {
-	    // seek to the beginning of the file again
-	    avformat_seek_file (stream->getFormatContext (), stream->getAudioStream (), 0, 0, 0, ~AVSEEK_FLAG_FRAME);
-	    avcodec_flush_buffers (stream->getContext ());
-
-	    // ensure the thread is not killed if audio has to be looped
-	    if (stream->isRepeat ()) {
-		ret = 0;
+	    if (stream->isRepeat () && queuedSinceSeek
+	        && avformat_seek_file (stream->getFormatContext (), stream->getAudioStream (), 0, 0, 0,
+	                               ~AVSEEK_FLAG_FRAME) >= 0) {
+	        // The marker orders decoder draining and reset after all packets
+	        // from this pass; the reader never touches the codec context.
+	        stream->queueLoopBoundary ();
+	        queuedSinceSeek = false;
+	        ret = 0;
+	        continue;
 	    }
-
-	    continue;
+	    break;
 	}
+	if (ret < 0) break;
 
 	// TODO: PROPERLY IMPLEMENT THIS
 	if (packet->stream_index == stream->getAudioStream ()) {
 	    stream->queuePacket (packet);
+	    queuedSinceSeek = true;
 	} else {
 	    av_packet_unref (packet);
 	}
     }
 
-    // stop the audio too just in case
-    SDL_DestroyMutex (waitMutex);
+    av_packet_free (&packet);
+    stream->markReaderFinished ();
 
     return 0;
 }
@@ -106,11 +107,13 @@ int64_t audio_seek_data_callback (void* streamarg, int64_t offset, int whence) {
     return 0;
 }
 
-AudioStream::AudioStream (AudioContext& context, const std::string& filename) : m_audioContext (context) {
+AudioStream::AudioStream (AudioContext& context, const std::string& filename, bool repeat) :
+    m_audioContext (context), m_repeat (repeat) {
     this->loadCustomContent (filename.c_str ());
 }
 
-AudioStream::AudioStream (AudioContext& context, const ReadStreamSharedPtr& buffer) : m_audioContext (context) {
+AudioStream::AudioStream (AudioContext& context, const ReadStreamSharedPtr& buffer, bool repeat) :
+    m_audioContext (context), m_repeat (repeat) {
     // setup a custom context first
     this->m_formatContext = avformat_alloc_context ();
 
@@ -143,16 +146,25 @@ AudioStream::~AudioStream () {
     // stop the audio
     this->stop ();
 
-    if (this->m_audioThread != nullptr) {
-	// wait for the thread to finish
-	SDL_WaitThread (this->m_audioThread, nullptr);
-    }
-
-    this->m_audioThread = nullptr;
-
     if (this->m_queue != nullptr) {
-	// wait for the audio buffers to be done
-	SDL_CondWait (this->m_queue->wait, this->m_queue->mutex);
+	// The driver removes this stream before destruction, so no callback can
+	// access the queue. The read thread has now joined; nothing remains to
+	// wait for here.
+	if (this->m_queue->packetList != nullptr) {
+	    MyAVPacketList queued {};
+#if FF_API_FIFO_OLD_API
+	    while (av_fifo_size (this->m_queue->packetList) >= static_cast<int> (sizeof (queued))) {
+		if (av_fifo_generic_read (this->m_queue->packetList, &queued, sizeof (queued), nullptr) < 0) {
+		    break;
+		}
+		av_packet_free (&queued.packet);
+	    }
+#else
+	    while (av_fifo_read (this->m_queue->packetList, &queued, 1) >= 0) {
+		av_packet_free (&queued.packet);
+	    }
+#endif
+	}
     }
 
     if (this->m_swrctx != nullptr && swr_is_initialized (this->m_swrctx) == true) {
@@ -176,7 +188,10 @@ AudioStream::~AudioStream () {
 #endif /* FF_API_FIFO_OLD_API */
     }
 
-    delete this->m_queue;
+    if (this->m_queue != nullptr) {
+	if (this->m_queue->mutex != nullptr) SDL_DestroyMutex (this->m_queue->mutex);
+	delete this->m_queue;
+    }
 
     if (this->m_formatContext != nullptr) {
 	avformat_free_context (this->m_formatContext);
@@ -304,8 +319,6 @@ void AudioStream::initialize () {
 
     // setup the queue information
     this->m_queue->mutex = SDL_CreateMutex ();
-    this->m_queue->cond = SDL_CreateCond ();
-    this->m_queue->wait = SDL_CreateCond ();
 
     this->m_decodeFrame = av_frame_alloc ();
     this->m_decodePacket = av_packet_alloc ();
@@ -336,8 +349,14 @@ void AudioStream::queuePacket (AVPacket* pkt) {
     SDL_UnlockMutex (this->m_queue->mutex);
 
     if (!gotQueued) {
-	av_packet_free (&pkt);
+	av_packet_free (&clone);
     }
+}
+
+void AudioStream::queueLoopBoundary () {
+    SDL_LockMutex (this->m_queue->mutex);
+    this->doQueue (nullptr);
+    SDL_UnlockMutex (this->m_queue->mutex);
 }
 
 bool AudioStream::doQueue (AVPacket* pkt) {
@@ -359,20 +378,17 @@ bool AudioStream::doQueue (AVPacket* pkt) {
 #endif
 
     this->m_queue->nb_packets++;
-    this->m_queue->size += entry.packet->size + sizeof (entry);
-    this->m_queue->duration += entry.packet->duration;
-
-    SDL_CondSignal (this->m_queue->cond);
+    this->m_queue->size += (entry.packet ? entry.packet->size : 0) + sizeof (entry);
+    if (entry.packet) this->m_queue->duration += entry.packet->duration;
 
     return true;
 }
 
-void AudioStream::dequeuePacket () {
+bool AudioStream::dequeuePacket () {
     MyAVPacketList entry {};
 
     SDL_LockMutex (this->m_queue->mutex);
 
-    while (this->m_audioContext.getApplicationContext ().state.general.keepRunning) {
 #if FF_API_FIFO_OLD_API
 	int ret = -1;
 
@@ -383,23 +399,21 @@ void AudioStream::dequeuePacket () {
 	const int ret = av_fifo_read (this->m_queue->packetList, &entry, 1);
 #endif
 
-	// enough data available, read it
 	if (ret >= 0) {
 	    this->m_queue->nb_packets--;
-	    this->m_queue->size -= entry.packet->size + sizeof (entry);
-	    this->m_queue->duration -= entry.packet->duration;
+	    this->m_queue->size -= (entry.packet ? entry.packet->size : 0) + sizeof (entry);
+	    if (entry.packet) this->m_queue->duration -= entry.packet->duration;
 
-	    // move the reference and free the old one
-	    av_packet_move_ref (this->m_decodePacket, entry.packet);
-	    av_packet_free (&entry.packet);
-	    break;
+	    if (entry.packet) {
+		av_packet_move_ref (this->m_decodePacket, entry.packet);
+		av_packet_free (&entry.packet);
+	    } else {
+		this->m_loopBoundaryPending = true;
+	    }
 	}
 
-	// make the thread wait if nothing was available
-	SDL_CondWait (this->m_queue->cond, this->m_queue->mutex);
-    }
-
     SDL_UnlockMutex (this->m_queue->mutex);
+    return ret >= 0;
 }
 
 AVCodecContext* AudioStream::getContext () const { return this->m_context; }
@@ -416,11 +430,19 @@ bool AudioStream::isRepeat () const { return this->m_repeat; }
 
 ReadStreamSharedPtr& AudioStream::getBuffer () { return this->m_buffer; }
 
-SDL_cond* AudioStream::getWaitCondition () const { return this->m_queue->wait; }
+size_t AudioStream::getQueueSize () const {
+    SDL_LockMutex (this->m_queue->mutex);
+    const auto result = this->m_queue->size;
+    SDL_UnlockMutex (this->m_queue->mutex);
+    return result;
+}
 
-size_t AudioStream::getQueueSize () const { return this->m_queue->size; }
-
-int AudioStream::getQueuePacketCount () const { return this->m_queue->nb_packets; }
+int AudioStream::getQueuePacketCount () const {
+    SDL_LockMutex (this->m_queue->mutex);
+    const auto result = this->m_queue->nb_packets;
+    SDL_UnlockMutex (this->m_queue->mutex);
+    return result;
+}
 
 AVRational AudioStream::getTimeBase () const {
     if (this->m_audioStream == NO_AUDIO_STREAM) {
@@ -430,192 +452,134 @@ AVRational AudioStream::getTimeBase () const {
     return this->m_formatContext->streams[this->m_audioStream]->time_base;
 }
 
-int64_t AudioStream::getQueueDuration () const { return this->m_queue->duration; }
+int64_t AudioStream::getQueueDuration () const {
+    SDL_LockMutex (this->m_queue->mutex);
+    const auto result = this->m_queue->duration;
+    SDL_UnlockMutex (this->m_queue->mutex);
+    return result;
+}
 
-bool AudioStream::isQueueEmpty () const { return this->m_queue->nb_packets == 0; }
+bool AudioStream::isQueueEmpty () const { return this->getQueuePacketCount () == 0; }
 
 SDL_mutex* AudioStream::getMutex () const { return this->m_queue->mutex; }
 
 void AudioStream::stop () {
-    if (!this->isInitialized ()) {
-	return;
-    }
-
-    // stop the threads running
     this->m_initialized = false;
+    if (this->m_audioThread != nullptr) {
+	SDL_WaitThread (this->m_audioThread, nullptr);
+	this->m_audioThread = nullptr;
+    }
 }
 
-int AudioStream::resampleAudio (uint8_t* out_buf, const int out_size) {
-    int out_linesize = 0;
-    int ret;
-    int out_nb_channels;
-    int out_nb_samples;
-    uint8_t** resampled_data = nullptr;
-    int resampled_data_size;
+void AudioStream::markReaderFinished () { this->m_readerFinished = true; }
 
-    // retrieve number of audio samples (per channel)
-    const int in_nb_samples = this->m_decodeFrame->nb_samples;
-    if (in_nb_samples <= 0) {
-	sLog.error ("in_nb_samples error.");
-	return -1;
-    }
+bool AudioStream::hasReaderFinished () const { return this->m_readerFinished; }
 
-    int max_out_nb_samples = out_nb_samples = av_rescale_rnd (
-	in_nb_samples, this->m_audioContext.getSampleRate (), this->getContext ()->sample_rate, AV_ROUND_UP
+uint64_t AudioStream::getCompletedLoopCount () const { return this->m_completedLoops; }
+
+void AudioStream::setVolume (float volume) {
+    this->m_volume = std::isfinite (volume) ? std::clamp (volume, 0.0f, 1.0f) : 0.0f;
+}
+
+float AudioStream::getMixerGain () const {
+    const float volume = this->m_volume;
+    return volume * volume;
+}
+
+void AudioStream::setPaused (bool paused) { this->m_paused = paused; }
+
+bool AudioStream::isPaused () const { return this->m_paused; }
+
+bool AudioStream::isPlaybackFinished () const { return this->m_playbackFinished; }
+
+int AudioStream::resampleAudio (uint8_t* out_buf, const int out_size, bool drain) {
+    const int inputSamples = drain ? 0 : this->m_decodeFrame->nb_samples;
+    const int inputRate = this->m_context->sample_rate;
+    const int outputChannels = this->m_audioContext.getChannels ();
+    if ((!drain && inputSamples <= 0) || inputRate <= 0 || outputChannels <= 0 || out_size <= 0) return -1;
+
+    const int outputSamples = av_rescale_rnd (
+	swr_get_delay (this->m_swrctx, inputRate) + inputSamples,
+	this->m_audioContext.getSampleRate (), inputRate, AV_ROUND_UP
     );
+    if (outputSamples <= 0) return -1;
 
-    // check rescaling was successful
-    if (max_out_nb_samples <= 0) {
-	sLog.error ("av_rescale_rnd error.");
-	return -1;
-    }
-
-    // get number of output audio channels
-#if FF_API_OLD_CHANNEL_LAYOUT
-    int64_t out_channel_layout;
-
-    // set output audio channels based on the input audio channels
-    switch (this->m_audioContext.getChannels ()) {
-	case 1:
-	    out_channel_layout = AV_CH_LAYOUT_MONO;
-	    break;
-	case 2:
-	    out_channel_layout = AV_CH_LAYOUT_STEREO;
-	    break;
-	default:
-	    out_channel_layout = AV_CH_LAYOUT_SURROUND;
-	    break;
-    }
-
-    out_nb_channels = av_get_channel_layout_nb_channels (out_channel_layout);
-#else
-    out_nb_channels = this->getContext ()->ch_layout.nb_channels;
-#endif
-    ret = av_samples_alloc_array_and_samples (
-	&resampled_data, &out_linesize, out_nb_channels, out_nb_samples, this->m_audioContext.getFormat (), 0
+    uint8_t** converted = nullptr;
+    int lineSize = 0;
+    const int allocated = av_samples_alloc_array_and_samples (
+	&converted, &lineSize, outputChannels, outputSamples, this->m_audioContext.getFormat (), 0
     );
+    if (allocated < 0) return -1;
 
-    if (ret < 0) {
-	sLog.error ("av_samples_alloc_array_and_samples() error: Could not allocate destination samples.");
-	return -1;
-    }
-
-    // retrieve output samples number taking into account the progressive delay
-    out_nb_samples = av_rescale_rnd (
-	swr_get_delay (this->m_swrctx, this->getContext ()->sample_rate) + in_nb_samples,
-	this->m_audioContext.getSampleRate (), this->getContext ()->sample_rate, AV_ROUND_UP
+    const int produced = swr_convert (
+	this->m_swrctx, converted, outputSamples,
+	drain ? nullptr : const_cast<const uint8_t**> (this->m_decodeFrame->data), inputSamples
     );
-
-    // check output samples number was correctly retrieved
-    if (out_nb_samples <= 0) {
-	sLog.error ("av_rescale_rnd error");
-	return -1;
-    }
-
-    if (out_nb_samples > max_out_nb_samples) {
-	// free memory block and set pointer to NULL
-	av_freep (&resampled_data[0]);
-
-	// Allocate a samples buffer for out_nb_samples samples
-	ret = av_samples_alloc (
-	    resampled_data, &out_linesize, out_nb_channels, out_nb_samples, this->m_audioContext.getFormat (), 1
-	);
-
-	// check samples buffer correctly allocated
-	if (ret < 0) {
-	    sLog.error ("av_samples_alloc failed.");
-	    return -1;
+    const int bytes = produced < 0 ? produced : av_samples_get_buffer_size (
+	&lineSize, outputChannels, produced, this->m_audioContext.getFormat (), 1
+    );
+    if (bytes > 0) {
+	const int copied = std::min (bytes, out_size);
+	memcpy (out_buf, converted[0], copied);
+	if (copied < bytes) {
+	    this->m_pendingOutput.assign (converted[0] + copied, converted[0] + bytes);
+	    this->m_pendingOutputOffset = 0;
 	}
-
-	max_out_nb_samples = out_nb_samples;
     }
 
-    // do the actual audio data resampling
-    ret = swr_convert (
-	this->m_swrctx, resampled_data, max_out_nb_samples, const_cast<const uint8_t**> (this->m_decodeFrame->data),
-	this->m_decodeFrame->nb_samples
-    );
-
-    // check audio conversion was successful
-    if (ret < 0) {
-	sLog.error ("swr_convert_error.");
-	return -1;
-    }
-
-    // Get the required buffer size for the given audio parameters
-    resampled_data_size
-	= av_samples_get_buffer_size (&out_linesize, out_nb_channels, ret, this->m_audioContext.getFormat (), 1);
-
-    // check audio buffer size
-    if (resampled_data_size < 0) {
-	sLog.error ("av_samples_get_buffer_size error.");
-	return -1;
-    }
-
-    // copy the resampled data to the output buffer up to out_size bytes
-    memcpy (out_buf, resampled_data[0], std::min (resampled_data_size, out_size));
-
-    // memory cleanup
-    if (resampled_data) {
-	// free memory block and set pointer to NULL
-	av_freep (&resampled_data[0]);
-    }
-
-    av_freep (&resampled_data);
-
-    return resampled_data_size;
+    av_freep (&converted[0]);
+    av_freep (&converted);
+    return bytes > 0 ? std::min (bytes, out_size) : -1;
 }
 
 int AudioStream::decodeFrame (uint8_t* audioBuffer, const int bufferSize) {
-    static int audio_pkt_size = 0;
-
-    // block until there's any data in the buffers
-    while (this->m_audioContext.getApplicationContext ().state.general.keepRunning) {
-	while (audio_pkt_size > 0 && this->m_audioContext.getApplicationContext ().state.general.keepRunning) {
-	    int got_frame = 0;
-	    int ret = avcodec_receive_frame (this->getContext (), this->m_decodeFrame);
-
-	    if (ret == 0) {
-		got_frame = 1;
+    // The audio callback must never wait for the asynchronous read thread
+    // while holding the driver's stream-list mutex.
+    while (this->isInitialized () && this->m_audioContext.getApplicationContext ().state.general.keepRunning) {
+	if (this->m_pendingOutputOffset < this->m_pendingOutput.size ()) {
+	    const int copied = std::min<size_t> (bufferSize, this->m_pendingOutput.size () - this->m_pendingOutputOffset);
+	    memcpy (audioBuffer, this->m_pendingOutput.data () + this->m_pendingOutputOffset, copied);
+	    this->m_pendingOutputOffset += copied;
+	    if (this->m_pendingOutputOffset == this->m_pendingOutput.size ()) {
+		this->m_pendingOutput.clear ();
+		this->m_pendingOutputOffset = 0;
 	    }
-	    if (ret == AVERROR (EAGAIN)) {
-		ret = 0;
-	    }
-	    if (ret == 0) {
-		ret = avcodec_send_packet (this->getContext (), this->m_decodePacket);
-	    }
-	    if (ret < 0 && ret != AVERROR (EAGAIN)) {
+	    return copied;
+	}
+	const int received = avcodec_receive_frame (this->m_context, this->m_decodeFrame);
+	if (received == 0) return this->resampleAudio (audioBuffer, bufferSize);
+	if (received == AVERROR_EOF) {
+	    const int tailBytes = this->resampleAudio (audioBuffer, bufferSize, true);
+	    if (tailBytes > 0) return tailBytes;
+	    if (!this->m_loopBoundaryPending) {
+		this->m_playbackFinished = true;
 		return -1;
 	    }
+	    avcodec_flush_buffers (this->m_context);
+	    swr_close (this->m_swrctx);
+	    if (swr_init (this->m_swrctx) < 0) return -1;
+	    this->m_decoderDraining = false;
+	    this->m_loopBoundaryPending = false;
+	    ++this->m_completedLoops;
+	    continue;
+	}
+	if (received != AVERROR (EAGAIN)) return -1;
 
-	    if (this->m_decodePacket->size < 0) {
-		// if error, skip frame
-		audio_pkt_size = 0;
-		break;
-	    }
-
-	    audio_pkt_size -= this->m_decodePacket->size;
-	    int data_size = 0;
-
-	    if (got_frame) {
-		// audio resampling
-		data_size = this->resampleAudio (audioBuffer, bufferSize);
-	    }
-	    if (data_size <= 0) {
-		// no data found, keep waiting
+	if (this->dequeuePacket ()) {
+	    if (this->m_loopBoundaryPending) {
+		this->m_decoderDraining = true;
+		if (avcodec_send_packet (this->m_context, nullptr) < 0) return -1;
 		continue;
 	    }
-	    // some data was found
-	    return data_size;
-	}
-
-	if (this->m_decodePacket->data) {
+	    const int sent = avcodec_send_packet (this->m_context, this->m_decodePacket);
 	    av_packet_unref (this->m_decodePacket);
+	    if (sent < 0) return -1;
+	    continue;
 	}
 
-	this->dequeuePacket ();
-
-	audio_pkt_size = this->m_decodePacket->size;
+	if (!this->m_readerFinished || this->m_decoderDraining) return -1;
+	this->m_decoderDraining = true;
+	if (avcodec_send_packet (this->m_context, nullptr) < 0) return -1;
     }
 
     return 0;

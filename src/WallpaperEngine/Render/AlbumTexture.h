@@ -5,6 +5,7 @@
 #include "WallpaperEngine/Media/MediaSource.h"
 
 namespace WallpaperEngine::Render {
+void uploadAlbumArtworkTexture (GLuint texture, const Media::MediaArtwork* artwork);
 class AlbumTexture : public TextureProvider, public Helpers::ContextAware {
 public:
     explicit AlbumTexture (RenderContext& context);
@@ -29,7 +30,7 @@ public:
     void decrementUsageCount () const override;
     void update () const override;
 
-    void copyContents (const TextureProvider& other) const noexcept;
+    void copyContents (const AlbumTexture& other) const noexcept;
     void load () const;
     bool isReady () const override;
 
@@ -39,5 +40,6 @@ private:
     mutable uint32_t m_width = 0;
     mutable uint32_t m_height = 0;
     GLuint m_textureID = GL_NONE;
+    mutable std::shared_ptr<const Media::MediaArtwork> m_artwork;
 };
 }

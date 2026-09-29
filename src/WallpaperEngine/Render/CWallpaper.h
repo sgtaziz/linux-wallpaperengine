@@ -157,14 +157,29 @@ protected:
     /**
      * Setups OpenGL's framebuffers for ping-pong and scene rendering
      */
-    void setupFramebuffers ();
+    void setupFramebuffers (TextureFormat format = TextureFormat_ARGB8888);
+
+    struct HdrBloomSettings {
+	float strength = 2.0f;
+	float threshold = 1.0f;
+	float feather = 0.1f;
+	float scatter = 1.619f;
+	int iterations = 8;
+	glm::vec3 tint {1.0f};
+    };
+    /** Configure native-style float bloom pyramid and SDR output combine. */
+    void setHdrPresentation (const HdrBloomSettings& settings);
+    void resizeHdrPresentation (uint32_t width, uint32_t height);
+    void updateHdrBloomSettings (const HdrBloomSettings& settings);
+    void combineHdrFrame ();
 
     const Wallpaper& m_wallpaperData;
 
     [[nodiscard]] const Wallpaper& getWallpaperData () const;
 
     /** The FBO used for scene output */
-    std::shared_ptr<const CFBO> m_sceneFBO = nullptr;
+    std::shared_ptr<CFBO> m_sceneFBO = nullptr;
+    std::shared_ptr<CFBO> m_hdrOutput = nullptr;
 
     GLuint m_vaoBuffer = GL_NONE;
 
@@ -173,6 +188,19 @@ private:
     GLuint m_texCoordBuffer = GL_NONE;
     GLuint m_positionBuffer = GL_NONE;
     GLuint m_shader = GL_NONE;
+    GLuint m_hdrShader = GL_NONE;
+    GLuint m_hdrPyramidShader = GL_NONE;
+    GLuint m_hdrPositionBuffer = GL_NONE;
+    std::shared_ptr<const CFBO> m_hdrBloom = nullptr;
+    std::vector<std::shared_ptr<CFBO>> m_hdrPyramid;
+    HdrBloomSettings m_hdrBloomSettings;
+    size_t m_hdrActiveLevels = 0;
+    bool m_hdrPeekDone = false;
+    GLint m_hdrTexture0 = GL_NONE;
+    GLint m_hdrTexture1 = GL_NONE;
+    GLint m_hdrTexelSize = GL_NONE;
+    GLint m_hdrPosition = GL_NONE;
+    GLint m_hdrTexCoord = GL_NONE;
     // shader variables
     GLint g_Texture0 = GL_NONE;
     GLint a_Position = GL_NONE;

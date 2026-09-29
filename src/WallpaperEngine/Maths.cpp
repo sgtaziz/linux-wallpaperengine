@@ -3,17 +3,17 @@
 using namespace WallpaperEngine::Maths;
 
 float WallpaperEngine::Maths::randomFloat (std::mt19937& rng, float min, float max) {
-    if (max < min) {
-	std::swap (min, max);
-    }
-    std::uniform_real_distribution<float> dist (min, max);
-    return dist (rng);
+    // Native particle range helpers consume one MT word even for equal bounds.
+    // Their top-24-bit conversion also preserves reversed authored ranges.
+    const float top24 = static_cast<float> (rng () >> 8);
+    return ((max - min) * top24) * (1.0f / 16777216.0f) + min;
 }
 
 glm::vec3 WallpaperEngine::Maths::randomVec3 (std::mt19937& rng, const glm::vec3& min, const glm::vec3& max) {
-    return glm::vec3 (
-	randomFloat (rng, min.x, max.x), randomFloat (rng, min.y, max.y), randomFloat (rng, min.z, max.z)
-    );
+    const float x = randomFloat (rng, min.x, max.x);
+    const float y = randomFloat (rng, min.y, max.y);
+    const float z = randomFloat (rng, min.z, max.z);
+    return { x, y, z };
 }
 
 // Helper: Linear interpolation

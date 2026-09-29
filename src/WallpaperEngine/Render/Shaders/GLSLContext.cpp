@@ -132,6 +132,10 @@ GLSLContext& GLSLContext::get () {
 }
 
 std::pair<std::string, std::string> GLSLContext::toGlsl (const std::string& vertex, const std::string& fragment) {
+    // Translation depends on both complete sources: combos, texture declarations and
+    // override constants are already embedded before this call. Never cache failures.
+    std::pair<std::string, std::string> key {vertex, fragment};
+    if (const auto* found = m_translations.find (key)) return *found;
     glslang::TShader vertexShader (EShLangVertex);
 
     const char* vertexSource = vertex.c_str ();
@@ -188,8 +192,12 @@ std::pair<std::string, std::string> GLSLContext::toGlsl (const std::string& vert
     options.es = false;
     fragmentCompiler.set_common_options (options);
 
-    return { vertexCompiler.compile () + "#if 0\n" + vertex + "\n#endif",
-	     fragmentCompiler.compile () + "#if 0\n" + fragment + "\n#endif" };
+    std::pair<std::string, std::string> result {
+	vertexCompiler.compile () + "#if 0\n" + vertex + "\n#endif",
+	fragmentCompiler.compile () + "#if 0\n" + fragment + "\n#endif"
+    };
+    m_translations.insert (std::move (key), result);
+    return result;
 }
 
 std::unique_ptr<GLSLContext> GLSLContext::sInstance = nullptr;

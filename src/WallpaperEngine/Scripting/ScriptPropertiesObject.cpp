@@ -6,10 +6,12 @@
 #include "WallpaperEngine/Data/Utils/ScopeGuard.h"
 #include "WallpaperEngine/Render/Wallpapers/CScene.h"
 
+#include <stdexcept>
+
 using namespace WallpaperEngine::Scripting;
 
 static uint32_t ScriptPropertiesObjectInstanceId = 0;
-std::map<uint32_t, ScriptPropertiesObject&> scriptPropertiesObjectInstances;
+std::map<uint32_t, ScriptPropertiesObject*> scriptPropertiesObjectInstances;
 
 struct OpaqueScriptPropertiesInstance {
     ScriptPropertiesObject& object;
@@ -20,10 +22,29 @@ struct OpaqueScriptProperties {
     ScriptPropertiesObject& object;
 };
 
-JSValue scriptproperties_property_get (JSContext* ctx, JSValueConst obj_val, JSAtom atom, JSValueConst receiver) {
-    JSClassID classId = 0;
+static OpaqueScriptProperties* creatorContainer (JSValueConst value) {
+    const JSClassID id = JS_GetClassID (value);
+    for (const auto& [owner, object] : scriptPropertiesObjectInstances) {
+	if (object->getCreatorClassId () != id) continue;
+	auto* container = static_cast<OpaqueScriptProperties*> (JS_GetOpaque (value, id));
+	return container && &container->object == object ? container : nullptr;
+    }
+    return nullptr;
+}
 
-    auto* container = static_cast<OpaqueScriptPropertiesInstance*> (JS_GetAnyOpaque (obj_val, &classId));
+static OpaqueScriptPropertiesInstance* propertiesContainer (JSValueConst value) {
+    const JSClassID id = JS_GetClassID (value);
+    for (const auto& [owner, object] : scriptPropertiesObjectInstances) {
+	if (object->getPropertiesClassId () != id) continue;
+	auto* container = static_cast<OpaqueScriptPropertiesInstance*> (JS_GetOpaque (value, id));
+	return container && &container->object == object ? container : nullptr;
+    }
+    return nullptr;
+}
+
+JSValue scriptproperties_property_get (JSContext* ctx, JSValueConst obj_val, JSAtom atom, JSValueConst receiver) {
+    auto* container = propertiesContainer (obj_val);
+    if (!container) return JS_ThrowTypeError (ctx, "Invalid script properties object");
 
     const char* name = JS_AtomToCString (ctx, atom);
 
@@ -43,27 +64,28 @@ JSValue scriptproperties_property_get (JSContext* ctx, JSValueConst obj_val, JSA
 
 	return container->object.getEngine ().dynamicToJs (*it->second->value);
     } catch (const std::exception& e) {
-	return JS_EXCEPTION;
+	return JS_ThrowTypeError (ctx, "Cannot read script property %s: %s", name, e.what ());
     }
 }
 
 int scriptproperties_property_set (
     JSContext* ctx, JSValueConst obj_val, JSAtom atom, JSValueConst val, JSValueConst receiver, int flags
 ) {
-    // do not support setting properties
+    JS_ThrowTypeError (ctx, "Script properties are read-only");
     return -1;
 }
 
 JSValue scriptpropertiescreator_add (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
+    if (!creatorContainer (this_val)) return JS_ThrowTypeError (ctx, "Invalid script properties creator");
     // no need to do anything, any add call should just return itself
     // we'll set them either way as what comes in the DynamicValue
     // TODO: PROPERLY IMPLEMENT THIS CHAIN AT SOME POINT
-    return this_val;
+    return JS_DupValue (ctx, this_val);
 }
 
 JSValue scriptpropertiescreator_finish (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
-    JSClassID classId = 0;
-    const auto container = static_cast<OpaqueScriptProperties*> (JS_GetAnyOpaque (this_val, &classId));
+    const auto* container = creatorContainer (this_val);
+    if (!container) return JS_ThrowTypeError (ctx, "Invalid script properties creator");
 
     // get all the properties and set the right values
     const auto* module = container->object.getEngine ().getRunningModule ();
@@ -95,18 +117,20 @@ void scriptproperties_finalizer (JSRuntime* rt, JSValueConst val) {
     delete static_cast<OpaqueScriptPropertiesInstance*> (JS_GetAnyOpaque (val, &classId));
 }
 
-JSValue
-scriptpropertiescreator_create (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv, int magic) {
-    const auto instance = scriptPropertiesObjectInstances.find (magic);
+JSValue scriptpropertiescreator_create (JSContext* ctx, JSValueConst this_val, int argc,
+	JSValueConst* argv, int magic, JSValueConst* data) {
+    uint32_t owner = 0;
+    if (JS_ToUint32 (ctx, &owner, data[0]) < 0) return JS_EXCEPTION;
+    const auto instance = scriptPropertiesObjectInstances.find (owner);
 
     if (instance == scriptPropertiesObjectInstances.end ()) {
 	return JS_UNDEFINED;
     }
 
-    JSValue creator = JS_NewObjectClass (ctx, instance->second.getCreatorClassId ());
+    JSValue creator = JS_NewObjectClass (ctx, instance->second->getCreatorClassId ());
 
     // setup the current script properties creator
-    JS_SetOpaque (creator, new OpaqueScriptProperties { .object = instance->second });
+    JS_SetOpaque (creator, new OpaqueScriptProperties { .object = *instance->second });
 
     return creator;
 }
@@ -114,7 +138,8 @@ scriptpropertiescreator_create (JSContext* ctx, JSValueConst this_val, int argc,
 ScriptPropertiesObject::ScriptPropertiesObject (ScriptEngine& engine, Render::Wallpapers::CScene& scene) :
     m_scene (scene), m_engine (engine), m_instanceId (++ScriptPropertiesObjectInstanceId), m_creatorClassId (0),
     m_propertiesClassId (0) {
-    scriptPropertiesObjectInstances.emplace (this->m_instanceId, *this);
+    if (m_instanceId == 0) throw std::overflow_error ("too many script properties owners");
+    scriptPropertiesObjectInstances.emplace (this->m_instanceId, this);
 
     this->m_exoticMethods = {
 	.get_property = scriptproperties_property_get,
@@ -166,20 +191,20 @@ ScriptPropertiesObject::ScriptPropertiesObject (ScriptEngine& engine, Render::Wa
 	this->m_engine.getContext (), this->m_creatorPrototype, "finish",
 	JS_NewCFunction (this->m_engine.getContext (), scriptpropertiescreator_finish, "finish", 0), JS_PROP_ENUMERABLE
     );
+    JSValue owner[] = {JS_NewUint32 (this->m_engine.getContext (), m_instanceId)};
     JS_DefinePropertyValueStr (
 	this->m_engine.getContext (), this->m_engine.getGlobalThis (), "createScriptProperties",
-	JS_NewCFunctionMagic (
-	    this->m_engine.getContext (), scriptpropertiescreator_create, "createScriptProperties", 0, JS_CFUNC_generic,
-	    m_instanceId
-	),
+	JS_NewCFunctionData (this->m_engine.getContext (), scriptpropertiescreator_create, 0, 0, 1, owner),
 	JS_PROP_ENUMERABLE
     );
+    JS_FreeValue (this->m_engine.getContext (), owner[0]);
 
     JS_SetClassProto (this->m_engine.getContext (), this->m_propertiesClassId, this->m_propertiesPrototype);
     JS_SetClassProto (this->m_engine.getContext (), this->m_creatorClassId, this->m_creatorPrototype);
 }
 
 ScriptPropertiesObject::~ScriptPropertiesObject () {
+    scriptPropertiesObjectInstances.erase (m_instanceId);
     JS_FreeValue (this->m_engine.getContext (), this->m_creatorPrototype);
     JS_FreeValue (this->m_engine.getContext (), this->m_propertiesPrototype);
 }

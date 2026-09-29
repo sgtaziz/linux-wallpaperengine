@@ -5,6 +5,17 @@
 #include <format>
 #include <glm/vec3.hpp>
 
+WallpaperEngine::Data::Model::Color
+WallpaperEngine::Data::Builders::ColorBuilder::parseProperty (const std::string& value, float alpha) {
+    if (value.starts_with ('#')) return parse (value, alpha);
+    std::string copy = value;
+    std::ranges::replace (copy, ',', ' ');
+    const int vectorSize = VectorBuilder::preparseSize (copy);
+    if (vectorSize == 3) return Model::Color (glm::vec4 (VectorBuilder::parse<glm::vec3> (copy), alpha));
+    if (vectorSize == 4) return Model::Color (VectorBuilder::parse<glm::vec4> (copy));
+    throw std::invalid_argument ("Invalid project color value");
+}
+
 const WallpaperEngine::Data::Model::Color WallpaperEngine::Data::Builders::ColorBuilder::White
     = WallpaperEngine::Data::Model::Color (1.0f, 1.0f, 1.0f, 1.0f);
 const WallpaperEngine::Data::Model::Color WallpaperEngine::Data::Builders::ColorBuilder::Black

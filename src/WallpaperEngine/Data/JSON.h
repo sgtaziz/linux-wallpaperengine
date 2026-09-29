@@ -6,8 +6,10 @@
 #include <glm/detail/type_vec1.hpp>
 #include <nlohmann/json.hpp>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include "WallpaperEngine/Data/Builders/UserSettingBuilder.h"
 #include "WallpaperEngine/Data/Builders/VectorBuilder.h"
@@ -25,6 +27,14 @@ class JsonExtensions;
 using JSON = nlohmann::basic_json<
     std::map, std::vector, std::string, bool, std::int64_t, std::uint64_t, double, std::allocator,
     nlohmann::adl_serializer, std::vector<std::uint8_t>, JsonExtensions>;
+
+/** Parse authored scene assets, preserving byte positions for diagnostics. */
+JSON parseAuthoringJson (const std::string& content, const std::string& source);
+
+class JsonSyntaxError : public std::runtime_error {
+public:
+    using std::runtime_error::runtime_error;
+};
 
 /**
  * Small extensions class that is used as base class of nlohmann's implementation.

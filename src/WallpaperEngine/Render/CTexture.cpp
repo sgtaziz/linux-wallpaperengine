@@ -2,6 +2,7 @@
 #include "WallpaperEngine/Logging/Log.h"
 
 #include <lz4.h>
+#include <limits>
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "RenderContext.h"
@@ -10,11 +11,11 @@
 
 using namespace WallpaperEngine::Render;
 
-CTexture::CTexture (RenderContext& context, TextureUniquePtr header) :
-    Helpers::ContextAware (context), m_header (std::move (header)) {
+CTexture::CTexture (RenderContext& context, TextureUniquePtr header, std::string assetName) :
+    Helpers::ContextAware (context), m_header (std::move (header)), m_assetName (std::move (assetName)) {
     // ensure the header is parsed
     this->setupResolution ();
-    const GLint internalFormat = this->setupInternalFormat ();
+    const GLint internalFormat = storageFormat (*this->m_header);
 
     // videos are a bit special, they only have one framebuffer, one mipmap
     if (this->m_header->isVideoMp4 || this->m_header->flags & TextureFlags_Video) {
@@ -23,86 +24,172 @@ CTexture::CTexture (RenderContext& context, TextureUniquePtr header) :
 	}
 
 	// generate the texture and set it up to be used by the player
-	this->m_textureID = new GLuint[1];
+	auto allocatedID = std::make_unique<GLuint[]> (1);
+	this->m_textureID = allocatedID.get ();
 	glGenTextures (1, this->m_textureID);
-	this->setupOpenGLParameters (0);
-
-	const auto mipmap = *this->m_header->images.begin ()->second.begin ();
-
-	this->m_player = std::make_unique<GLPlayer> (
-	    this->getContext (), this->m_textureID[0],
-	    std::make_unique<MemoryStreamProtocol> (mipmap->uncompressedData.get (), mipmap->uncompressedSize),
-	    this->m_header->textureWidth, this->m_header->textureHeight
-	);
-	// setup texture video player
-	this->m_player->setMuted ();
-	this->m_player->setVolume (0.0f);
-	this->m_player->setUntimed ();
+	try {
+	    this->setupOpenGLParameters (0);
+	    const auto mipmap = *this->m_header->images.begin ()->second.begin ();
+	    this->m_player = std::make_unique<GLPlayer> (
+		this->getContext (), this->m_textureID[0],
+		std::make_unique<MemoryStreamProtocol> (mipmap->uncompressedData.get (), mipmap->uncompressedSize),
+		this->m_header->textureWidth, this->m_header->textureHeight
+	    );
+	    this->m_player->setMuted ();
+	    this->m_player->setVolume (0.0f);
+	    this->m_player->setUntimed ();
+	} catch (...) {
+	    this->m_player.reset ();
+	    glDeleteTextures (1, this->m_textureID);
+	    this->m_textureID = nullptr;
+	    throw;
+	}
+	this->m_textureID = allocatedID.release ();
 	// texture is ready, nothing else to do
 	return;
     }
 
     // allocate texture ids list
-    this->m_textureID = new GLuint[this->m_header->imageCount];
+    auto allocatedIDs = std::make_unique<GLuint[]> (this->m_header->imageCount);
+    this->m_textureID = allocatedIDs.get ();
     // ask opengl for the correct amount of textures and framebuffers
     glGenTextures (this->m_header->imageCount, this->m_textureID);
 
-    for (const auto& [index, mipmaps] : this->m_header->images) {
-	this->setupOpenGLParameters (index);
-
-	int level = 0;
-
-	for (const auto& mipmap : mipmaps) {
-	    stbi_uc* handle = nullptr;
-	    const void* dataptr = mipmap->uncompressedData.get ();
-	    int width = mipmap->width;
-	    int height = mipmap->height;
-	    const uint32_t bufferSize = mipmap->uncompressedSize;
-	    GLenum textureFormat = GL_RGBA;
-
-	    if (this->m_header->freeImageFormat != FIF_UNKNOWN) {
-		int fileChannels;
-
-		dataptr = handle = stbi_load_from_memory (
-		    reinterpret_cast<unsigned char*> (mipmap->uncompressedData.get ()), mipmap->uncompressedSize,
-		    &width, &height, &fileChannels, 4
-		);
-	    } else {
-		if (this->m_header->format == TextureFormat_R8) {
-		    // red textures are 1-byte-per-pixel, so it's alignment has to be set manually
-		    glPixelStorei (GL_UNPACK_ALIGNMENT, 1);
-		    textureFormat = GL_RED;
-		} else if (this->m_header->format == TextureFormat_RG88) {
-		    textureFormat = GL_RG;
-		}
-	    }
-
-	    switch (internalFormat) {
-		case GL_RGBA8:
-		case GL_RG8:
-		case GL_R8:
-		    glTexImage2D (
-			GL_TEXTURE_2D, level, internalFormat, width, height, 0, textureFormat, GL_UNSIGNED_BYTE, dataptr
-		    );
-		    break;
-		case GL_COMPRESSED_RGBA_S3TC_DXT1_EXT:
-		case GL_COMPRESSED_RGBA_S3TC_DXT3_EXT:
-		case GL_COMPRESSED_RGBA_S3TC_DXT5_EXT:
-		    glCompressedTexImage2D (
-			GL_TEXTURE_2D, level, internalFormat, width, height, 0, bufferSize, dataptr
-		    );
-		    break;
-		default:
-		    sLog.exception ("Cannot load texture, unknown format", this->m_header->format);
-	    }
-
-	    // stbi_image buffer won't be used anymore, so free memory
-	    if (this->m_header->freeImageFormat != FIF_UNKNOWN) {
-		stbi_image_free (handle);
-	    }
-
-	    level++;
+    try {
+	for (const auto& [index, mipmaps] : this->m_header->images) {
+	    if (index >= this->m_header->imageCount)
+		sLog.exception ("Cannot load texture ", m_assetName, ": image index ", index,
+		                " exceeds image count ", this->m_header->imageCount);
+	    this->setupOpenGLParameters (index);
+	    GLint level = 0;
+	    for (const auto& mipmap : mipmaps)
+		uploadLevel (*this->m_header, *mipmap, internalFormat, this->m_textureID[index], level++, m_assetName);
 	}
+    } catch (...) {
+	glDeleteTextures (this->m_header->imageCount, this->m_textureID);
+	this->m_textureID = nullptr;
+	throw;
+    }
+    this->m_textureID = allocatedIDs.release ();
+}
+
+void CTexture::uploadLevel (const Texture& header, const Mipmap& mipmap, GLint internalFormat,
+                            GLuint textureID, GLint level, const std::string& assetName) {
+    if (mipmap.width == 0 || mipmap.height == 0 ||
+        mipmap.width > std::numeric_limits<GLsizei>::max () ||
+        mipmap.height > std::numeric_limits<GLsizei>::max ())
+        sLog.exception ("Cannot load texture ", assetName, ": invalid mip dimensions");
+
+    if (header.freeImageFormat == FIF_UNKNOWN) {
+        unsigned int bytesPerPixel = 0;
+        unsigned int bytesPerBlock = 0;
+        switch (header.format) {
+            case TextureFormat_R8: bytesPerPixel = 1; break;
+            case TextureFormat_RG88: bytesPerPixel = 2; break;
+            case TextureFormat_RGB888: bytesPerPixel = 3; break;
+            case TextureFormat_ARGB8888: bytesPerPixel = 4; break;
+            case TextureFormat_R16f: bytesPerPixel = 2; break;
+            case TextureFormat_RG1616f: bytesPerPixel = 4; break;
+            case TextureFormat_RGB161616f: bytesPerPixel = 6; break;
+            case TextureFormat_RGBA16161616f: bytesPerPixel = 8; break;
+            case TextureFormat_DXT1: bytesPerBlock = 8; break;
+            case TextureFormat_DXT3:
+            case TextureFormat_DXT5: bytesPerBlock = 16; break;
+            case TextureFormat_BC7: bytesPerBlock = 16; break;
+            case TextureFormat_RGBa1010102: bytesPerPixel = 4; break;
+            default: break;
+        }
+        if (bytesPerPixel != 0) {
+            const uint64_t rowBytes = uint64_t (mipmap.width) * bytesPerPixel;
+            if (rowBytes > std::numeric_limits<uint64_t>::max () / mipmap.height ||
+                mipmap.uncompressedSize < 0 ||
+                uint64_t (mipmap.uncompressedSize) < rowBytes * mipmap.height ||
+                mipmap.uncompressedData == nullptr)
+                sLog.exception ("Cannot load texture ", assetName, ": truncated mipmap data");
+        } else if (bytesPerBlock != 0) {
+            const uint64_t blocksWide = (uint64_t (mipmap.width) + 3) / 4;
+            const uint64_t blocksHigh = (uint64_t (mipmap.height) + 3) / 4;
+            const uint64_t required = blocksWide * blocksHigh * bytesPerBlock;
+            if (required > std::numeric_limits<GLsizei>::max () ||
+                mipmap.uncompressedSize < 0 || uint64_t (mipmap.uncompressedSize) != required ||
+                mipmap.uncompressedData == nullptr)
+                sLog.exception ("Cannot load texture ", assetName, ": invalid compressed block length");
+        }
+    }
+    glBindTexture (GL_TEXTURE_2D, textureID);
+    int width = mipmap.width;
+    int height = mipmap.height;
+    GLenum sourceFormat = GL_RGBA;
+    GLenum sourceType = GL_UNSIGNED_BYTE;
+    const void* data = mipmap.uncompressedData.get ();
+    std::unique_ptr<stbi_uc, decltype (&stbi_image_free)> decoded (nullptr, &stbi_image_free);
+
+    if (header.freeImageFormat != FIF_UNKNOWN) {
+	int fileChannels = 0;
+	decoded.reset (stbi_load_from_memory (
+	    reinterpret_cast<const stbi_uc*> (mipmap.uncompressedData.get ()), mipmap.uncompressedSize,
+	    &width, &height, &fileChannels, 4));
+	if (!decoded)
+	    sLog.exception ("Cannot decode texture ", assetName, ": ", stbi_failure_reason ());
+	data = decoded.get ();
+    } else {
+	switch (header.format) {
+	    case TextureFormat_R8:
+	    case TextureFormat_R16f:
+		sourceFormat = GL_RED;
+		break;
+	    case TextureFormat_RG88:
+	    case TextureFormat_RG1616f:
+		sourceFormat = GL_RG;
+		break;
+	    case TextureFormat_RGB888:
+	    case TextureFormat_RGB161616f:
+		sourceFormat = GL_RGB;
+		break;
+	    default:
+		break;
+	}
+	if (header.format == TextureFormat_RGBa1010102)
+	    sourceType = GL_UNSIGNED_INT_2_10_10_10_REV;
+	if (header.format == TextureFormat_R16f || header.format == TextureFormat_RG1616f ||
+	    header.format == TextureFormat_RGB161616f || header.format == TextureFormat_RGBA16161616f)
+	    sourceType = GL_HALF_FLOAT;
+    }
+
+    switch (internalFormat) {
+	case GL_RGBA8:
+	case GL_RGB8:
+	case GL_RG8:
+	case GL_R8:
+	case GL_R16F:
+	case GL_RG16F:
+	case GL_RGB16F:
+	case GL_RGBA16F:
+	case GL_RGB10_A2: {
+	    GLint priorAlignment = 4;
+	    GLint priorRowLength = 0;
+	    glGetIntegerv (GL_UNPACK_ALIGNMENT, &priorAlignment);
+	    glGetIntegerv (GL_UNPACK_ROW_LENGTH, &priorRowLength);
+	    glPixelStorei (GL_UNPACK_ALIGNMENT, 1);
+	    glPixelStorei (GL_UNPACK_ROW_LENGTH, 0);
+	    glTexImage2D (GL_TEXTURE_2D, level, internalFormat, width, height, 0,
+	                  sourceFormat, sourceType, data);
+	    glPixelStorei (GL_UNPACK_ROW_LENGTH, priorRowLength);
+	    glPixelStorei (GL_UNPACK_ALIGNMENT, priorAlignment);
+	    break;
+	}
+	case GL_COMPRESSED_RGBA_S3TC_DXT1_EXT:
+	case GL_COMPRESSED_RGBA_S3TC_DXT3_EXT:
+	case GL_COMPRESSED_RGBA_S3TC_DXT5_EXT:
+	case GL_COMPRESSED_RGBA_BPTC_UNORM:
+	    if (internalFormat == GL_COMPRESSED_RGBA_BPTC_UNORM &&
+	        !GLEW_VERSION_4_2 && !GLEW_ARB_texture_compression_bptc)
+	        sLog.exception ("Cannot load texture ", assetName, ": BC7 compression is unavailable");
+	    glCompressedTexImage2D (GL_TEXTURE_2D, level, internalFormat, width, height, 0,
+	                            mipmap.uncompressedSize, data);
+	    break;
+	default:
+	    sLog.exception ("Cannot load texture ", assetName, ", unknown format ", header.format);
     }
 }
 
@@ -140,13 +227,13 @@ void CTexture::setupResolution () {
     }
 }
 
-GLint CTexture::setupInternalFormat () const {
-    if (this->m_header->freeImageFormat != FIF_UNKNOWN) {
+GLint CTexture::storageFormat (const Texture& header) {
+    if (header.freeImageFormat != FIF_UNKNOWN) {
 	return GL_RGBA8;
     }
 
     // detect the image format and hand it to openGL to be used
-    switch (this->m_header->format) {
+    switch (header.format) {
 	case TextureFormat_DXT5:
 	    return GL_COMPRESSED_RGBA_S3TC_DXT5_EXT;
 	case TextureFormat_DXT3:
@@ -155,34 +242,57 @@ GLint CTexture::setupInternalFormat () const {
 	    return GL_COMPRESSED_RGBA_S3TC_DXT1_EXT;
 	case TextureFormat_ARGB8888:
 	    return GL_RGBA8;
+	case TextureFormat_RGB888:
+	    return GL_RGB8;
 	case TextureFormat_R8:
 	    return GL_R8;
 	case TextureFormat_RG88:
 	    return GL_RG8;
+	case TextureFormat_R16f:
+	    return GL_R16F;
+	case TextureFormat_RG1616f:
+	    return GL_RG16F;
+	case TextureFormat_RGB161616f:
+	    return GL_RGB16F;
+	case TextureFormat_BC7:
+	    return GL_COMPRESSED_RGBA_BPTC_UNORM;
+	case TextureFormat_RGBa1010102:
+	    return GL_RGB10_A2;
+	case TextureFormat_RGBA16161616f:
+	    return GL_RGBA16F;
 	default:
 	    sLog.exception ("Cannot determine texture format");
     }
 }
 
 void CTexture::setupOpenGLParameters (const uint32_t textureID) const {
+    configureSampling (*this->m_header, textureID, this->m_textureID[textureID]);
+}
+
+void CTexture::configureSampling (const Texture& header, uint32_t imageIndex, GLuint textureID) {
     // TODO: LABEL ELEMENTS TOO
     // bind the texture to assign information to it
-    glBindTexture (GL_TEXTURE_2D, this->m_textureID[textureID]);
+    glBindTexture (GL_TEXTURE_2D, textureID);
 
     // set mipmap levels
     glTexParameteri (GL_TEXTURE_2D, GL_TEXTURE_BASE_LEVEL, 0);
-    glTexParameteri (GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, this->m_header->images[textureID].size () - 1);
+    glTexParameteri (GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, header.images.at (imageIndex).size () - 1);
 
     // setup texture wrapping and filtering
-    if (this->m_header->flags & TextureFlags_ClampUVs) {
+    if (header.flags & TextureFlags_ClampUVs) {
 	glTexParameteri (GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
 	glTexParameteri (GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    } else if (header.flags & TextureFlags_ClampUVsBorder) {
+	glTexParameteri (GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
+	glTexParameteri (GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
+	const GLfloat transparentBlack[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+	glTexParameterfv (GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, transparentBlack);
     } else {
 	glTexParameteri (GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
 	glTexParameteri (GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
     }
 
-    if (this->m_header->flags & TextureFlags_NoInterpolation) {
+    if (header.flags & TextureFlags_NoInterpolation) {
 	glTexParameteri (GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
 	glTexParameteri (GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST_MIPMAP_NEAREST);
     } else {

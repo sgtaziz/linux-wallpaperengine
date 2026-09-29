@@ -25,7 +25,8 @@ public:
     ShaderUnit (
 	const GLSLContext::UnitType type, std::string file, std::string content, const AssetLocator& assetLocator,
 	const ShaderConstantMap& constants, const TextureMap& passTextures, const TextureMap& overrideTextures,
-	const ComboMap& combos, const ComboMap& overrideCombos
+	const ComboMap& combos, const ComboMap& overrideCombos,
+        const ShaderConstantMap* baseConstants = nullptr
     );
     ~ShaderUnit () = default;
 
@@ -79,6 +80,8 @@ private:
      * Parses the input shader looking for include directives to extract the full list of included files
      */
     void preprocessIncludes ();
+    /** Replace conditionals whose branches are byte-identical, including invalid constant expressions. */
+    void collapseEquivalentConditionals ();
     /**
      * Parses the input shader looking for require directives and resolves them into generated code
      */
@@ -104,6 +107,15 @@ private:
      * Adjusts fragment shaders that use wide texture coordinates as vec2 values in Wallpaper Engine effects.
      */
     [[nodiscard]] std::string applyFragmentTexCoordCompatibility (std::string source) const;
+    /** Lower authored writes to a fragment varying into a main-local copy. */
+    [[nodiscard]] std::string applyFragmentWritableInputCompatibility (std::string source) const;
+    [[nodiscard]] std::string applyFragmentLinkedBoundsCompatibility (std::string source) const;
+    [[nodiscard]] std::string applyFragmentShadowMaskCompatibility (std::string source) const;
+    [[nodiscard]] std::string applySineWaveOpacityCompatibility (std::string source) const;
+    /** GLSL requires compile-time const initializers; sampled local values are runtime values. */
+    [[nodiscard]] std::string applySampledLocalConstCompatibility (std::string source) const;
+    /** Select the two pointer UV lanes used by an authored vec2 iris offset. */
+    [[nodiscard]] std::string applyVertexPointerUVCompatibility (std::string source) const;
 
     /**
      * Parses a COMBO value to add the proper define to the code
@@ -168,10 +180,11 @@ private:
      * The constants defined for this unit
      */
     const ShaderConstantMap& m_constants;
+    const ShaderConstantMap* m_baseConstants;
     /** The textures that are already applied to this shader */
-    const TextureMap& m_passTextures;
+    const TextureMap m_passTextures;
     /** The textures that are being overridden */
-    const TextureMap& m_overrideTextures;
+    const TextureMap m_overrideTextures;
     /** The default textures to use when a texture is not applied in a given slot */
     TextureMap m_defaultTextures = {};
     /**

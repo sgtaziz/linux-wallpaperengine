@@ -18,8 +18,16 @@ struct Project {
     std::string title;
     /** Wallpaper's type */
     Type type;
+    /** Native scene context bit used by particle initializer defaults. */
+    bool sceneOrthogonalProjection = false;
+    /** Authored scene version used by native particle preset compilation. */
+    int sceneVersion = 0;
     /** Workshop ID of the background or a negative id if not present */
     std::string workshopId;
+    /** Display identity captured by SceneScript storage when this wallpaper is constructed. */
+    std::string storageScreenKey = "default";
+    /** Source directory/package path for storage identity when no Workshop ID exists. */
+    std::string storageSourcePath;
     /** Indicates if the background uses audio processing or not */
     bool supportsAudioProcessing;
     /** All the available properties that the project defines for the user to change */

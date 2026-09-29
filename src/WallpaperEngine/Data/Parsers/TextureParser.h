@@ -26,6 +26,7 @@ public:
     static FrameSharedPtr parseFrame (const BinaryReader& file);
     static FrameSharedPtr parseFrameV1 (const BinaryReader& file);
     static TextureMap parseTextureMap (const JSON& it);
+    static UserTextureMap parseUserTextureMap (const JSON& it);
 
 private:
     static void parseTextureHeader (Texture& header, const BinaryReader& file);
