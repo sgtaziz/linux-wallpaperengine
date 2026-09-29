@@ -2,6 +2,7 @@
 
 #include "Steam/FileSystem/FileSystem.h"
 #include "WallpaperEngine/Application/ApplicationState.h"
+#include "WallpaperEngine/Application/RenderFrameClock.h"
 #include "WallpaperEngine/Assets/AssetLoadException.h"
 #include "WallpaperEngine/Audio/Drivers/Detectors/PulseAudioPlayingDetector.h"
 #include "WallpaperEngine/FileSystem/Container.h"
@@ -225,7 +226,8 @@ void WallpaperApplication::loadBackgrounds () {
 
 ProjectUniquePtr WallpaperApplication::loadBackground (const std::string& bg) {
     auto container = this->setupAssetLocator (bg);
-    auto json = WallpaperEngine::Data::JSON::JSON::parse (container->readString ("project.json"));
+    auto json = WallpaperEngine::Data::JSON::parseAuthoringJson (
+        container->readString ("project.json"), "project.json");
 
     // when a background is loaded, reset the screenshot variables
     // this allows taking screenshots after a background changes
@@ -240,7 +242,13 @@ ProjectUniquePtr WallpaperApplication::loadBackground (const std::string& bg) {
 	this->m_screenShotTaken = false;
     }
 
-    return WallpaperEngine::Data::Parsers::ProjectParser::parse (json, std::move (container));
+	auto project = WallpaperEngine::Data::Parsers::ProjectParser::parse (json, std::move (container));
+	try {
+	    project->storageSourcePath = std::filesystem::weakly_canonical (bg).string ();
+	} catch (const std::filesystem::filesystem_error&) {
+	    project->storageSourcePath = bg;
+	}
+	return project;
 }
 
 std::vector<std::size_t>
@@ -348,7 +356,8 @@ bool WallpaperApplication::preflightWallpaper (const std::string& path) {
     try {
 	// avoid mutating state, just ensure project.json parses
 	auto container = this->setupAssetLocator (path);
-	const auto json = WallpaperEngine::Data::JSON::JSON::parse (container->readString ("project.json"));
+    const auto json = WallpaperEngine::Data::JSON::parseAuthoringJson (
+        container->readString ("project.json"), "project.json");
 	if (!json.contains ("type") || !json.contains ("file")) {
 	    sLog.error ("Preflight failed for ", path, ": missing required fields");
 	    return false;
@@ -431,6 +440,7 @@ void WallpaperApplication::advancePlaylist (
 	}
 
 	auto project = this->loadBackground (nextPath.string ());
+	project->storageScreenKey = screen;
 
 	this->setupPropertiesForProject (*project);
 	this->ensureBrowserForProject (*project);
@@ -738,6 +748,7 @@ void WallpaperApplication::prepareOutputs () {
 	const auto clamp = clampIt != this->m_context.settings.general.screenClamps.end ()
 	    ? clampIt->second
 	    : this->m_context.settings.render.window.clamp;
+	info->storageScreenKey = background;
 
 	m_renderContext->setWallpaper (
 	    background,
@@ -797,6 +808,7 @@ void WallpaperApplication::prepareOutputs () {
 
 	WallpaperEngine::Render::CWallpaper::SpanInfo spanInfo;
 	spanInfo.totalBounds = { minX, minY, maxX - minX, maxY - minY };
+	bgIt->second->storageScreenKey = groupKey;
 
 	// Create one shared wallpaper with the span group's scaling mode
 	auto sharedWallpaper = WallpaperEngine::Render::CWallpaper::fromWallpaper (
@@ -874,6 +886,11 @@ void WallpaperApplication::render () {
 	    }
 	}
 
+	// This branch does not dispatch a render frame. Rebase both endpoints now
+	// so the next active frame's scene clock and particle tick exclude the
+	// time spent behind a fullscreen window.
+	resumeRenderFrameClock (m_videoDriver->getRenderTime (), g_Time, g_TimeLast);
+
 	this->m_isPaused = false;
     } else {
 	// update g_Daytime
@@ -882,9 +899,8 @@ void WallpaperApplication::render () {
 	g_Daytime = static_cast<float> ((timeinfo->tm_hour * 60) + timeinfo->tm_min) / (24.0f * 60.0f);
 
 	// keep track of the previous frame's time
-	g_TimeLast = g_Time;
-	// calculate the current time value
-	g_Time = m_videoDriver->getRenderTime ();
+	// calculate the current time value and the active-frame delta
+	sampleRenderFrameClock (m_videoDriver->getRenderTime (), g_Time, g_TimeLast);
 	// update audio recorder
 	m_audioDriver->update ();
 	// update the media source
@@ -957,6 +973,15 @@ void WallpaperApplication::cleanup () {
 #if DEMOMODE
     close_encoder ();
 #endif /* DEMOMODE */
+
+    // Scene sound objects must release their streams while the audio driver
+    // and SDL are still running. RenderContext also owns GL resources, so the
+    // video driver remains alive until after this reset.
+    m_renderContext.reset ();
+    m_audioContext.reset ();
+    m_audioDriver.reset ();
+    m_audioRecorder.reset ();
+    m_audioDetector.reset ();
 
     SDL_Quit ();
 }

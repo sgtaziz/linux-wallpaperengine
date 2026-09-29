@@ -3,6 +3,18 @@
 #include <glm/vec2.hpp>
 
 namespace WallpaperEngine::Input {
+/** GLFW cursor coordinates are window units; rendering/viewports use framebuffer pixels. */
+inline glm::dvec2 cursorFramebufferPosition (
+    const glm::dvec2& windowCursor, const glm::ivec2& windowSize, const glm::ivec2& framebufferSize
+) {
+    if (windowSize.x <= 0 || windowSize.y <= 0 || framebufferSize.x <= 0 || framebufferSize.y <= 0)
+        return {};
+    return {windowCursor.x * framebufferSize.x / windowSize.x,
+            framebufferSize.y - windowCursor.y * framebufferSize.y / windowSize.y};
+}
+}
+
+namespace WallpaperEngine::Input {
 enum MouseClickStatus : int { Released = 0, Clicked = 1 };
 
 /**

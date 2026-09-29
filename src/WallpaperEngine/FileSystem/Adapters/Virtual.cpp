@@ -14,7 +14,9 @@ ReadStreamSharedPtr VirtualAdapter::open (const std::filesystem::path& path) con
 	throw std::filesystem::filesystem_error ("Cannot find file", path, std::error_code ());
     }
 
-    return file->second;
+    // Each consumer needs its own cursor and stream state. Shader compilation can
+    // open the same virtual file more than once, including while another read is live.
+    return file->second->clone ();
 }
 
 bool VirtualAdapter::exists (const std::filesystem::path& path) const { return this->files.contains (path); }

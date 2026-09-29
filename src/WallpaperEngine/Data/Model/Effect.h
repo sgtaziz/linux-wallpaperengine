@@ -2,6 +2,10 @@
 
 #include <optional>
 #include <string>
+#include <map>
+#include <vector>
+
+#include <glm/vec4.hpp>
 
 #include "Types.h"
 
@@ -13,6 +17,11 @@ struct FBO {
     std::string format;
     float scale;
     bool unique;
+    std::optional<uint32_t> width;
+    std::optional<uint32_t> height;
+    std::optional<uint32_t> fit;
+    std::optional<std::string> uvs;
+    std::optional<glm::vec4> clear;
 };
 
 struct EffectPass {
@@ -43,5 +52,7 @@ struct Effect {
     std::vector<EffectPassUniquePtr> passes;
     /** The fbos declared by this effect */
     std::vector<FBOUniquePtr> fbos;
+    /** Named authored clear actions and their FBO descriptor names. */
+    std::map<std::string, std::vector<std::string>> clearFunctions;
 };
 } // namespace WallpaperEngine::Data::Model

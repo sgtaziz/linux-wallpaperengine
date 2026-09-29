@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Color.h"
+#include "PropertyAnimation.h"
 #include "Types.h"
 
 #include <functional>
@@ -136,6 +137,9 @@ public:
      * Updates the script properties associated with this dynamic value
      */
     void setProperties (std::map<std::string, UserSettingUniquePtr> properties);
+    [[nodiscard]] PropertyAnimation* getAnimation () { return m_animation.get (); }
+    [[nodiscard]] const PropertyAnimation* getAnimation () const { return m_animation.get (); }
+    void setAnimation (std::unique_ptr<PropertyAnimation> animation) { m_animation = std::move (animation); }
 
 private:
     /**
@@ -147,6 +151,7 @@ private:
     std::list<std::function<void (const DynamicValue&, UpdateSource)>> m_listeners = {};
     std::vector<std::function<void ()>> m_connections = {};
     std::optional<std::string> m_scriptSource = std::nullopt;
+    std::unique_ptr<PropertyAnimation> m_animation;
 
     glm::vec4 m_vec4 = {};
     glm::vec3 m_vec3 = {};

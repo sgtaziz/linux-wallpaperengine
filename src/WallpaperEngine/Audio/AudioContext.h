@@ -37,6 +37,7 @@ namespace Audio {
 	 * @param streamId The stream to stop playing
 	 */
 	void removeStream (int streamId) const;
+	[[nodiscard]] bool isStreamFinished (int streamId) const;
 
 	/**
 	 * TODO: MAYBE THIS SHOULD BE OUR OWN DEFINITIONS INSTEAD OF LIBRARY SPECIFIC ONES?

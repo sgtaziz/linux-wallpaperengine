@@ -3,7 +3,9 @@
 #include "CRenderable.h"
 #include "WallpaperEngine/Render/CObject.h"
 #include "WallpaperEngine/Render/Objects/Effects/CPass.h"
+#include "WallpaperEngine/Render/Objects/PuppetSkinning.h"
 #include "WallpaperEngine/Render/Wallpapers/CScene.h"
+#include "WallpaperEngine/Render/Wallpapers/SceneTransform.h"
 
 #include "WallpaperEngine/Render/Shaders/Shader.h"
 
@@ -11,6 +13,9 @@
 #include "WallpaperEngine/Scripting/ScriptableObject.h"
 
 #include <glm/vec3.hpp>
+#include <cstdint>
+#include <functional>
+#include <optional>
 #include <vector>
 
 using namespace WallpaperEngine;
@@ -31,9 +36,19 @@ public:
 
     void setup () override;
     void render () override;
+    void renderWithChildren (const std::function<void (std::shared_ptr<const CFBO>)>& renderChildren);
+    [[nodiscard]] bool canComposeChildren ();
 
     [[nodiscard]] const Image& getImage () const;
+    [[nodiscard]] const std::string& getAlignment () const { return m_alignment; }
+    void setAlignment (std::string alignment) { m_alignment = std::move (alignment); }
+    [[nodiscard]] std::optional<glm::mat4> puppetAttachmentTransform (const std::string& name) const;
+    [[nodiscard]] std::optional<glm::mat4> puppetEmissionBoneTransform (uint8_t boneIndex) const;
+    /** Source-pixel image emission needs native puppet bone association. */
+    [[nodiscard]] bool hasPuppetEmissionDeformation () const;
     [[nodiscard]] glm::vec2 getSize () const;
+    /** Execute a named authored material function on this image's effect targets. */
+    bool executeMaterialFunction (const std::string& name);
 
     [[nodiscard]] GLuint getSceneSpacePosition () const;
     [[nodiscard]] GLuint getCopySpacePosition () const;
@@ -57,32 +72,34 @@ public:
     void pinpongFramebuffer (std::shared_ptr<const CFBO>* drawTo, std::shared_ptr<const TextureProvider>* asInput);
 
 protected:
-    void setupPasses ();
+    void setupPasses (const std::function<void (std::shared_ptr<const CFBO>)>& renderChildren = {});
 
     void updateScreenSpacePosition ();
 
-    struct ResolvedTransform {
-	glm::vec3 origin;
-	glm::vec3 scale;
-	float angle;
-    };
+    using ResolvedTransform = Wallpapers::ResolvedSceneTransform;
 
     [[nodiscard]] ResolvedTransform resolveTransform (const WallpaperEngine::Data::Model::Object& object) const;
 
-    /**
-     * Computes the object's own transform (origin/scale/angle) without walking the
-     * parent chain. Used as the per-node step of resolveTransform.
-     */
-    [[nodiscard]] static ResolvedTransform localTransform (const WallpaperEngine::Data::Model::Object& object);
-
 private:
     bool loadPuppetMesh (const glm::vec2& size);
-    void updatePuppetPositionBuffer (const glm::vec2& size);
-    void setupPuppetGeometryCallback (Effects::CPass* pass) const;
+    void updatePuppetAnimation ();
+    void preparePuppetAnimation ();
+    void updatePuppetPositionBuffer (
+	const glm::vec2& size, const ResolvedTransform& transform, float sceneWidth, float sceneHeight
+    );
+    void setupPuppetGeometryCallback (Effects::CPass* pass, bool sceneSpace) const;
+    void setupPuppetChannelGeometryCallback (Effects::CPass* pass, GLuint positionBuffer) const;
+    void renderPuppetChannelPrepass ();
+    void renderPuppetChannelDirect (
+        const std::shared_ptr<const CFBO>& target
+    );
+    void refreshEffectVisibility ();
     ResolvedTransform updateGeometryBuffers ();
+    bool refreshSizeDependentTargets ();
+    [[nodiscard]] glm::vec2 getCompositeTargetSize () const;
     [[nodiscard]] glm::vec2 resolveGeometrySize (float sceneWidth, float sceneHeight, glm::vec3& origin) const;
     void updateScenePosition (
-	const glm::vec3& origin, const glm::vec2& size, const glm::vec3& scale, float sceneWidth, float sceneHeight
+	const ResolvedTransform& transform, const glm::vec2& size, float sceneWidth, float sceneHeight
     );
     void uploadGeometryBuffers (const glm::vec2& size);
     [[nodiscard]] bool shouldRenderFinalPass (bool isLastPass) const;
@@ -97,12 +114,45 @@ private:
     GLuint m_passSpacePosition;
     GLuint m_texcoordCopy;
     GLuint m_texcoordPass;
+    GLuint m_texcoordPassPresented = GL_NONE;
+    float m_texcoordCopyTopV = 1.0f;
+    float m_texcoordCopyBottomV = 0.0f;
     GLuint m_puppetSpacePosition = GL_NONE;
+    GLuint m_puppetSceneSpacePosition = GL_NONE;
     GLuint m_puppetTexCoord = GL_NONE;
+    GLuint m_puppetTexCoordFull = GL_NONE;
+    GLuint m_puppetBlendIndices = GL_NONE;
     GLuint m_puppetIndices = GL_NONE;
     GLsizei m_puppetIndexCount = 0;
     bool m_hasPuppetMesh = false;
     std::vector<GLfloat> m_puppetRawPositions = {};
+    std::vector<glm::vec4> m_puppetBlendMap;
+    std::optional<PuppetMeshData> m_puppetMesh;
+    std::optional<PuppetMeshData> m_puppetChannelMesh;
+    MaterialUniquePtr m_puppetChannelMaterial;
+    std::unique_ptr<MaterialPass> m_puppetChannelBaseMaterial;
+    Effects::CPass* m_puppetChannelBasePass = nullptr;
+    Effects::CPass* m_puppetChannelPass = nullptr;
+    std::shared_ptr<CFBO> m_puppetChannelFBO;
+    bool m_puppetChannelOffscreen = false;
+    glm::vec4 m_puppetPrepassColor {1.0f};
+    GLuint m_puppetChannelPosition = GL_NONE;
+    GLuint m_puppetChannelTexcoord = GL_NONE;
+    GLuint m_puppetChannelBlendIndices = GL_NONE;
+    GLuint m_puppetChannelIndices = GL_NONE;
+    GLsizei m_puppetChannelIndexCount = 0;
+    glm::mat4 m_puppetChannelProjection = glm::mat4 (1.0f);
+    glm::mat4 m_puppetChannelProjectionInverse = glm::mat4 (1.0f);
+    std::optional<PuppetSkeletonData> m_puppetSkeleton;
+    std::optional<PuppetAnimationHeader> m_puppetAnimation;
+    std::vector<glm::mat4> m_puppetCurrentGlobals;
+    uint32_t m_puppetPoseFrame = UINT32_MAX;
+    std::vector<PuppetPoseSample> m_puppetReferencePose;
+    std::vector<glm::mat4> m_puppetInverseBind;
+    std::vector<PuppetPlaybackState> m_puppetLayerStates;
+    std::vector<uint64_t> m_puppetLayerClipIds;
+    std::vector<bool> m_puppetLayerBlendInActive;
+    std::vector<bool> m_effectVisibilityAtSetup;
 
     glm::mat4 m_modelViewProjectionScreen = {};
     glm::mat4 m_modelViewProjectionPass = {};
@@ -114,17 +164,43 @@ private:
     glm::mat4 m_modelMatrix = {};
     glm::mat4 m_viewProjectionMatrix = {};
 
-    std::shared_ptr<const CFBO> m_mainFBO = nullptr;
-    std::shared_ptr<const CFBO> m_subFBO = nullptr;
+    std::shared_ptr<CFBO> m_mainFBO = nullptr;
+    std::shared_ptr<CFBO> m_subFBO = nullptr;
     std::shared_ptr<const CFBO> m_currentMainFBO = nullptr;
     std::shared_ptr<const CFBO> m_currentSubFBO = nullptr;
 
     const Image& m_image;
+    std::string m_alignment;
+    glm::vec4 m_effectiveColor4 = {};
 
     std::vector<Effects::CPass*> m_passes = {};
+    size_t m_basePassCount = 0;
+    struct ResourceSwap {
+        size_t beforePass;
+        std::shared_ptr<FBOProvider> provider;
+        std::string source;
+        std::string target;
+    };
+    std::vector<ResourceSwap> m_resourceSwaps = {};
+    struct EffectActionSource {
+        const WallpaperEngine::Data::Model::Effect* effect;
+        std::shared_ptr<FBOProvider> provider;
+    };
+    std::vector<EffectActionSource> m_effectActions = {};
+    struct SizedEffectTarget {
+	const WallpaperEngine::Data::Model::FBO* descriptor;
+	std::shared_ptr<FBOProvider> provider;
+	size_t effectIndex;
+    };
+    std::vector<SizedEffectTarget> m_sizedEffectTargets = {};
+    std::vector<std::shared_ptr<FBOProvider>> m_effectProviders = {};
+    std::vector<glm::vec2> m_effectProviderSizes = {};
+    glm::vec2 m_targetBaseSize = {};
+    bool m_composesChildren = false;
     std::vector<MaterialPassUniquePtr> m_virtualPassess = {};
 
     glm::vec4 m_pos = {};
+    glm::vec3 m_sceneQuad[4] = {};
     glm::vec3 m_sceneCenter = {};
     glm::vec2 m_size = {};
 

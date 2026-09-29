@@ -18,5 +18,9 @@ public:
     static const Model::Color Black;
 
     static WallpaperEngine::Data::Model::Color parse (const std::string& value, float alpha = 1.0f);
+    // Project color properties store normalized channels, including integer
+    // spellings such as "1 1 1". Scene literals may also use byte channels.
+    static WallpaperEngine::Data::Model::Color parseProperty (const std::string& value,
+                                                               float alpha = 1.0f);
 };
 }

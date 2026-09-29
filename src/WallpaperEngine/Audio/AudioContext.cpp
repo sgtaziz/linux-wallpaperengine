@@ -6,6 +6,7 @@ AudioContext::AudioContext (Drivers::AudioDriver& driver) : m_driver (driver) { 
 
 int AudioContext::addStream (AudioStream* stream) const { return this->m_driver.addStream (stream); }
 void AudioContext::removeStream (int streamId) const { this->m_driver.removeStream (streamId); }
+bool AudioContext::isStreamFinished (int streamId) const { return this->m_driver.isStreamFinished (streamId); }
 
 AVSampleFormat AudioContext::getFormat () const { return this->m_driver.getFormat (); }
 

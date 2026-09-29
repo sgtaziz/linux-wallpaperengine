@@ -75,7 +75,7 @@ std::shared_ptr<const TextureProvider> TextureCache::resolve (const std::string&
 	    };
 
 	    auto parsedTexture = TextureParser::parse (stream, filename, metadataLoader);
-	    auto texture = std::make_shared<CTexture> (this->getContext (), std::move (parsedTexture));
+	    auto texture = std::make_shared<CTexture> (this->getContext (), std::move (parsedTexture), filename);
 
 #if !NDEBUG
 	    glObjectLabel (GL_TEXTURE, texture->getTextureID (0), -1, filename.c_str ());

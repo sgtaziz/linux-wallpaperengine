@@ -4,6 +4,7 @@
 #include "ConsoleObject.h"
 #include "EngineObject.h"
 #include "InputObject.h"
+#include "LocalStorageObject.h"
 #include "Modules/ScriptModule.h"
 #include "SceneObject.h"
 
@@ -15,10 +16,12 @@
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <glm/vec3.hpp>
 
 #include "WallpaperEngine/Data/Model/DynamicValue.h"
 #include "WallpaperEngine/Data/Model/Types.h"
 #include "WallpaperEngine/Media/MediaSource.h"
+#include "WallpaperEngine/Scripting/MediaEventPayloads.h"
 
 namespace WallpaperEngine::Media {
 class MediaSource;
@@ -33,6 +36,7 @@ class CScene;
 
 namespace WallpaperEngine::Scripting {
 class ScriptPropertiesObject;
+class ScriptableObject;
 namespace Adapters {
     class ScriptableObjectAdapter;
 }
@@ -46,7 +50,13 @@ class ScriptEngine {
 public:
     struct LoadedModule {
 	DynamicValue& value;
-	JSValue module;
+	ScriptableObject& object;
+	JSValue module; // evaluated module namespace
+	JSValue layer;  // retained thisLayer object for this module
+	JSValue thisObject; // property owner, which may differ from thisLayer
+	bool initialized = false;
+	bool mediaDelivered = false;
+        size_t queueOrder = 0;
     };
     struct JSObjectAdapters {
 	std::unique_ptr<Adapters::VectorAdapter<4>> vec4;
@@ -64,7 +74,16 @@ public:
     JSContext* getContext () const { return m_context; }
     JSValue getGlobalThis () const { return m_globalThis; }
     LoadedModule* getRunningModule () const { return m_runningModule; }
-    JSValue dynamicToJs (DynamicValue& value) const;
+    [[nodiscard]] std::optional<std::string> registeredAssetPath (JSValueConst value) const {
+        return m_engineObject ? m_engineObject->registeredAssetPath (value) : std::nullopt;
+    }
+    [[nodiscard]] bool registeredAssetPrecached (JSValueConst value) const {
+        return m_engineObject && m_engineObject->registeredAssetPrecached (value);
+    }
+    [[nodiscard]] EngineObject* getEngineObject () const { return m_engineObject.get (); }
+    [[nodiscard]] SceneObject* getSceneObject () const { return m_sceneObject.get (); }
+    [[nodiscard]] bool isEvaluatingModuleTopLevel () const { return m_evaluatingModuleTopLevel; }
+    JSValue dynamicToJs (DynamicValue& value, bool detached = false) const;
 
     /**
      * Evaluate a WallpaperEngine script's update() function.
@@ -73,13 +92,22 @@ public:
      * @param currentValue The current value to pass to update()
      * @return The modified value from update(), or a copy of currentValue on error
      */
-    void queueScript (const std::string& key, DynamicValue& currentValue, ScriptableObject& object);
+    void queueScript (const std::string& key, DynamicValue& currentValue, ScriptableObject& object,
+                      std::optional<size_t> effectOwner = std::nullopt,
+                      const ShaderConstantMap* materialOwner = nullptr);
 
     /**
      * Runs a frame tick in the javascript engine. Dispatches any pending events,
      * timeouts, intervals AND calls any update() functions.
      */
     void tick ();
+    /** Deliver a changed physical render size to initialized property scripts. */
+    void notifyScreenResize (int width, int height);
+    void shutdown ();
+    void unregisterObject (const ScriptableObject& object);
+    void destroyObjectModules (const ScriptableObject& object);
+    void dispatchCursorEvent (const ScriptableObject& object, const char* event,
+                              const glm::vec3& world, const glm::vec3& local);
 
     // -------------------------------------------------------------------
     // Layer-script API (Phase 2 — dynamic text)
@@ -140,6 +168,7 @@ public:
 
 private:
     JSValue call (JSValue module, int argc, JSValueConst argv[], const char* name);
+    void activateLayer (const LoadedModule& module);
 
     void installBuiltins ();
 
@@ -150,16 +179,21 @@ private:
 
     JSRuntime* m_runtime = nullptr;
     JSContext* m_context = nullptr;
+    bool m_evaluatingModuleTopLevel = false;
     JSValue m_globalThis;
     Render::Wallpapers::CScene& m_scene;
     std::unique_ptr<EngineObject> m_engineObject;
     std::unique_ptr<InputObject> m_inputObject;
+    std::unique_ptr<LocalStorageObject> m_localStorageObject;
     std::unique_ptr<SceneObject> m_sceneObject;
     std::unique_ptr<ConsoleObject> m_consoleObject;
     std::unique_ptr<ScriptPropertiesObject> m_scriptPropertiesObject;
 
     std::map<std::string, std::unique_ptr<Modules::ScriptModule>> m_modules = {};
     std::map<std::string, LoadedModule> m_scriptModules = {};
+    size_t m_nextScriptQueueOrder = 0;
+    struct AnimatedValue { DynamicValue* value; ScriptableObject* object; };
+    std::map<std::string, AnimatedValue> m_animatedValues = {};
 
     LoadedModule* m_runningModule = nullptr;
 
@@ -168,6 +202,9 @@ private:
     std::map<ScriptLayerHandle, bool> m_layerInitialized;
     bool m_builtinsInstalled = false;
     Media::MediaSource& m_mediaSource;
+    std::optional<Media::MediaSource::MediaInfo> m_lastMediaInfo;
+    std::shared_ptr<const Media::MediaArtwork> m_paletteArtwork;
+    MediaPalette m_cachedPalette {};
     std::function<void ()> m_unregisterMediaUpdateCallback;
     std::function<void ()> m_unregisterAlbumArtUpdateCallback;
 

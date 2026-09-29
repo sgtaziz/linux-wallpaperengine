@@ -1,5 +1,6 @@
 #include "MediaSource.h"
 
+
 #include <ranges>
 
 using namespace WallpaperEngine::Media;
@@ -10,7 +11,8 @@ MediaSource::MediaSource (std::chrono::milliseconds updateInterval) :
 							 .playbackState = PlaybackState::Stopped,
 							 .title = "",
 							 .artist = "",
-							 .url = std::nullopt,
+						     .url = std::nullopt,
+						     .thumbnailAvailable = false,
 							 .duration = 0.0f,
 							 .position = 0.0f,
 							 .available = false,
@@ -33,6 +35,7 @@ void MediaSource::update () {
     }
 
     this->performUpdate ();
+    m_nextUpdate = std::chrono::steady_clock::now () + m_updateInterval;
 }
 
 std::function<void ()> MediaSource::addMetadataListener (std::function<void (const MediaInfo&)> listener) {

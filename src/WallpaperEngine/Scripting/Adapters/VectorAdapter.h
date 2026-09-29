@@ -3,6 +3,8 @@
 #include "ObjectAdapter.h"
 #include "WallpaperEngine/Data/Model/Types.h"
 
+#include <functional>
+
 namespace WallpaperEngine::Scripting::Adapters {
 template <int components> class VectorAdapter : public ObjectAdapter {
 public:
@@ -16,9 +18,14 @@ public:
      * @return A new, anonymous JSValue representing the vector
      */
     JSValue instantiate (Data::Model::DynamicValue& source, bool temporal);
+    // A layer property read is a value snapshot. Component writes on that
+    // returned Vec still update the live layer while it exists.
+    JSValue instantiateLayerProperty (Data::Model::DynamicValue& source,
+                                      std::function<bool ()> layerAlive);
     JSValue instantiate ();
 
     void free (uint32_t vectorId);
+    void releasePrototype ();
 
 private:
     JSValue m_prototype;

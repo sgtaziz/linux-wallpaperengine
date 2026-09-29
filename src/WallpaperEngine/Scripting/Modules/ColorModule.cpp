@@ -2,21 +2,32 @@
 
 #include "WallpaperEngine/Scripting/ScriptEngine.h"
 
-using namespace WallpaperEngine::Scripting::Modules;
+#include <algorithm>
+#include <cmath>
 
-#define min_f(a, b, c) (fminf (a, fminf (b, c)))
-#define max_f(a, b, c) (fmaxf (a, fmaxf (b, c)))
+using namespace WallpaperEngine::Scripting::Modules;
 
 static uint32_t ColorModuleInstanceId = 0;
 std::map<uint32_t, ColorModule&> colorModules;
 
+JSValue wecolor_rgb2hsv (JSContext*, JSValueConst, int, JSValueConst*, int);
+JSValue wecolor_hsv2rgb (JSContext*, JSValueConst, int, JSValueConst*, int);
+JSValue wecolor_normalizecolor (JSContext*, JSValueConst, int, JSValueConst*, int);
+JSValue wecolor_expandcolor (JSContext*, JSValueConst, int, JSValueConst*, int);
+
 int wecolor_init (JSContext* ctx, JSModuleDef* m) {
-
-    JS_AddModuleExport (ctx, m, "rgb2hsv");
-    JS_AddModuleExport (ctx, m, "hsv2rgb");
-    JS_AddModuleExport (ctx, m, "normalizeColor");
-    JS_AddModuleExport (ctx, m, "expandColor");
-
+    uint32_t instanceId = 0;
+    for (const auto& [id, module] : colorModules)
+        if (module.getDefinition () == m) { instanceId = id; break; }
+    if (!instanceId) return -1;
+    JS_SetModuleExport (ctx, m, "rgb2hsv", JS_NewCFunctionMagic (
+        ctx, wecolor_rgb2hsv, "rgb2hsv", 1, JS_CFUNC_generic_magic, instanceId));
+    JS_SetModuleExport (ctx, m, "hsv2rgb", JS_NewCFunctionMagic (
+        ctx, wecolor_hsv2rgb, "hsv2rgb", 1, JS_CFUNC_generic_magic, instanceId));
+    JS_SetModuleExport (ctx, m, "normalizeColor", JS_NewCFunctionMagic (
+        ctx, wecolor_normalizecolor, "normalizeColor", 1, JS_CFUNC_generic_magic, instanceId));
+    JS_SetModuleExport (ctx, m, "expandColor", JS_NewCFunctionMagic (
+        ctx, wecolor_expandcolor, "expandColor", 1, JS_CFUNC_generic_magic, instanceId));
     return 0;
 }
 
@@ -39,11 +50,15 @@ JSValue wecolor_rgb2hsv (JSContext* ctx, JSValueConst this_val, int argc, JSValu
     JS_ToFloat64 (ctx, &yVal, y);
     JS_ToFloat64 (ctx, &zVal, z);
 
-    // conversion code from https://gist.github.com/yoggy/8999625
-    float h, s, v; // h:0-360.0, s:0.0-1.0, v:0.0-1.0
+    JS_FreeValue (ctx, x);
+    JS_FreeValue (ctx, y);
+    JS_FreeValue (ctx, z);
 
-    float max = max_f (xVal, yVal, zVal);
-    float min = min_f (xVal, yVal, zVal);
+    // Shipped assets/scripts/jsmodules/wecolor.js represents hue on [0, 1].
+    float h, s, v;
+
+    const double max = std::max ({xVal, yVal, zVal});
+    const double min = std::min ({xVal, yVal, zVal});
 
     v = max;
 
@@ -57,16 +72,12 @@ JSValue wecolor_rgb2hsv (JSContext* ctx, JSValueConst this_val, int argc, JSValu
 	s = (max - min) / max;
 
 	if (max == xVal) {
-	    h = 60 * ((yVal - zVal) / (max - min)) + 0;
+	    h = (yVal - zVal) / (6 * (max - min)) + (yVal < zVal ? 1.0f : 0.0f);
 	} else if (max == yVal) {
-	    h = 60 * ((zVal - xVal) / (max - min)) + 120;
+	    h = ((zVal - xVal) / (max - min) + 2.0f) / 6.0f;
 	} else {
-	    h = 60 * ((xVal - yVal) / (max - min)) + 240;
+	    h = ((xVal - yVal) / (max - min) + 4.0f) / 6.0f;
 	}
-    }
-
-    if (h < 0) {
-	h += 360.0f;
     }
 
     const auto it = colorModules.find (magic);
@@ -103,11 +114,18 @@ JSValue wecolor_hsv2rgb (JSContext* ctx, JSValueConst this_val, int argc, JSValu
     JS_ToFloat64 (ctx, &yVal, y);
     JS_ToFloat64 (ctx, &zVal, z);
 
-    // conversion code from https://gist.github.com/yoggy/8999625
+    JS_FreeValue (ctx, x);
+    JS_FreeValue (ctx, y);
+    JS_FreeValue (ctx, z);
+
+    // Match shipped wecolor.js: hue is turns, not degrees. Its positive hue
+    // values may exceed one (as in original scene 1888636115), so wrap them.
     float r, g, b; // 0.0-1.0
 
-    int hi = (int)(xVal / 60.0f) % 6;
-    float f = (xVal / 60.0f) - hi;
+    const double sector = std::floor (xVal * 6.0);
+    int hi = static_cast<int> (std::fmod (sector, 6.0));
+    if (hi < 0) hi += 6;
+    float f = xVal * 6.0 - sector;
     float p = zVal * (1.0f - yVal);
     float q = zVal * (1.0f - yVal * f);
     float t = zVal * (1.0f - yVal * (1.0f - f));
@@ -229,36 +247,8 @@ JSValue wecolor_expandcolor (JSContext* ctx, JSValueConst this_val, int argc, JS
 
 ColorModule::ColorModule (ScriptEngine& engine) : ScriptModule (engine, "WEColor", wecolor_init) {
     this->m_instanceId = ++ColorModuleInstanceId;
-
-    JS_SetModuleExport (
-	this->getEngine ().getContext (), this->getDefinition (), "rgb2hsv",
-	JS_NewCFunctionMagic (
-	    this->getEngine ().getContext (), wecolor_rgb2hsv, "rgb2hsv", 1, JS_CFUNC_generic_magic, this->m_instanceId
-	)
-    );
-
-    JS_SetModuleExport (
-	this->getEngine ().getContext (), this->getDefinition (), "hsv2rgb",
-	JS_NewCFunctionMagic (
-	    this->getEngine ().getContext (), wecolor_hsv2rgb, "hsv2rgb", 1, JS_CFUNC_generic_magic, this->m_instanceId
-	)
-    );
-
-    JS_SetModuleExport (
-	this->getEngine ().getContext (), this->getDefinition (), "normalizeColor",
-	JS_NewCFunctionMagic (
-	    this->getEngine ().getContext (), wecolor_normalizecolor, "normalizeColor", 1, JS_CFUNC_generic_magic,
-	    this->m_instanceId
-	)
-    );
-
-    JS_SetModuleExport (
-	this->getEngine ().getContext (), this->getDefinition (), "expandColor",
-	JS_NewCFunctionMagic (
-	    this->getEngine ().getContext (), wecolor_expandcolor, "expandColor", 1, JS_CFUNC_generic_magic,
-	    this->m_instanceId
-	)
-    );
+    for (const char* name : {"rgb2hsv", "hsv2rgb", "normalizeColor", "expandColor"})
+        JS_AddModuleExport (engine.getContext (), getDefinition (), name);
 
     colorModules.emplace (this->m_instanceId, *this);
 }

@@ -1,20 +1,21 @@
 # Maintainer: Alexis Maiquez <aur@almamu.com>
 pkgname=linux-wallpaperengine-git
 _pkgname=linux-wallpaperengine
-pkgver=r567.b6c1825
+pkgver=r627.b016d7d
 pkgrel=1
 pkgdesc="use steam's wallpaperengine on linux"
 arch=('x86_64')
 url="https://github.com/Almamu/linux-wallpaperengine"
 license=('GPL-3.0-only')
 depends=('lz4' 'ffmpeg' 'mpv' 'glfw' 'glew' 'freeglut' 'libpulse' 'libcups' 'at-spi2-core' 'nss' 'libxcomposite' 'libxdamage' 'nspr')
-makedepends=('git' 'cmake' 'sdl2' 'glm' 'wayland-protocols' 'xorg-xrandr')
+makedepends=('git' 'cmake' 'sdl2' 'glm' 'wayland-protocols' 'xorg-xrandr' 'rsync')
 provides=("linux-wallpaperengine")
-source=("${pkgname}::git+https://github.com/Almamu/linux-wallpaperengine.git#branch=main")
-sha512sums=('SKIP')
+source=()
+sha512sums=()
+_repo_dir="$(cd "$startdir/../.." && pwd -P)"
 
 pkgver() {
-    cd "$pkgname"
+    cd "$_repo_dir"
         ( set -o pipefail
           git describe --long 2>/dev/null | sed 's/\([^-]*-g\)/r\1/;s/-/./g' ||
           printf "r%s.%s" "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
@@ -22,9 +23,16 @@ pkgver() {
 }
 
 prepare() {
-    cd "$pkgname"
-    git submodule update --init --recursive
-    git -c protocol.file.allow=always submodule update
+    [[ -f "$_repo_dir/CMakeLists.txt" ]] || return 1
+    mkdir -p "$srcdir/$pkgname"
+    rsync -a --no-owner --no-group --delete \
+        --exclude='.git' \
+        --exclude='/.cache/' \
+        --exclude='/build/' \
+        --exclude='/packaging/archlinux/src/' \
+        --exclude='/packaging/archlinux/pkg/' \
+        --exclude='/tools/reversing/physics_capture/captures/' \
+        "$_repo_dir/" "$srcdir/$pkgname/"
 }
 
 build() {

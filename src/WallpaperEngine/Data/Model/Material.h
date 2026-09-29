@@ -44,7 +44,7 @@ struct MaterialPass {
     /** List of textures defined for this pass */
     TextureMap textures;
     /** List of user textures defined for this pass */
-    TextureMap usertextures;
+    UserTextureMap usertextures;
     /** The combos and their values to pass onto the shader */
     ComboMap combos;
     /** Constant shader values (e.g., overbright, bloom settings) */

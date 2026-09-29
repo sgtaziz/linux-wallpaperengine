@@ -10,7 +10,8 @@ using namespace WallpaperEngine::Data::Parsers;
 using namespace WallpaperEngine::Data::Model;
 
 MaterialUniquePtr MaterialParser::load (const Project& project, const std::string& filename) {
-    const auto materialJson = JSON::parse (project.assetLocator->readString (filename));
+    const auto materialJson = WallpaperEngine::Data::JSON::parseAuthoringJson (
+        project.assetLocator->readString (filename), filename);
 
     return parse (materialJson, filename, project);
 }
@@ -50,7 +51,7 @@ MaterialPassUniquePtr MaterialParser::parsePass (const JSON& it, const Project& 
 	.depthwrite = parseDepthwriteMode (it.optional ("depthwrite", std::string ("disabled"))),
 	.shader = it.require<std::string> ("shader", "Material pass must have a shader"),
 	.textures = textures.has_value () ? TextureParser::parseTextureMap (*textures) : TextureMap {},
-	.usertextures = usertextures.has_value () ? TextureParser::parseTextureMap (*usertextures) : TextureMap {},
+	.usertextures = usertextures.has_value () ? TextureParser::parseUserTextureMap (*usertextures) : UserTextureMap {},
 	.combos = combos.has_value () ? parseCombos (*combos) : ComboMap {},
 	.constants = constants.has_value () ? ShaderConstantParser::parse (*constants, project) : ShaderConstantMap {},
     });
