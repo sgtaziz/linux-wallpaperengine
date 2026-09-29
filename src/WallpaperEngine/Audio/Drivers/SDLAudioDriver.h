@@ -36,6 +36,7 @@ public:
     int addStream (AudioStream* stream) override;
     /** @inheritdoc */
     void removeStream (int streamId) override;
+    [[nodiscard]] bool isStreamFinished (int streamId) const override;
     /**
      * @return All the registered audio streams
      */
@@ -56,11 +57,13 @@ public:
 
 private:
     /** The mutex lock used to access the stream list mutex */
-    SDL_mutex* m_streamListMutex;
+    SDL_mutex* m_streamListMutex = nullptr;
     /** The last streamID used */
     int m_lastStreamID = 0;
     /** The device's ID */
-    SDL_AudioDeviceID m_deviceID;
+    SDL_AudioDeviceID m_deviceID = 0;
+    /** SDL subsystem was initialized, even if opening the device failed. */
+    bool m_audioSubsystemInitialized = false;
     /** If the driver is initialized or not */
     bool m_initialized = false;
     /** The sound output configuration */

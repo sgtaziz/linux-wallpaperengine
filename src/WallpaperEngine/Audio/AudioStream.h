@@ -1,6 +1,8 @@
 #pragma once
 
+#include <atomic>
 #include <string>
+#include <vector>
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -38,21 +40,21 @@ using namespace WallpaperEngine::FileSystem;
  */
 class AudioStream {
 public:
-    AudioStream (AudioContext& context, const std::string& filename);
-    AudioStream (AudioContext& context, const ReadStreamSharedPtr& buffer);
+    AudioStream (AudioContext& context, const std::string& filename, bool repeat = false);
+    AudioStream (AudioContext& context, const ReadStreamSharedPtr& buffer, bool repeat = false);
     AudioStream (AudioContext& audioContext, AVCodecContext* context);
     ~AudioStream ();
 
     void queuePacket (AVPacket* pkt);
+    /** Enqueue an EOF boundary so only the callback resets the decoder. */
+    void queueLoopBoundary ();
 
     /**
      * Gets the next packet in the queue
      *
-     * WARNING: BLOCKS UNTIL SOME DATA IS READ FROM IT
-     *
-     * @return
+     * Returns false immediately if the reader has not queued a packet.
      */
-    void dequeuePacket ();
+    bool dequeuePacket ();
 
     /**
      * @return The audio context in use for this audio stream
@@ -87,14 +89,19 @@ public:
      * Stops decoding and playback of the stream
      */
     void stop ();
+    /** Called by the reader when no more packets will be queued. */
+    void markReaderFinished ();
+    [[nodiscard]] bool hasReaderFinished () const;
+    [[nodiscard]] uint64_t getCompletedLoopCount () const;
+    void setVolume (float volume);
+    [[nodiscard]] float getMixerGain () const;
+    void setPaused (bool paused);
+    [[nodiscard]] bool isPaused () const;
+    [[nodiscard]] bool isPlaybackFinished () const;
     /**
      * @return The file data buffer
      */
     [[nodiscard]] ReadStreamSharedPtr& getBuffer ();
-    /**
-     * @return The SDL_cond used to signal waiting for data
-     */
-    [[nodiscard]] SDL_cond* getWaitCondition () const;
     /**
      * @return The data queue size
      */
@@ -144,7 +151,7 @@ private:
      * @param out_buf
      * @return
      */
-    int resampleAudio (uint8_t* out_buf, const int out_size);
+    int resampleAudio (uint8_t* out_buf, int out_size, bool drain = false);
     /**
      * Queues a packet into the play queue
      *
@@ -162,9 +169,18 @@ private:
     /** The audio context this stream will be played under */
     AudioContext& m_audioContext;
     /** If this stream was properly initialized or not */
-    bool m_initialized = false;
+    std::atomic_bool m_initialized { false };
     /** Repeat enabled? */
-    bool m_repeat = false;
+    std::atomic_bool m_repeat { false };
+    /** The reader has reached the end of a non-repeating input. */
+    std::atomic_bool m_readerFinished { false };
+    /** The callback has submitted the decoder drain packet. */
+    bool m_decoderDraining = false;
+    bool m_loopBoundaryPending = false;
+    std::atomic_uint64_t m_completedLoops { 0 };
+    std::atomic<float> m_volume { 1.0f };
+    std::atomic_bool m_paused { false };
+    std::atomic_bool m_playbackFinished { false };
     /** The codec context that contains the original audio format information */
     AVCodecContext* m_context = nullptr;
     /** The format context that controls how data is read off the file */
@@ -182,6 +198,9 @@ private:
     AVPacket* m_decodePacket = nullptr;
     /** The AV frame used while decoding this stream */
     AVFrame* m_decodeFrame = nullptr;
+    /** Converted frame bytes left over when the driver's buffer is smaller. */
+    std::vector<uint8_t> m_pendingOutput;
+    size_t m_pendingOutputOffset = 0;
 
     /**
      * Packet queue information
@@ -196,8 +215,6 @@ private:
 	size_t size = 0;
 	int64_t duration = 0;
 	SDL_mutex* mutex = nullptr;
-	SDL_cond* wait = nullptr;
-	SDL_cond* cond = nullptr;
     }* m_queue {};
 
     SDL_Thread* m_audioThread = nullptr;

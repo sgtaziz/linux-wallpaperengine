@@ -1,9 +1,14 @@
 #include "ScriptEngine.h"
 
 #include "Adapters/ScriptableObjectAdapter.h"
+#include "EffectThisObject.h"
+#include "MaterialThisObject.h"
+#include "PropertyAnimationThisObject.h"
 #include "Modules/ColorModule.h"
+#include "WallpaperEngine/Data/Model/Property.h"
 #include "Modules/MathModule.h"
 #include "Modules/ScriptModule.h"
+#include "MediaEventPayloads.h"
 #include "ScriptPropertiesObject.h"
 #include "ScriptableObject.h"
 #include "WallpaperEngine/Audio/AudioContext.h"
@@ -45,6 +50,8 @@ extern char** environ;
 extern float g_Time;
 extern float g_TimeLast;
 
+static void logJSException (JSContext* ctx, const char* context);
+
 void scriptengine_dump (JSContext* ctx, JSValueConst obj) {
     JSPropertyEnum* props;
     uint32_t len;
@@ -83,12 +90,12 @@ JSModuleDef* scriptengine_module_loader (JSContext* ctx, const char* module, voi
     return it->second->getDefinition ();
 }
 
-JSValue ScriptEngine::dynamicToJs (DynamicValue& value) const {
+JSValue ScriptEngine::dynamicToJs (DynamicValue& value, bool detached) const {
     switch (value.getType ()) {
 	case DynamicValue::Null:
 	    return JS_NULL;
 	case DynamicValue::String:
-	    return JS_NewString (this->m_context, value.getString ().c_str ());
+	    return JS_NewStringLen (this->m_context, value.getString ().data (), value.getString ().size ());
 	case DynamicValue::Float:
 	    return JS_NewFloat64 (this->m_context, value.getFloat ());
 	case DynamicValue::Int:
@@ -96,17 +103,21 @@ JSValue ScriptEngine::dynamicToJs (DynamicValue& value) const {
 	case DynamicValue::Boolean:
 	    return JS_NewBool (this->m_context, value.getBool ());
 	case DynamicValue::Vec2:
-	    return this->m_adapters.vec2->instantiate (value);
+	    return detached ? this->m_adapters.vec2->instantiate (value, true)
+	                    : this->m_adapters.vec2->instantiate (value);
 	case DynamicValue::Vec3:
-	    return this->m_adapters.vec3->instantiate (value);
+	    return detached ? this->m_adapters.vec3->instantiate (value, true)
+	                    : this->m_adapters.vec3->instantiate (value);
 	case DynamicValue::Vec4:
-	    return this->m_adapters.vec4->instantiate (value);
+	    return detached ? this->m_adapters.vec4->instantiate (value, true)
+	                    : this->m_adapters.vec4->instantiate (value);
 	default:
 	    return JS_UNDEFINED;
     }
 }
 
-static void jsToDynamicValue (JSContext* ctx, JSValue val, DynamicValue& source) {
+static void jsToDynamicValue (JSContext* ctx, JSValue val, DynamicValue& source,
+                              const std::string& key, bool rgbColorResult = false) {
     if (JS_IsException (val)) {
 	return;
     }
@@ -114,7 +125,11 @@ static void jsToDynamicValue (JSContext* ctx, JSValue val, DynamicValue& source)
     // scalar types returned directly
     int tag = JS_VALUE_GET_TAG (val);
 
-    if (tag == JS_TAG_UNDEFINED || tag == JS_TAG_UNINITIALIZED || tag == JS_TAG_NULL) {
+    // A script may mutate thisLayer directly and return nothing. In that
+    // case the registered value already holds the change.
+    if (tag == JS_TAG_UNDEFINED || tag == JS_TAG_UNINITIALIZED) return;
+
+    if (tag == JS_TAG_NULL) {
 	source.update (DynamicValue::UpdateSource::Script);
 	return;
     }
@@ -126,6 +141,7 @@ static void jsToDynamicValue (JSContext* ctx, JSValue val, DynamicValue& source)
 
     if (tag == JS_TAG_BOOL) {
 	source.update (static_cast<bool> (JS_VALUE_GET_BOOL (val)), DynamicValue::UpdateSource::Script);
+	return;
     }
 
     if (JS_TAG_IS_FLOAT64 (tag)) {
@@ -134,46 +150,67 @@ static void jsToDynamicValue (JSContext* ctx, JSValue val, DynamicValue& source)
     }
 
     if (tag == JS_TAG_STRING) {
-	const char* str = JS_ToCString (ctx, val);
-	source.update (str == nullptr ? "" : str, DynamicValue::UpdateSource::Script);
+	size_t length = 0;
+	const char* str = JS_ToCStringLen (ctx, &length, val);
+	if (!str) {
+	    logJSException (ctx, "script string result");
+	    return;
+	}
+	source.update (std::string (str, length), DynamicValue::UpdateSource::Script);
 	JS_FreeCString (ctx, str);
 	return;
     }
 
-    // look into the object and extract x/y/z/w properties
+    // A returned vector must update the same typed DynamicValue that the
+    // renderer reads. Only inspect components required by the source type;
+    // vector adapters report unsupported component names as exceptions.
     if (tag == JS_TAG_OBJECT) {
-	JSValue x = JS_GetPropertyStr (ctx, val, "x");
-	JSValue y = JS_GetPropertyStr (ctx, val, "y");
-	JSValue z = JS_GetPropertyStr (ctx, val, "z");
-	JSValue w = JS_GetPropertyStr (ctx, val, "w");
-	ScopeGuard guard ([=] {
-	    JS_FreeValue (ctx, x);
-	    JS_FreeValue (ctx, y);
-	    JS_FreeValue (ctx, z);
-	    JS_FreeValue (ctx, w);
-	});
-
-	if (!JS_IsNumber (x) || JS_IsNumber (y)) {
-	    sLog.exception ("Vector's x and y components must be numbers");
-	}
-
-	double xVal = 0.0f, yVal = 0.0f, zVal = 0.0f, wVal = 0.0f;
-
-	JS_ToFloat64 (ctx, &xVal, x);
-	JS_ToFloat64 (ctx, &yVal, y);
-
-	if (!JS_IsNumber (z)) {
-	    source.update (glm::vec2 (xVal, yVal), DynamicValue::UpdateSource::Script);
+	const auto type = source.getType ();
+	if (type != DynamicValue::Vec2 && type != DynamicValue::Vec3 && type != DynamicValue::Vec4) {
+	    sLog.error ("Script returned a vector for a non-vector value");
 	    return;
 	}
-
-	if (!JS_IsNumber (w)) {
-	    source.update (glm::vec3 (xVal, yVal, zVal), DynamicValue::UpdateSource::Script);
-	    return;
+	double components[4] {};
+	const int count = type == DynamicValue::Vec2 ? 2 : type == DynamicValue::Vec3 ? 3 : 4;
+	for (int i = 0; i < count; ++i) {
+	    const char name[] = {"xyzw"[i], '\0'};
+	    JSValue component = JS_GetPropertyStr (ctx, val, name);
+	    if (JS_IsException (component)) {
+		JSValue exception = JS_GetException (ctx);
+		JS_FreeValue (ctx, exception);
+		JS_FreeValue (ctx, component);
+		sLog.error ("Script vector result threw while reading component ", "xyzw"[i], " in ", key);
+		return;
+	    }
+	    // Authored color callbacks commonly return Vec3 RGB even though the
+	    // parsed color setting retains an alpha channel. Keep that channel;
+	    // a Vec4 return still replaces all four components. Other Vec4
+	    // properties continue to require an explicit w component.
+	    if (i == 3 && rgbColorResult && JS_IsUndefined (component)) {
+		components[i] = source.getVec4 ().a;
+		JS_FreeValue (ctx, component);
+		continue;
+	    }
+	    const bool valid = JS_IsNumber (component) && JS_ToFloat64 (ctx, &components[i], component) == 0
+			       && std::isfinite (components[i]);
+	    JS_FreeValue (ctx, component);
+	    if (!valid) {
+		sLog.error ("Script vector result has an invalid component ", "xyzw"[i], " in ", key);
+		return;
+	    }
 	}
-
-	source.update (glm::vec4 (xVal, yVal, zVal, wVal), DynamicValue::UpdateSource::Script);
+	if (count == 2) source.update (glm::vec2 (components[0], components[1]), DynamicValue::Script);
+	else if (count == 3)
+	    source.update (glm::vec3 (components[0], components[1], components[2]), DynamicValue::Script);
+	else source.update (glm::vec4 (components[0], components[1], components[2], components[3]), DynamicValue::Script);
     }
+}
+
+static bool acceptsRgbColorResult (const std::string& key) {
+    // A particle's instance color may be connected to a project color (Vec4),
+    // while its script and renderer both use RGB Vec3. Keep the stored alpha.
+    return key.starts_with ("color_") || key.ends_with ("_constant_color")
+        || (key.starts_with ("particle") && key.ends_with ("_instance_colorn"));
 }
 
 ScriptEngine::ScriptEngine (Wallpapers::CScene& scene, Media::MediaSource& mediaSource) :
@@ -205,6 +242,8 @@ ScriptEngine::ScriptEngine (Wallpapers::CScene& scene, Media::MediaSource& media
 	sLog.exception ("ScriptEngine: Failed to create JS context");
     }
 
+    JS_SetContextOpaque (this->m_context, this);
+
     this->m_globalThis = JS_GetGlobalObject (this->m_context);
 
     this->m_adapters = {
@@ -217,6 +256,7 @@ ScriptEngine::ScriptEngine (Wallpapers::CScene& scene, Media::MediaSource& media
 
     this->m_engineObject = std::make_unique<EngineObject> (*this, scene);
     this->m_inputObject = std::make_unique<InputObject> (*this, scene);
+    this->m_localStorageObject = std::make_unique<LocalStorageObject> (this->m_context, scene.getScene ().project);
     this->m_sceneObject = std::make_unique<SceneObject> (*this, scene);
     this->m_consoleObject = std::make_unique<ConsoleObject> (*this, scene);
     this->m_scriptPropertiesObject = std::make_unique<ScriptPropertiesObject> (*this, scene);
@@ -238,6 +278,9 @@ ScriptEngine::ScriptEngine (Wallpapers::CScene& scene, Media::MediaSource& media
 	this->m_context, this->m_globalThis, "input", this->m_inputObject->getInstance (), JS_PROP_ENUMERABLE
     );
     JS_DefinePropertyValueStr (
+	this->m_context, this->m_globalThis, "localStorage", this->m_localStorageObject->instance (), JS_PROP_ENUMERABLE
+    );
+    JS_DefinePropertyValueStr (
 	this->m_context, this->m_globalThis, "thisScene", this->m_sceneObject->getInstance (), JS_PROP_ENUMERABLE
     );
     JS_DefinePropertyValueStr (
@@ -250,31 +293,165 @@ ScriptEngine::ScriptEngine (Wallpapers::CScene& scene, Media::MediaSource& media
 
 ScriptEngine::~ScriptEngine () {
     this->m_unregisterMediaUpdateCallback ();
-
-    for (const auto& module : this->m_scriptModules | std::views::values) {
-	JS_FreeValue (this->m_context, module.module);
-    }
+    this->m_unregisterAlbumArtUpdateCallback ();
+    this->shutdown ();
 
     JS_FreeValue (this->m_context, this->m_globalThis);
-
-    this->m_adapters.vec4.reset ();
-    this->m_adapters.vec3.reset ();
-    this->m_adapters.vec2.reset ();
-    this->m_adapters.object.reset ();
 
     this->m_consoleObject.reset ();
     this->m_engineObject.reset ();
     this->m_inputObject.reset ();
+    this->m_localStorageObject.reset ();
     this->m_sceneObject.reset ();
     this->m_scriptPropertiesObject.reset ();
     this->m_modules.clear ();
     this->m_scriptModules.clear ();
 
+    // QuickJS may keep vector objects in module/global cycles until context
+    // or runtime destruction. Their finalizers call back into VectorAdapter,
+    // so release its JS handles now but retain the C++ adapters until after
+    // all QuickJS finalization has finished.
+    this->m_adapters.vec4->releasePrototype ();
+    this->m_adapters.vec3->releasePrototype ();
+    this->m_adapters.vec2->releasePrototype ();
+
     if (this->m_context) {
 	JS_FreeContext (this->m_context);
     }
     if (this->m_runtime) {
+	JS_RunGC (this->m_runtime);
 	JS_FreeRuntime (this->m_runtime);
+    }
+    this->m_adapters.vec4.reset ();
+    this->m_adapters.vec3.reset ();
+    this->m_adapters.vec2.reset ();
+    this->m_adapters.object.reset ();
+}
+
+void ScriptEngine::shutdown () {
+    m_animatedValues.clear ();
+    if (!this->m_context || this->m_scriptModules.empty ()) return;
+    for (auto& module : this->m_scriptModules | std::views::values) {
+	this->m_runningModule = &module;
+	this->activateLayer (module);
+	JSValue result = this->call (module.module, 0, nullptr, "destroy");
+	if (JS_IsException (result)) logJSException (this->m_context, "shutdown.destroy");
+	JS_FreeValue (this->m_context, result);
+	JS_FreeValue (this->m_context, module.module);
+	JS_FreeValue (this->m_context, module.layer);
+	JS_FreeValue (this->m_context, module.thisObject);
+    }
+    this->m_scriptModules.clear ();
+    this->m_runningModule = nullptr;
+    JS_SetPropertyStr (this->m_context, this->m_globalThis, "thisLayer", JS_UNDEFINED);
+    JS_SetPropertyStr (this->m_context, this->m_globalThis, "thisObject", JS_UNDEFINED);
+}
+
+void ScriptEngine::unregisterObject (const ScriptableObject& object) {
+    if (!this->m_context) return;
+    for (auto it = m_animatedValues.begin (); it != m_animatedValues.end ();)
+        if (it->second.object == &object) it = m_animatedValues.erase (it);
+        else ++it;
+    m_engineObject->cancelTimersForObject (object);
+    JSValue activeLayer = JS_GetPropertyStr (this->m_context, this->m_globalThis, "thisLayer");
+    JSValue activeObject = JS_GetPropertyStr (this->m_context, this->m_globalThis, "thisObject");
+    bool removedActiveLayer = false;
+    bool removedActiveObject = false;
+    for (auto it = this->m_scriptModules.begin (); it != this->m_scriptModules.end ();) {
+	if (&it->second.object != &object) {
+	    ++it;
+	    continue;
+	}
+	if (this->m_runningModule == &it->second) this->m_runningModule = nullptr;
+	removedActiveLayer = removedActiveLayer || (JS_IsObject (activeLayer)
+		&& JS_VALUE_GET_PTR (activeLayer) == JS_VALUE_GET_PTR (it->second.layer));
+	removedActiveObject = removedActiveObject || (JS_IsObject (activeObject)
+		&& JS_VALUE_GET_PTR (activeObject) == JS_VALUE_GET_PTR (it->second.thisObject));
+	JS_FreeValue (this->m_context, it->second.module);
+	JS_FreeValue (this->m_context, it->second.layer);
+	JS_FreeValue (this->m_context, it->second.thisObject);
+	it = this->m_scriptModules.erase (it);
+    }
+    JS_FreeValue (this->m_context, activeLayer);
+    JS_FreeValue (this->m_context, activeObject);
+    if (removedActiveLayer)
+	JS_SetPropertyStr (this->m_context, this->m_globalThis, "thisLayer", JS_UNDEFINED);
+    if (removedActiveObject)
+	JS_SetPropertyStr (this->m_context, this->m_globalThis, "thisObject", JS_UNDEFINED);
+}
+
+void ScriptEngine::destroyObjectModules (const ScriptableObject& object) {
+    if (!m_context) return;
+    auto* previousModule = m_runningModule;
+    const bool previousRemoved = previousModule && &previousModule->object == &object;
+    JSValue previousLayer = JS_GetPropertyStr (m_context, m_globalThis, "thisLayer");
+    JSValue previousObject = JS_GetPropertyStr (m_context, m_globalThis, "thisObject");
+    ScopeGuard restore ([this, previousModule, previousRemoved, previousLayer, previousObject] {
+        m_runningModule = previousRemoved ? nullptr : previousModule;
+        if (previousRemoved) {
+            JS_FreeValue (m_context, previousLayer);
+            JS_SetPropertyStr (m_context, m_globalThis, "thisLayer", JS_UNDEFINED);
+            JS_FreeValue (m_context, previousObject);
+            JS_SetPropertyStr (m_context, m_globalThis, "thisObject", JS_UNDEFINED);
+        } else {
+            JS_SetPropertyStr (m_context, m_globalThis, "thisLayer", previousLayer);
+            JS_SetPropertyStr (m_context, m_globalThis, "thisObject", previousObject);
+        }
+    });
+    std::vector<std::string> keys;
+    for (const auto& [key, module] : m_scriptModules)
+        if (&module.object == &object) keys.push_back (key);
+    for (const auto& key : keys) {
+        const auto found = m_scriptModules.find (key);
+        if (found == m_scriptModules.end ()) continue;
+        auto& module = found->second;
+        m_runningModule = &module;
+        activateLayer (module);
+        JSValue result = call (module.module, 0, nullptr, "destroy");
+        if (JS_IsException (result))
+            logJSException (m_context, ("destroyLayer.destroy:" + key).c_str ());
+        JS_FreeValue (m_context, result);
+    }
+    unregisterObject (object);
+}
+
+void ScriptEngine::dispatchCursorEvent (const ScriptableObject& object, const char* event,
+                                        const glm::vec3& world, const glm::vec3& local) {
+    if (!m_context) return;
+    std::vector<std::string> keys;
+    for (const auto& [key, module] : m_scriptModules)
+        if (&module.object == &object) keys.push_back (key);
+    auto* previousModule = m_runningModule;
+    JSValue previousLayer = JS_GetPropertyStr (m_context, m_globalThis, "thisLayer");
+    JSValue previousObject = JS_GetPropertyStr (m_context, m_globalThis, "thisObject");
+    ScopeGuard restore ([this, previousModule, previousLayer, previousObject] {
+        m_runningModule = previousModule;
+        JS_SetPropertyStr (m_context, m_globalThis, "thisLayer", previousLayer);
+        JS_SetPropertyStr (m_context, m_globalThis, "thisObject", previousObject);
+    });
+    auto vectorValue = [this] (const glm::vec3& vector) {
+        JSValue value = m_adapters.vec3->instantiate ();
+        JS_SetPropertyStr (m_context, value, "x", JS_NewFloat64 (m_context, vector.x));
+        JS_SetPropertyStr (m_context, value, "y", JS_NewFloat64 (m_context, vector.y));
+        JS_SetPropertyStr (m_context, value, "z", JS_NewFloat64 (m_context, vector.z));
+        return value;
+    };
+    for (const auto& key : keys) {
+        const auto found = m_scriptModules.find (key);
+        if (found == m_scriptModules.end ()) continue;
+        auto& module = found->second;
+        m_runningModule = &module;
+        activateLayer (module);
+        JSValue payload = JS_NewObject (m_context);
+        JS_SetPropertyStr (m_context, payload, "worldPosition", vectorValue (world));
+        JS_SetPropertyStr (m_context, payload, "localPosition", vectorValue (local));
+        JS_SetPropertyStr (m_context, payload, "hitBox", JS_NULL);
+        JSValue args[] = {payload};
+        JSValue result = call (module.module, 1, args, event);
+        if (JS_IsException (result))
+            logJSException (m_context, (std::string ("cursor.") + event + ":" + key).c_str ());
+        JS_FreeValue (m_context, result);
+        JS_FreeValue (m_context, payload);
     }
 }
 
@@ -556,6 +733,7 @@ JSValue ScriptEngine::call (JSValue module, int argc, JSValue argv[], const char
     // check if there's an update method and run it
     JSValue function = JS_GetPropertyStr (this->m_context, module, name);
     ScopeGuard guard ([&] () { JS_FreeValue (this->m_context, function); });
+    if (JS_IsException (function)) return JS_EXCEPTION;
 
     if (!JS_IsFunction (this->m_context, function)) {
 	return JS_UNDEFINED;
@@ -564,7 +742,17 @@ JSValue ScriptEngine::call (JSValue module, int argc, JSValue argv[], const char
     return JS_Call (this->m_context, function, module, argc, argv);
 }
 
-void ScriptEngine::queueScript (const std::string& key, DynamicValue& currentValue, ScriptableObject& object) {
+void ScriptEngine::activateLayer (const LoadedModule& module) {
+    JS_SetPropertyStr (this->m_context, this->m_globalThis, "thisLayer", JS_DupValue (this->m_context, module.layer));
+    JS_SetPropertyStr (this->m_context, this->m_globalThis, "thisObject",
+                       JS_DupValue (this->m_context, module.thisObject));
+}
+
+void ScriptEngine::queueScript (const std::string& key, DynamicValue& currentValue,
+                                ScriptableObject& object, std::optional<size_t> effectOwner,
+                                const ShaderConstantMap* materialOwner) {
+    if (currentValue.getAnimation ())
+        m_animatedValues.try_emplace (key, AnimatedValue {&currentValue, &object});
     const auto source = currentValue.getScriptSource ();
 
     if (!source.has_value ()) {
@@ -577,53 +765,216 @@ void ScriptEngine::queueScript (const std::string& key, DynamicValue& currentVal
 	return;
     }
 
-    // load the script and store it
-    JSValue module = JS_Eval (this->m_context, source->c_str (), source->size (), key.c_str (), JS_EVAL_TYPE_MODULE);
+    // The layer must exist while module top-level code runs. JS_Eval of a
+    // module returns its evaluation result, not its exports; retain the
+    // namespace explicitly so update() can be called on later frames.
+    JSValue layer = this->m_adapters.object->instantiate (object);
+    JSValue thisObject = materialOwner
+        ? createMaterialThisObject (this->m_context, layer, *materialOwner)
+        : effectOwner.has_value ()
+            ? createEffectThisObject (this->m_context, layer, *effectOwner)
+            : JS_DupValue (this->m_context, layer);
+    if (JS_IsException (thisObject)) {
+        logJSException (this->m_context, "queueScript.thisObject");
+        JS_FreeValue (this->m_context, layer);
+        return;
+    }
+    ScopeGuard ownerGuard ([this, thisObject] { JS_FreeValue (this->m_context, thisObject); });
+    attachPropertyAnimation (this->m_context, thisObject, layer, currentValue);
+    JSValue previousLayer = JS_GetPropertyStr (this->m_context, this->m_globalThis, "thisLayer");
+    JSValue previousObject = JS_GetPropertyStr (this->m_context, this->m_globalThis, "thisObject");
+    ScopeGuard layerGuard ([this, previousLayer, previousObject] {
+        JS_SetPropertyStr (this->m_context, this->m_globalThis, "thisLayer", previousLayer);
+        JS_SetPropertyStr (this->m_context, this->m_globalThis, "thisObject", previousObject);
+    });
+    JS_SetPropertyStr (this->m_context, this->m_globalThis, "thisLayer", JS_DupValue (this->m_context, layer));
+    JS_SetPropertyStr (this->m_context, this->m_globalThis, "thisObject",
+                       JS_DupValue (this->m_context, thisObject));
+    LoadedModule candidate {.value = currentValue, .object = object, .module = JS_UNDEFINED,
+                            .layer = layer, .thisObject = thisObject};
+    auto* previousModule = this->m_runningModule;
+    this->m_runningModule = &candidate;
+    ScopeGuard runningGuard ([this, previousModule] { this->m_runningModule = previousModule; });
+    JSValue compiled = JS_Eval (
+	this->m_context, source->c_str (), source->size (), key.c_str (), JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY
+    );
+    if (JS_IsException (compiled)) {
+	logJSException (this->m_context, "queueScript.compile");
+	JS_FreeValue (this->m_context, layer);
+	return;
+    }
+    if (!JS_IsModule (compiled)) {
+	JS_FreeValue (this->m_context, compiled);
+	JS_FreeValue (this->m_context, layer);
+	sLog.error ("ScriptEngine: compiled script is not a module: ", key);
+	return;
+    }
+    auto* definition = static_cast<JSModuleDef*> (JS_VALUE_GET_PTR (compiled));
+    const bool previousTopLevel = m_evaluatingModuleTopLevel;
+    m_evaluatingModuleTopLevel = true;
+    JSValue evaluation = JS_EvalFunction (this->m_context, compiled); // consumes compiled
+    m_evaluatingModuleTopLevel = previousTopLevel;
+    if (JS_IsException (evaluation)) {
+	logJSException (this->m_context, ("queueScript.evaluate:" + key).c_str ());
+	JS_FreeValue (this->m_context, evaluation);
+	JS_FreeValue (this->m_context, layer);
+	return;
+    }
+    if (JS_PromiseState (this->m_context, evaluation) == JS_PROMISE_REJECTED) {
+	JSValue reason = JS_PromiseResult (this->m_context, evaluation);
+	const char* message = JS_ToCString (this->m_context, reason);
+	sLog.error ("ScriptEngine [queueScript.evaluate:", key, "]: ",
+	            message ? message : "rejected module evaluation");
+	if (message) JS_FreeCString (this->m_context, message);
+	JS_FreeValue (this->m_context, reason);
+	JS_FreeValue (this->m_context, evaluation);
+	JS_FreeValue (this->m_context, layer);
+	return;
+    }
+    JS_FreeValue (this->m_context, evaluation);
+    JSValue module = JS_GetModuleNamespace (this->m_context, definition);
+    if (JS_IsException (module)) {
+	logJSException (this->m_context, "queueScript.namespace");
+	JS_FreeValue (this->m_context, module);
+	JS_FreeValue (this->m_context, layer);
+	return;
+    }
 
     auto inserted = this->m_scriptModules.emplace (
 	key,
 	LoadedModule {
 	    .value = currentValue,
+	    .object = object,
 	    .module = module,
+	    .layer = layer,
+	    .thisObject = thisObject,
+	    .queueOrder = m_nextScriptQueueOrder,
 	}
     );
 
     if (!inserted.second) {
+	JS_FreeValue (this->m_context, module);
+	JS_FreeValue (this->m_context, layer);
 	return;
     }
+    ownerGuard.cancel ();
+    ++m_nextScriptQueueOrder;
 
-    JS_SetPropertyStr (this->m_context, this->m_globalThis, "thisLayer", this->m_adapters.object->instantiate (object));
-
-    // script properties do not need update as they're connected directly to the source data
-    this->m_runningModule = &inserted.first->second;
-
-    // check if there's an update method and run it
-    JSValue args[] = { this->dynamicToJs (currentValue) };
-    JSValue result = this->call (module, 1, args, "update");
-
-    ScopeGuard guard2 ([this, args, result] () {
-	JS_FreeValue (this->m_context, result);
-	JS_FreeValue (this->m_context, args[0]);
-    });
-
-    if (JS_IsException (result)) {
-	return;
-    }
-
-    jsToDynamicValue (this->m_context, result, currentValue);
+    // init/update are deferred until the first scene tick, after all layers
+    // have been constructed and can be found through thisScene.getLayer().
 }
 
 void ScriptEngine::tick () {
+    // Native property timelines advance before their authored script callbacks
+    // and before the rendered material reads the resulting DynamicValue.
+    const float delta = m_scene.getDeltaTime ();
+    for (auto& [key, binding] : m_animatedValues) {
+        auto& value = *binding.value;
+        auto* animation = value.getAnimation ();
+        if (!animation) continue;
+        animation->advance (delta);
+        const auto type = value.getType ();
+        if (type == DynamicValue::Float || type == DynamicValue::Int) {
+            if (!animation->channels[0].empty ())
+                value.update (animation->sample (0), DynamicValue::Script);
+        } else if (type == DynamicValue::Vec2 || type == DynamicValue::Vec3 ||
+                   type == DynamicValue::Vec4) {
+            glm::vec4 result = value.getVec4 ();
+            bool changed = false;
+            for (size_t channel = 0; channel < animation->channels.size (); ++channel) {
+                if (animation->channels[channel].empty ()) continue;
+                result[channel] = animation->sample (channel);
+                changed = true;
+            }
+            if (changed) {
+                if (type == DynamicValue::Vec2) value.update (glm::vec2 (result), DynamicValue::Script);
+                else if (type == DynamicValue::Vec3) value.update (glm::vec3 (result), DynamicValue::Script);
+                else value.update (result, DynamicValue::Script);
+            }
+        }
+    }
+    // The preceding frame's module must not own new engine-level timers.
+    m_runningModule = nullptr;
+    ScopeGuard runningGuard ([this] { m_runningModule = nullptr; });
     // run intervals
     this->m_engineObject->tick ();
 
     // run any pending notifications
 
-    // run all update methods
-    for (auto& module : this->m_scriptModules | std::views::values) {
+    // A module can create a layer whose setup queues another module. Schedule
+    // modules present at the start of the tick, so a child begins on the next
+    // frame regardless of its lexical key order in the map.
+    std::vector<std::string> scheduled;
+    scheduled.reserve (m_scriptModules.size ());
+    for (const auto& item : m_scriptModules) scheduled.push_back (item.first);
+    // Initialize the frozen set in registration order. An authored child can
+    // snapshot a value initialized by its parent even when its property name
+    // sorts first lexically (for example color_928 before scale_920).
+    std::vector<std::string> pendingInit;
+    for (const auto& key : scheduled)
+        if (const auto found = m_scriptModules.find (key);
+            found != m_scriptModules.end () && !found->second.initialized)
+            pendingInit.push_back (key);
+    std::sort (pendingInit.begin (), pendingInit.end (), [this] (const auto& left, const auto& right) {
+        return m_scriptModules.at (left).queueOrder < m_scriptModules.at (right).queueOrder;
+    });
+    JSValue initialUserProperties = JS_UNDEFINED;
+    ScopeGuard propertiesGuard ([this, &initialUserProperties] {
+        JS_FreeValue (m_context, initialUserProperties);
+    });
+    for (const auto& key : pendingInit) {
+	const auto found = m_scriptModules.find (key);
+	if (found == m_scriptModules.end ()) continue;
+	auto& module = found->second;
 	this->m_runningModule = &module;
+	this->activateLayer (module);
+	if (!module.initialized) {
+	    module.initialized = true;
+	    JSValue initArgs[] = {this->dynamicToJs (module.value, true)};
+	    JSValue initResult = this->call (module.module, 1, initArgs, "init");
+	    if (JS_IsException (initResult))
+	        logJSException (this->m_context, ("tick.init:" + key).c_str ());
+	    else jsToDynamicValue (this->m_context, initResult, module.value, key,
+	                           acceptsRgbColorResult (key));
+	    JS_FreeValue (this->m_context, initResult);
+	    JS_FreeValue (this->m_context, initArgs[0]);
+	    // Native sends all current project settings once when the wallpaper
+	    // loads. Several authored scripts initialize their frame state here,
+	    // after init(value) has captured the initial layer value.
+	    if (JS_IsUndefined (initialUserProperties)) {
+	        initialUserProperties = JS_NewObject (m_context);
+	        for (const auto& [name, property] : m_scene.getScene ().project.properties) {
+	            JSValue field;
+	            if (dynamic_cast<Data::Model::PropertyColor*> (property.get ())) {
+	                DynamicValue color (property->getVec3 ());
+	                field = m_adapters.vec3->instantiate (color, true);
+	            } else field = dynamicToJs (*property);
+	            if (JS_IsException (field) || JS_SetPropertyStr (
+	                    m_context, initialUserProperties, name.c_str (), field) < 0) {
+	                logJSException (m_context, "tick.userProperties");
+	                break;
+	            }
+	        }
+	    }
+	    JSValue userArgs[] = {JS_DupValue (m_context, initialUserProperties)};
+	    JSValue userResult = call (module.module, 1, userArgs, "applyUserProperties");
+	    if (JS_IsException (userResult))
+	        logJSException (m_context, ("tick.applyUserProperties:" + key).c_str ());
+	    JS_FreeValue (m_context, userResult);
+	    JS_FreeValue (m_context, userArgs[0]);
+	}
+    }
 
-	JSValue args[] = { this->dynamicToJs (module.value) };
+    // Keep the established update order; only the one-time initialization
+    // phase needs authored construction dependencies.
+    for (const auto& key : scheduled) {
+	const auto found = m_scriptModules.find (key);
+	if (found == m_scriptModules.end ()) continue;
+	auto& module = found->second;
+	this->m_runningModule = &module;
+	this->activateLayer (module);
+
+	JSValue args[] = { this->dynamicToJs (module.value, true) };
 	JSValue result = this->call (module.module, 1, args, "update");
 	ScopeGuard guard ([result, args, this] () {
 	    JS_FreeValue (this->m_context, result);
@@ -631,72 +982,116 @@ void ScriptEngine::tick () {
 	});
 
 	if (JS_IsException (result)) {
+	    logJSException (this->m_context, ("tick.update:" + key).c_str ());
 	    continue;
 	}
 
-	jsToDynamicValue (this->m_context, result, module.value);
+	jsToDynamicValue (this->m_context, result, module.value, key,
+	                  acceptsRgbColorResult (key));
     }
+    if (m_mediaSource.getMediaInfo ().available) {
+        const bool pending = std::ranges::any_of (m_scriptModules, [] (const auto& item) {
+            return item.second.initialized && !item.second.mediaDelivered;
+        });
+        if (pending) {
+            const auto current = m_mediaSource.getMediaInfo ();
+            notifyMediaUpdate (current);
+        }
+    }
+}
+
+void ScriptEngine::notifyScreenResize (int width, int height) {
+    DynamicValue sizeValue (glm::vec2 (width, height));
+    JSValue size = m_adapters.vec2->instantiate (sizeValue, true);
+    if (JS_IsException (size)) {
+        logJSException (m_context, "resizeScreen.size");
+        return;
+    }
+    ScopeGuard sizeGuard ([this, size] { JS_FreeValue (m_context, size); });
+    std::vector<std::string> scheduled;
+    scheduled.reserve (m_scriptModules.size ());
+    for (const auto& [key, module] : m_scriptModules)
+        if (module.initialized) scheduled.push_back (key);
+    for (const auto& key : scheduled) {
+        const auto found = m_scriptModules.find (key);
+        if (found == m_scriptModules.end ()) continue;
+        auto& module = found->second;
+        m_runningModule = &module;
+        activateLayer (module);
+        JSValue args[] = {JS_DupValue (m_context, size)};
+        JSValue result = call (module.module, 1, args, "resizeScreen");
+        m_runningModule = nullptr;
+        if (JS_IsException (result))
+            logJSException (m_context, ("resizeScreen:" + key).c_str ());
+        JS_FreeValue (m_context, result);
+        JS_FreeValue (m_context, args[0]);
+    }
+    m_runningModule = nullptr;
 }
 
 void ScriptEngine::notifyMediaUpdate (const Media::MediaSource::MediaInfo& media) {
     JSContext* ctx = this->m_context;
+    const auto& previous = m_lastMediaInfo;
+    const bool initial = !previous.has_value ();
+    const bool propertiesChanged = initial || previous->title != media.title
+        || previous->artist != media.artist || previous->album != media.album;
+    const bool playbackChanged = initial || previous->playbackState != media.playbackState;
+    const bool timelineChanged = initial || previous->position != media.position
+        || previous->duration != media.duration;
+    const bool thumbnailChanged = initial || previous->url != media.url
+        || previous->artwork != media.artwork;
+    m_lastMediaInfo = media;
+    const bool pending = std::ranges::any_of (m_scriptModules, [] (const auto& item) {
+        return item.second.initialized && !item.second.mediaDelivered;
+    });
+    if (!propertiesChanged && !playbackChanged && !timelineChanged && !thumbnailChanged && !pending) return;
+    auto* previousModule = m_runningModule;
+    JSValue previousLayer = JS_GetPropertyStr (ctx, m_globalThis, "thisLayer");
+    JSValue previousObject = JS_GetPropertyStr (ctx, m_globalThis, "thisObject");
+    ScopeGuard restore ([this, previousModule, previousLayer, previousObject] {
+        m_runningModule = previousModule;
+        JS_SetPropertyStr (m_context, m_globalThis, "thisLayer", previousLayer);
+        JS_SetPropertyStr (m_context, m_globalThis, "thisObject", previousObject);
+    });
 
-    DynamicValue primaryColorValue (glm::vec3 (0.12f, 0.12f, 0.12f));
-    DynamicValue secondaryColorValue (glm::vec3 (0.0f, 0.0f, 0.0f));
-    DynamicValue tertiaryColorValue (glm::vec3 (0.25f, 0.25f, 0.25f));
-    DynamicValue highContrastColorValue (glm::vec3 (1.0f, 1.0f, 1.0f));
+    // The retained owner is the same immutable decoded snapshot used by
+    // $mediaThumbnail. Timeline ticks must not rescan the artwork pixels.
+    if (m_paletteArtwork != media.artwork) {
+        m_paletteArtwork = media.artwork;
+        m_cachedPalette = paletteFromArtwork (m_paletteArtwork.get ());
+    }
+    MediaEventPayloads events (ctx, media, m_cachedPalette, [this] (const glm::vec3& color) {
+        DynamicValue value (color);
+        return m_adapters.vec3->instantiate (value, true);
+    });
 
-    // TODO: PROCESS THESE COLORS INSTEAD OF HARDCODING THEM
-    JSValue primaryColor = this->m_adapters.vec3->instantiate (primaryColorValue, true);
-    JSValue secondaryColor = this->m_adapters.vec3->instantiate (secondaryColorValue, true);
-    JSValue tertiaryColor = this->m_adapters.vec3->instantiate (tertiaryColorValue, true);
-    JSValue highContrastColor = this->m_adapters.vec3->instantiate (highContrastColorValue, true);
+    JSValue propertiesArgs[] = { events.properties () };
+    JSValue playbackArgs[] = { events.playback () };
+    JSValue mediaTimelineArgs[] = { events.timeline () };
+    JSValue mediaThumbnailArgs[] = { events.thumbnail () };
 
-    JSValue propertiesEvent = JS_NewObject (ctx);
-
-    // set properties
-    JS_SetPropertyStr (ctx, propertiesEvent, "title", JS_NewString (ctx, media.title.c_str ()));
-    JS_SetPropertyStr (ctx, propertiesEvent, "artist", JS_NewString (ctx, media.artist.c_str ()));
-    JS_SetPropertyStr (ctx, propertiesEvent, "albumTitle", JS_NewString (ctx, media.album.c_str ()));
-
-    JSValue playbackEvent = JS_NewObject (ctx);
-
-    JS_SetPropertyStr (ctx, playbackEvent, "state", JS_NewInt32 (ctx, media.playbackState));
-
-    JSValue mediaTimelineEvent = JS_NewObject (ctx);
-
-    JS_SetPropertyStr (ctx, mediaTimelineEvent, "position", JS_NewFloat64 (ctx, media.position));
-    JS_SetPropertyStr (ctx, mediaTimelineEvent, "duration", JS_NewFloat64 (ctx, media.duration));
-
-    JSValue mediaThumbnailEvent = JS_NewObject (ctx);
-
-    JS_SetPropertyStr (ctx, mediaThumbnailEvent, "hasThumbnail", JS_NewBool (ctx, media.url.has_value ()));
-    JS_SetPropertyStr (ctx, mediaThumbnailEvent, "primaryColor", primaryColor);
-    JS_SetPropertyStr (ctx, mediaThumbnailEvent, "secondaryColor", secondaryColor);
-    JS_SetPropertyStr (ctx, mediaThumbnailEvent, "tertiaryColor", tertiaryColor);
-    JS_SetPropertyStr (ctx, mediaThumbnailEvent, "highContrastColor", highContrastColor);
-
-    JSValue propertiesArgs[] = { propertiesEvent };
-    JSValue playbackArgs[] = { playbackEvent };
-    JSValue mediaTimelineArgs[] = { mediaTimelineEvent };
-    JSValue mediaThumbnailArgs[] = { mediaThumbnailEvent };
-
-    for (auto& module : this->m_scriptModules | std::views::values) {
-	// call all methods
-	JSValue result1 = this->call (module.module, 1, propertiesArgs, "mediaPropertiesChanged");
-	JSValue result2 = this->call (module.module, 1, playbackArgs, "mediaPlaybackChanged");
-	JSValue result3 = this->call (module.module, 1, mediaTimelineArgs, "mediaTimelineChanged");
-	JSValue result4 = this->call (module.module, 1, mediaThumbnailArgs, "mediaThumbnailChanged");
-
-	JS_FreeValue (ctx, result1);
-	JS_FreeValue (ctx, result2);
-	JS_FreeValue (ctx, result3);
-	JS_FreeValue (ctx, result4);
+	std::vector<std::string> scheduled;
+	scheduled.reserve (m_scriptModules.size ());
+	for (const auto& item : m_scriptModules) scheduled.push_back (item.first);
+	for (const auto& key : scheduled) {
+	    const auto found = m_scriptModules.find (key);
+	    if (found == m_scriptModules.end ()) continue;
+	    auto& module = found->second;
+	    if (!module.initialized) continue;
+	const bool moduleInitial = !module.mediaDelivered;
+	const auto invoke = [this, ctx, &module, &key] (const char* name, JSValue* args) {
+	    m_runningModule = &module;
+	    activateLayer (module);
+	    JSValue result = call (module.module, 1, args, name);
+	    if (JS_IsException (result))
+	        logJSException (ctx, (std::string ("media.") + name + ":" + key).c_str ());
+	    JS_FreeValue (ctx, result);
+	};
+	if (moduleInitial || propertiesChanged) invoke ("mediaPropertiesChanged", propertiesArgs);
+	if (moduleInitial || playbackChanged) invoke ("mediaPlaybackChanged", playbackArgs);
+	if (moduleInitial || timelineChanged) invoke ("mediaTimelineChanged", mediaTimelineArgs);
+	if (moduleInitial || thumbnailChanged) invoke ("mediaThumbnailChanged", mediaThumbnailArgs);
+	module.mediaDelivered = true;
     }
 
-    // free all created objects as we don't keep a ref to them anymore
-    JS_FreeValue (ctx, propertiesEvent);
-    JS_FreeValue (ctx, playbackEvent);
-    JS_FreeValue (ctx, mediaTimelineEvent);
-    JS_FreeValue (ctx, mediaThumbnailEvent);
 }

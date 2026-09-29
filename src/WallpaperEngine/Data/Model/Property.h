@@ -91,7 +91,7 @@ public:
 
     using Property::update;
     void update (const std::string& value, UpdateSource source) override {
-	this->update (ColorBuilder::parse (value), source);
+	this->update (ColorBuilder::parseProperty (value), source);
     }
 
     [[nodiscard]] std::string dump () const override {

@@ -2,12 +2,22 @@
 
 #include "WallpaperEngine/Logging/Log.h"
 #include <exception>
+#include <algorithm>
+#include <cctype>
+#include <cstdint>
+#include <cmath>
+#include <functional>
 #include <regex>
 #include <stack>
+#include <stdexcept>
 #include <string>
+#include <string_view>
 #include <utility>
+#include <vector>
 
 #include "GLSLContext.h"
+#include "ExactSourceCache.h"
+#include "ParticleRopeShader.h"
 #include "WallpaperEngine/Assets/AssetLoadException.h"
 #include "WallpaperEngine/Render/Shaders/Variables/ShaderVariable.h"
 #include "WallpaperEngine/Render/Shaders/Variables/ShaderVariableFloat.h"
@@ -62,23 +72,110 @@ using namespace WallpaperEngine::Render;
 using namespace WallpaperEngine::Data::Builders;
 using namespace WallpaperEngine::Render::Shaders;
 
+namespace {
+ExactSourceCache linkedVaryingCache {128, 32 * 1024 * 1024};
+
+// This installed Workshop vertex source has one extra directive after all
+// DEFORMITY branches have closed. The native renderer displays the containing
+// layer, while GLSL rejects the authored source and drops the entire layer.
+// Restrict the repair to the exact package bytes; another revision may use
+// that closing directive for a real outer conditional.
+std::string repairKnownAudioBarsVertex (const std::string& file, std::string source) {
+    if (file != "workshop/3082978660/effects/Simple_Audio_Bars" || source.size () != 2565)
+        return source;
+    uint64_t fingerprint = UINT64_C (14695981039346656037);
+    for (const unsigned char byte : source)
+        fingerprint = (fingerprint ^ byte) * UINT64_C (1099511628211);
+    if (fingerprint != UINT64_C (0xe79d7affab1a6582)) return source;
+
+    constexpr std::string_view marker = "\r\n#endif\r\n\r\n#if TRANSFORM";
+    const size_t position = source.find (marker);
+    if (position == std::string::npos || source.find (marker, position + 1) != std::string::npos)
+        return source;
+    source.erase (position + 2, std::string_view ("#endif").size ());
+    sLog.out ("Repaired known malformed Audio Bars vertex directive in ", file);
+    return source;
+}
+
+struct ShaderToken {
+    std::string text;
+    size_t start;
+    size_t end;
+    bool identifier;
+};
+
+std::vector<ShaderToken> shaderTokens (const std::string& source) {
+    std::vector<ShaderToken> tokens;
+    bool lineStart = true;
+    for (size_t i = 0; i < source.size ();) {
+        if (source[i] == '\n') { lineStart = true; ++i; }
+        else if (std::isspace (static_cast<unsigned char> (source[i]))) ++i;
+        else if (source.compare (i, 2, "//") == 0) {
+            const size_t end = source.find ('\n', i);
+            i = end == std::string::npos ? source.size () : end;
+        } else if (source.compare (i, 2, "/*") == 0) {
+            const size_t end = source.find ("*/", i + 2);
+            if (end == std::string::npos) break;
+            if (source.find ('\n', i) < end) lineStart = true;
+            i = end + 2;
+        } else if (source[i] == '#' && lineStart) {
+            const size_t end = source.find ('\n', i);
+            i = end == std::string::npos ? source.size () : end;
+        } else if (std::isalpha (static_cast<unsigned char> (source[i])) || source[i] == '_') {
+            const size_t start = i++;
+            while (i < source.size () &&
+                   (std::isalnum (static_cast<unsigned char> (source[i])) || source[i] == '_')) ++i;
+            tokens.push_back ({source.substr (start, i - start), start, i, true});
+            lineStart = false;
+        } else {
+            tokens.push_back ({source.substr (i, 1), i, i + 1, false});
+            lineStart = false;
+            ++i;
+        }
+    }
+    return tokens;
+}
+} // namespace
+
 ShaderUnit::ShaderUnit (
     const GLSLContext::UnitType type, std::string file, std::string content, const AssetLocator& assetLocator,
     const ShaderConstantMap& constants, const TextureMap& passTextures, const TextureMap& overrideTextures,
-    const ComboMap& combos, const ComboMap& overrideCombos
+    const ComboMap& combos, const ComboMap& overrideCombos, const ShaderConstantMap* baseConstants
 ) :
     m_type (type), m_file (std::move (file)), m_content (std::move (content)), m_combos (combos),
-    m_overrideCombos (overrideCombos), m_constants (constants), m_passTextures (passTextures),
+    m_overrideCombos (overrideCombos), m_constants (constants), m_baseConstants (baseConstants),
+    m_passTextures (passTextures),
     m_overrideTextures (overrideTextures), m_link (nullptr), m_assetLocator (assetLocator) {
+    if (m_type == GLSLContext::UnitType_Vertex && m_file == "genericropeparticle"
+        && m_overrideCombos.contains ("LINUX_CPU_ROPE_UV")
+        && m_overrideCombos.at ("LINUX_CPU_ROPE_UV") != 0)
+        m_content = particleRopeCpuUVSource (std::move (m_content));
     // pre-process the shader so the units are clear
     this->preprocess ();
 }
 
 void ShaderUnit::preprocess () {
-    this->m_preprocessed = this->m_content;
+    this->m_preprocessed = this->m_type == GLSLContext::UnitType_Vertex
+        ? repairKnownAudioBarsVertex (this->m_file, this->m_content) : this->m_content;
     this->m_includes = "";
 
     this->preprocessIncludes ();
+    if (m_type == GLSLContext::UnitType_Vertex && m_file == "genericparticle"
+        && m_overrideCombos.contains ("TRAILRENDERER")
+        && m_overrideCombos.at ("TRAILRENDERER") != 0) {
+        // common_particles.h computes the lateral sprite-trail basis with a
+        // cross product. Particle streams and the local eye are Y-reflected
+        // for GL, which reverses that cross product's handedness. Restore
+        // native UV-associated corners without changing the authored UVs or
+        // the velocity-aligned long axis. Ordinary sprites do not use it.
+        constexpr std::string_view nativeRight =
+            "right = cross(eyeDirection, localVelocity);";
+        const size_t right = m_preprocessed.find (nativeRight);
+        if (right != std::string::npos)
+            m_preprocessed.replace (right, nativeRight.size (),
+                "right = -cross(eyeDirection, localVelocity);");
+    }
+    this->collapseEquivalentConditionals ();
     this->preprocessRequires ();
     this->preprocessVariables ();
 
@@ -93,6 +190,77 @@ void ShaderUnit::preprocess () {
     }
 }
 
+void ShaderUnit::collapseEquivalentConditionals () {
+    struct Line { size_t start; size_t after; std::string directive; bool clean; };
+    for (;;) {
+        std::vector<Line> lines;
+        bool blockComment = false;
+        for (size_t start = 0; start < this->m_preprocessed.size ();) {
+            const size_t newline = this->m_preprocessed.find ('\n', start);
+            const size_t end = newline == std::string::npos ? this->m_preprocessed.size () : newline;
+            const std::string line = this->m_preprocessed.substr (start, end - start);
+            size_t firstCode = std::string::npos;
+            for (size_t i = 0; i < line.size (); ++i) {
+                if (blockComment) {
+                    if (line.compare (i, 2, "*/") == 0) { blockComment = false; ++i; }
+                } else if (line.compare (i, 2, "//") == 0) break;
+                else if (line.compare (i, 2, "/*") == 0) { blockComment = true; ++i; }
+                else if (firstCode == std::string::npos && !std::isspace (static_cast<unsigned char> (line[i])))
+                    firstCode = i;
+            }
+            std::string directive;
+            if (firstCode != std::string::npos && line[firstCode] == '#') {
+                size_t wordEnd = firstCode + 1;
+                while (wordEnd < line.size () && std::isalpha (static_cast<unsigned char> (line[wordEnd])))
+                    ++wordEnd;
+                directive = line.substr (firstCode, wordEnd - firstCode);
+            }
+            const bool clean = firstCode != std::string::npos &&
+                               line.find ("/*") == std::string::npos &&
+                               line.find ("*/") == std::string::npos &&
+                               line.find ("//") == std::string::npos;
+            lines.push_back ({start, newline == std::string::npos ? end : end + 1, directive, clean});
+            start = lines.back ().after;
+        }
+
+        bool changed = false;
+        for (size_t i = 0; i < lines.size () && !changed; ++i) {
+            if (lines[i].directive != "#if" && lines[i].directive != "#ifdef" &&
+                lines[i].directive != "#ifndef") continue;
+            int depth = 1;
+            size_t alternate = lines.size ();
+            size_t closing = lines.size ();
+            bool hasElif = false;
+            for (size_t j = i + 1; j < lines.size (); ++j) {
+                const auto& directive = lines[j].directive;
+                if (directive == "#if" || directive == "#ifdef" || directive == "#ifndef") ++depth;
+                else if (directive == "#endif" && --depth == 0) { closing = j; break; }
+                else if (depth == 1 && directive == "#else") {
+                    if (alternate != lines.size ()) hasElif = true;
+                    alternate = j;
+                }
+                else if (depth == 1 && directive == "#elif") hasElif = true;
+            }
+            if (alternate == lines.size () || closing == lines.size () || hasElif ||
+                !lines[i].clean || !lines[alternate].clean || !lines[closing].clean) continue;
+            const std::string left = this->m_preprocessed.substr (
+                lines[i].after, lines[alternate].start - lines[i].after);
+            const std::string right = this->m_preprocessed.substr (
+                lines[alternate].after, lines[closing].start - lines[alternate].after);
+            if (left != right) continue;
+            const std::string original = this->m_preprocessed.substr (
+                lines[i].start, lines[closing].after - lines[i].start);
+            std::string replacement = left;
+            replacement.append (std::count (original.begin (), original.end (), '\n') -
+                                std::count (left.begin (), left.end (), '\n'), '\n');
+            this->m_preprocessed.replace (
+                lines[i].start, lines[closing].after - lines[i].start, replacement);
+            changed = true;
+        }
+        if (!changed) break;
+    }
+}
+
 void ShaderUnit::preprocessVariables () {
     size_t start = 0, end = 0;
     while ((end = this->m_preprocessed.find ('\n', start)) != std::string::npos) {
@@ -100,13 +268,16 @@ void ShaderUnit::preprocessVariables () {
 	std::string line = this->m_preprocessed.substr (start, end - start);
 	const size_t combo = line.find ("// [COMBO] ");
 	const size_t uniform = line.find ("uniform ");
-	const size_t comment = line.find ("// ");
+	const size_t comment = line.find ("//");
 	const size_t semicolon = line.find (';');
+	const size_t metadata = comment == std::string::npos
+	    ? std::string::npos : line.find_first_not_of (" \t", comment + 2);
 
 	if (combo != std::string::npos) {
 	    this->parseComboConfiguration (line.substr (combo + strlen ("// [COMBO] ")), 0);
 	} else if (
 	    uniform != std::string::npos && comment != std::string::npos && semicolon != std::string::npos &&
+	    metadata != std::string::npos && line[metadata] == '{' &&
 	    // this check ensures that the comment is after the semicolon (so it's not a commented-out line)
 	    // this needs further refining as it's not taking into account block comments
 	    semicolon < comment
@@ -134,179 +305,169 @@ void ShaderUnit::preprocessVariables () {
 }
 
 void ShaderUnit::preprocessIncludes () {
-    size_t start = 0, end = 0;
-    // prepare the include content
-    while ((start = this->m_preprocessed.find ("#include", end)) != std::string::npos) {
-	// TODO: CHECK FOR ERRORS HERE, MALFORMED INCLUDES WILL NOT BE PROPERLY HANDLED
-	const size_t quoteStart = this->m_preprocessed.find_first_of ('"', start) + 1;
-	const size_t quoteEnd = this->m_preprocessed.find_first_of ('"', quoteStart);
-	const std::string filename = this->m_preprocessed.substr (quoteStart, quoteEnd - quoteStart);
+    // Keep conditional includes in scope. Unconditional helper files must follow
+    // authored global declarations because GLSL functions cannot refer forward to
+    // uniforms (genericimage4.frag places common_pbr_2.h before g_Texture0).
+    std::vector<std::string> includeStack;
+    std::string deferred;
+    const auto firstFunctionLine = [](const std::string& source) {
+        struct Token { std::string text; size_t start; bool identifier; };
+        std::vector<Token> tokens;
+        bool blockComment = false;
+        bool lineComment = false;
+        bool lineStart = true;
+        for (size_t i = 0; i < source.size ();) {
+            if (lineComment) {
+                if (source[i++] == '\n') { lineComment = false; lineStart = true; }
+            } else if (blockComment) {
+                if (source.compare (i, 2, "*/") == 0) { blockComment = false; i += 2; }
+                else if (source[i++] == '\n') lineStart = true;
+            } else if (source.compare (i, 2, "//") == 0) { lineComment = true; i += 2; }
+            else if (source.compare (i, 2, "/*") == 0) { blockComment = true; i += 2; }
+            else if (source[i] == '#' && lineStart) {
+                const size_t end = source.find ('\n', i);
+                i = end == std::string::npos ? source.size () : end;
+            }
+            else if (std::isalpha (static_cast<unsigned char> (source[i])) || source[i] == '_') {
+                const size_t start = i++;
+                while (i < source.size () &&
+                       (std::isalnum (static_cast<unsigned char> (source[i])) || source[i] == '_')) ++i;
+                tokens.push_back ({source.substr (start, i - start), start, true});
+                lineStart = false;
+            } else {
+                if (source[i] == '\n') lineStart = true;
+                else if (!std::isspace (static_cast<unsigned char> (source[i]))) {
+                    tokens.push_back ({source.substr (i, 1), i, false});
+                    lineStart = false;
+                }
+                ++i;
+            }
+        }
+        for (size_t i = 0; i + 3 < tokens.size (); ++i) {
+            if (!tokens[i].identifier || !tokens[i + 1].identifier || tokens[i + 2].text != "(") continue;
+            int depth = 0;
+            size_t after = i + 2;
+            for (; after < tokens.size (); ++after) {
+                if (tokens[after].text == "(") ++depth;
+                else if (tokens[after].text == ")" && --depth == 0) { ++after; break; }
+            }
+            if (after < tokens.size () && tokens[after].text == "{") {
+                const size_t previous = source.rfind ('\n', tokens[i].start);
+                return previous == std::string::npos ? size_t (0) : previous + 1;
+            }
+        }
+        return std::string::npos;
+    };
+    std::function<std::string(const std::string&, bool)> expand = [&](const std::string& source, bool root) {
+        std::string result;
+        bool blockComment = false;
+        int conditionalDepth = 0;
+        const size_t functionStart = root ? firstFunctionLine (source) : std::string::npos;
+        size_t lineStart = 0;
 
-	// some includes might not be present
-	// and that should not be treated as an error mainly because these could come from
-	// commented out content
-	std::string content;
+        while (lineStart < source.size ()) {
+            const size_t lineEnd = source.find ('\n', lineStart);
+            const bool hasNewline = lineEnd != std::string::npos;
+            const size_t end = hasNewline ? lineEnd : source.size ();
+            const std::string line = source.substr (lineStart, end - lineStart);
+            size_t firstCode = std::string::npos;
 
-	try {
-	    content += "// begin of include from file ";
-	    content += filename;
-	    content += "\n";
-	    content += this->m_assetLocator.includeShader (filename);
-	    content += "\n// end of included from file ";
-	    content += filename;
-	    content += "\n";
-	} catch (AssetLoadException&) {
-	    content += "// tried including file ";
-	    content += filename;
-	    content += " but was not found\n";
-	}
+            for (size_t i = 0; i < line.size (); ++i) {
+                if (blockComment) {
+                    if (line.compare (i, 2, "*/") == 0) {
+                        blockComment = false;
+                        ++i;
+                    }
+                } else if (line.compare (i, 2, "//") == 0) {
+                    break;
+                } else if (line.compare (i, 2, "/*") == 0) {
+                    blockComment = true;
+                    ++i;
+                } else if (line[i] != ' ' && line[i] != '\t' && line[i] != '\r' && firstCode == std::string::npos) {
+                    firstCode = i;
+                }
+            }
 
-	// replace the first two letters with a comment so the filelength doesn't change
-	this->m_preprocessed = this->m_preprocessed.replace (start, 2, "//");
-
-	this->m_includes += content;
-
-	// go to the end of the line
-	end = start;
-    }
-
-    // ensure the included files do not include other files
-    end = 0;
-
-    // then apply includes in-place
-    while ((start = this->m_includes.find ("#include", end)) != std::string::npos) {
-	const size_t lineEnd = this->m_includes.find_first_of ('\n', start);
-	// TODO: CHECK FOR ERRORS HERE, MALFORMED INCLUDES WILL NOT BE PROPERLY HANDLED
-	const size_t quoteStart = this->m_includes.find_first_of ('"', start) + 1;
-	const size_t quoteEnd = this->m_includes.find_first_of ('"', quoteStart);
-	const std::string filename = this->m_includes.substr (quoteStart, quoteEnd - quoteStart);
-
-	// some includes might not be present
-	// and that should not be treated as an error mainly because these could come from
-	// commented out content
-	std::string content;
-
-	try {
-	    content = "// begin of include from file ";
-	    content += filename;
-	    content += "\n";
-	    content += this->m_assetLocator.includeShader (filename);
-	    content += "\n// end of included from file ";
-	    content += filename;
-	    content += "\n";
-	} catch (AssetLoadException&) {
-	    content = "// tried including file ";
-	    content += filename;
-	    content += " but was not found\n";
-	}
-
-	// file contents ready, replace things
-	this->m_includes = this->m_includes.replace (start, lineEnd - start, content);
-
-	// go back to the beginning of the line to properly continue detecting things
-	end = start;
-    }
-
-    // search for the main function and add the includes before that for now
-    end = 0;
-    bool includesAdded = false;
-
-    // finally, try to place the include contents before the main function
-    while ((start = this->m_preprocessed.find (" main", end)) != std::string::npos) {
-	char value = this->m_preprocessed.at (start + 5);
-
-	end = start + 5;
-
-	if (value != ' ' && value != '(') {
-	    continue;
-	}
-
-	// main located, search for uniforms and find the latest one available
-	size_t lastAttribute = this->m_preprocessed.rfind ("attribute", start);
-	size_t lastVarying = this->m_preprocessed.rfind ("varying", start);
-	size_t lastUniform = this->m_preprocessed.rfind ("uniform", start);
-	size_t latest = lastAttribute;
-
-	if (latest == std::string::npos) {
-	    latest = lastVarying;
-	} else if (latest < lastVarying && lastVarying != std::string::npos) {
-	    latest = lastVarying;
-	}
-
-	if (latest == std::string::npos) {
-	    latest = lastUniform;
-	} else if (latest < lastUniform && lastUniform != std::string::npos) {
-	    latest = lastUniform;
-	}
-
-	if (latest < start) {
-	    // find the end of the current line
-	    latest = this->m_preprocessed.find ('\n', latest);
-	} else {
-	    // find the end of the previous line
-	    latest = this->m_preprocessed.rfind ('\n', start);
-	}
-
-	// update the function start to point to the end of the previous line
-	// as this will be used to determine the position of the includes
-	start = this->m_preprocessed.rfind ('\n', start);
-
-	// keeps track of the start and end of ifdefs to look for the right
-	// place to put the includes in
-	std::stack<size_t> ifdefStack;
-
-	// start looking for #if and #endif results and add to the stack so we find the start of the current chain of
-	// ifdefs and use that as point
-
-	// for this we'll use regex
-	const std::regex ifdef (R"((#if|#endif))");
-	std::smatch match;
-	size_t current = 0;
-
-	while (
-	    std::regex_search (this->m_preprocessed.cbegin () + current, this->m_preprocessed.cend (), match, ifdef)) {
-	    current += match.position ();
-
-	    // if it's opening an #ifdef keep track of the start of the block
-	    // and that's it
-	    if (this->m_preprocessed.substr (current, 3) == "#if") {
-		// go to the next character so the regex doesn't match with the same thing again
-		ifdefStack.push (current++);
-		continue;
-	    }
-
-	    // go to the next character so the regex doesn't match with the same thing again
-	    current++;
-
-	    // most likely a syntax error, but we'll ignore it for now...
-	    if (ifdefStack.empty ()) {
-		continue;
-	    }
-
-	    size_t stackStart = ifdefStack.top ();
-	    ifdefStack.pop ();
-
-	    if (latest > stackStart && latest <= current) {
-		// The insertion point is inside a conditional block.
-		// Move to BEFORE the #if so includes are available to all branches
-		// (e.g. genericropeparticle.vert has #if GS_ENABLED wrapping two main() functions).
-		size_t beforeIfdef = this->m_preprocessed.rfind ('\n', stackStart);
-		latest = (beforeIfdef != std::string::npos) ? beforeIfdef : 0;
-	    }
-	}
-
-	// no more matches, get the one that happens the earliest
-	// TODO: IS THIS GOOD ENOUGH? MAYBE WE SHOULD BE GETTING THE FIRST #IF BLOCK INSTEAD?
-	latest = std::min (latest, start);
-
-	// finally insert it there
-	this->m_preprocessed.insert (latest + 1, this->m_includes + '\n');
-	includesAdded = true;
-	break;
-    }
-
-    if (!includesAdded) {
-	sLog.exception ("Could not find where to place includes for shader unit ", this->m_file);
+            const bool directive = firstCode != std::string::npos && line.compare (firstCode, 8, "#include") == 0 &&
+                                   (firstCode + 8 == line.size () || line[firstCode + 8] == ' ' ||
+                                    line[firstCode + 8] == '\t');
+            if (!directive) {
+                result += line;
+                if (hasNewline) result += '\n';
+            } else {
+                const size_t quoteStart = line.find ('"', firstCode + 8);
+                const size_t quoteEnd = quoteStart == std::string::npos ? std::string::npos :
+                                        line.find ('"', quoteStart + 1);
+                if (quoteStart == std::string::npos || quoteEnd == std::string::npos) {
+                    // Leave malformed input to the shader compiler, with its original line.
+                    result += line;
+                    if (hasNewline) result += '\n';
+                } else {
+                    const std::string filename = line.substr (quoteStart + 1, quoteEnd - quoteStart - 1);
+                    if (std::find (includeStack.begin (), includeStack.end (), filename) != includeStack.end ()) {
+                        // A guarded recursive include may be inactive when GLSL evaluates its #if.
+                        // Keep the directive so active cycles fail at shader compilation.
+                        result += line;
+                        if (hasNewline) result += '\n';
+                    } else try {
+                        includeStack.push_back (filename);
+                        const std::string content = this->m_assetLocator.includeShader (filename);
+                        result += line.substr (0, firstCode);
+                        std::string expanded = "// begin of include from file " + filename + "\n";
+                        expanded += expand (content, false);
+                        if (content.empty () || content.back () != '\n') expanded += '\n';
+                        expanded += "// end of included from file " + filename + "\n";
+                        if (root && conditionalDepth == 0 && lineStart < functionStart) deferred += expanded;
+                        else result += expanded;
+                        result += line.substr (quoteEnd + 1);
+                        if (hasNewline) result += '\n';
+                        includeStack.pop_back ();
+                    } catch (AssetLoadException&) {
+                        includeStack.pop_back ();
+                        // Preserve an unresolved active directive so compilation reports it.
+                        result += line;
+                        if (hasNewline) result += '\n';
+                    }
+                }
+            }
+            if (root && firstCode != std::string::npos) {
+                if (line.compare (firstCode, 3, "#if") == 0) ++conditionalDepth;
+                else if (line.compare (firstCode, 6, "#endif") == 0 && conditionalDepth > 0) --conditionalDepth;
+            }
+            lineStart = hasNewline ? end + 1 : source.size ();
+        }
+        return result;
+    };
+    this->m_preprocessed = expand (this->m_preprocessed, true);
+    if (!deferred.empty ()) {
+        // Insert before the first function, or before its enclosing conditional.
+        // This mirrors the engine's global helper placement without moving
+        // includes from conditional branches out of those branches.
+        const size_t functionStart = firstFunctionLine (this->m_preprocessed);
+        size_t insertion = functionStart == std::string::npos ? this->m_preprocessed.size () : functionStart;
+        std::vector<size_t> conditionStarts;
+        bool blockComment = false;
+        size_t lineStart = 0;
+        while (lineStart < insertion) {
+            const size_t end = this->m_preprocessed.find ('\n', lineStart);
+            const std::string line = this->m_preprocessed.substr (lineStart, end - lineStart);
+            size_t first = std::string::npos;
+            for (size_t i = 0; i < line.size (); ++i) {
+                if (blockComment) {
+                    if (line.compare (i, 2, "*/") == 0) { blockComment = false; ++i; }
+                } else if (line.compare (i, 2, "//") == 0) break;
+                else if (line.compare (i, 2, "/*") == 0) { blockComment = true; ++i; }
+                else if (first == std::string::npos && !std::isspace (static_cast<unsigned char> (line[i])))
+                    first = i;
+            }
+            if (first != std::string::npos && line.compare (first, 3, "#if") == 0)
+                conditionStarts.push_back (lineStart);
+            else if (first != std::string::npos && line.compare (first, 6, "#endif") == 0 && !conditionStarts.empty ())
+                conditionStarts.pop_back ();
+            lineStart = end == std::string::npos ? this->m_preprocessed.size () : end + 1;
+        }
+        if (!conditionStarts.empty ()) insertion = conditionStarts.front ();
+        this->m_preprocessed.insert (insertion, deferred);
     }
 }
 
@@ -336,8 +497,6 @@ void ShaderUnit::preprocessRequires () {
 	    continue;
 	}
 
-	sLog.out ("Resolving require module: ", moduleName, " in shader ", this->m_file);
-
 	std::string moduleCode = this->resolveRequireModule (moduleName);
 
 	// comment out the #require directive
@@ -364,22 +523,57 @@ std::string ShaderUnit::resolveRequireModule (const std::string& moduleName) con
 }
 
 std::string ShaderUnit::generateLightingV1 () const {
-    // PerformLighting_V1 is dynamically generated by Wallpaper Engine based on the scene's
-    // light sources. Since linux-wallpaperengine does not yet support light objects, we
-    // generate a stub that returns no dynamic light contribution.
-    return "// begin of generated module LightingV1\n"
-	   "vec3 PerformLighting_V1(vec3 worldPos, vec3 albedo, vec3 normal, vec3 viewDir,\n"
-	   "    vec3 specularTint, vec3 baseReflectance, float roughness, float metallic)\n"
-	   "{\n"
-	   "    return vec3(0.0);\n"
-	   "}\n"
-	   "// end of generated module LightingV1\n";
+    const auto overridden = m_overrideCombos.find ("LIGHTS_POINT");
+    const auto authored = m_combos.find ("LIGHTS_POINT");
+    const int pointCount = overridden != m_overrideCombos.end () ? overridden->second
+        : authored != m_combos.end () ? authored->second : 0;
+    if (pointCount < 0 || pointCount > 15)
+	throw std::invalid_argument ("LightingV1 point-light count exceeds native four-bit lightconfig range");
+    // Native 140169140 generates this module from the light-count combo. Its
+    // unshadowed point branch calls the shipped common_pbr_2.h helper with
+    // the scene's premultiplied color/radius and world origin/exponent arrays.
+    std::string result = "// begin of generated module LightingV1\n#if LIGHTING\n";
+    if (pointCount > 0)
+        result += "uniform vec4 g_LPoint_Color[" + std::to_string (pointCount) + "];\n"
+                  "uniform vec4 g_LPoint_Origin[" + std::to_string (pointCount) + "];\n";
+    result += "vec3 PerformLighting_V1(vec3 worldPos, vec3 color, vec3 normal, vec3 viewVector,\n"
+              "    vec3 specularTint, vec3 ambient, float roughness, float metallic)\n"
+              "{\n    vec3 light = CAST3(0.0);\n";
+    for (int index = 0; index < pointCount; ++index) {
+        result += "    { const int i = " + std::to_string (index) + ";\n"
+                  "      vec3 lightDelta = g_LPoint_Origin[i].xyz - worldPos;\n"
+                  "      light += ComputePBRLightShadow(normal, lightDelta, viewVector, color, "
+                  "g_LPoint_Color[i].rgb, g_LPoint_Color[i].w, g_LPoint_Origin[i].w, "
+                  "specularTint, ambient, roughness, metallic, 1.0); }\n";
+    }
+    result += "    return light;\n}\n#else\n"
+              "vec3 PerformLighting_V1(vec3 worldPos, vec3 color, vec3 normal, vec3 viewVector,\n"
+              "    vec3 specularTint, vec3 ambient, float roughness, float metallic)\n"
+              "{ return vec3(0.0); }\n#endif\n// end of generated module LightingV1\n";
+    return result;
 }
 
 std::string ShaderUnit::applyLinkedVaryingCompatibility (std::string source) const {
     if (this->m_type != GLSLContext::UnitType_Vertex || this->m_link == nullptr) {
 	return source;
     }
+
+    // The transform depends only on these two preprocessed units. The same
+    // generic image pair is often compiled hundreds of times in one scene.
+    ExactSourceCache::SourcePair cacheKey {source, this->m_link->m_preprocessed};
+    if (const auto* cached = linkedVaryingCache.find (cacheKey)) return cached->first;
+
+    // Some shipped shaders declare vec2 and vec4 forms of the same varying
+    // under complementary combo branches (for example generic LIGHTMAP).
+    // The GLSL preprocessor selects a matching pair; a text-level rewrite
+    // would corrupt the other branch, including vec4(vec4, 0, 1).
+    const auto hasBothWidths = [] (const std::string& unit, const std::string& name) {
+        return std::regex_search (unit, std::regex ("\\bvarying\\s+vec2\\s+" + name + "\\s*;"))
+            && std::regex_search (unit, std::regex ("\\bvarying\\s+vec4\\s+" + name + "\\s*;"));
+    };
+    const auto conditionalWidth = [&] (const std::string& name) {
+        return hasBothWidths (source, name) || hasBothWidths (m_link->m_preprocessed, name);
+    };
 
     std::regex fragmentVec4Varying (R"(\bvarying\s+vec4\s+([A-Za-z_][A-Za-z0-9_]*)\s*;)");
     std::smatch varyingMatch;
@@ -389,6 +583,7 @@ std::string ShaderUnit::applyLinkedVaryingCompatibility (std::string source) con
     while (std::regex_search (linked.cbegin () + linkedOffset, linked.cend (), varyingMatch, fragmentVec4Varying)) {
 	const std::string name = varyingMatch[1].str ();
 	linkedOffset += varyingMatch.position () + varyingMatch.length ();
+	if (conditionalWidth (name)) continue;
 
 	const std::regex vertexVec2Decl ("\\bvarying\\s+vec2\\s+" + name + "\\s*;");
 	if (!std::regex_search (source, vertexVec2Decl)) {
@@ -411,39 +606,347 @@ std::string ShaderUnit::applyLinkedVaryingCompatibility (std::string source) con
 	}
     }
 
+    // Authored HLSL-style shader pairs can expose a vec4 output to a vec2
+    // fragment input. Narrow only when the vertex unit itself touches the
+    // first two components; then the fragment's authored vec2 contract and
+    // every vertex value it can observe remain unchanged.
+    const auto fragmentTokens = shaderTokens (this->m_link->m_preprocessed);
+    for (size_t i = 0; i + 3 < fragmentTokens.size (); ++i) {
+        if (fragmentTokens[i].text != "varying" || fragmentTokens[i + 1].text != "vec2"
+            || !fragmentTokens[i + 2].identifier || fragmentTokens[i + 3].text != ";") continue;
+        const std::string name = fragmentTokens[i + 2].text;
+	if (conditionalWidth (name)) continue;
+        const auto vertexTokens = shaderTokens (source);
+        size_t declarationType = vertexTokens.size ();
+        size_t declarationName = vertexTokens.size ();
+        size_t declarations = 0;
+        for (size_t j = 0; j + 3 < vertexTokens.size (); ++j) {
+            if (vertexTokens[j].text == "varying" && vertexTokens[j + 1].text == "vec4"
+                && vertexTokens[j + 2].text == name && vertexTokens[j + 3].text == ";") {
+                declarationType = j + 1;
+                declarationName = j + 2;
+                ++declarations;
+            }
+        }
+        if (declarations != 1) continue;
+        bool onlyFirstTwoComponents = true;
+        for (size_t j = 0; j < vertexTokens.size (); ++j) {
+            if (vertexTokens[j].text != name || j == declarationName) continue;
+            if (j > 0 && vertexTokens[j - 1].text == ".") { onlyFirstTwoComponents = false; break; }
+            if (j + 2 >= vertexTokens.size () || vertexTokens[j + 1].text != "."
+                || !vertexTokens[j + 2].identifier) { onlyFirstTwoComponents = false; break; }
+            for (const char component : vertexTokens[j + 2].text) {
+                if (std::string_view ("xyrgst").find (component) == std::string_view::npos) {
+                    onlyFirstTwoComponents = false;
+                    break;
+                }
+            }
+            if (!onlyFirstTwoComponents) break;
+        }
+        if (!onlyFirstTwoComponents) continue;
+        source.replace (vertexTokens[declarationType].start,
+                        vertexTokens[declarationType].end - vertexTokens[declarationType].start, "vec2");
+        sLog.out ("Narrowed vertex varying ", name, " to linked fragment vec2 in ", this->m_file);
+    }
+
+    linkedVaryingCache.insert (std::move (cacheKey), {source, ""});
+    return source;
+}
+
+std::string ShaderUnit::applyFragmentLinkedBoundsCompatibility (std::string source) const {
+    if (this->m_type != GLSLContext::UnitType_Fragment || this->m_link == nullptr ||
+        this->m_file.find ("foliagesway") == std::string::npos ||
+        source.find ("v_Bounds") == std::string::npos ||
+        source.find ("varying vec2 v_Bounds;") != std::string::npos ||
+        source.find ("#if MODE == 0") == std::string::npos ||
+        this->m_link->m_preprocessed.find ("varying vec2 v_Bounds;") == std::string::npos ||
+        this->m_link->m_preprocessed.find ("#if MODE == 0") == std::string::npos)
+        return source;
+    sLog.out ("Restored linked conditional bounds varying in ", this->m_file);
+    return "#if MODE == 0\nvarying vec2 v_Bounds;\n#endif\n" + source;
+}
+
+std::string ShaderUnit::applyFragmentShadowMaskCompatibility (std::string source) const {
+    if (this->m_type != GLSLContext::UnitType_Fragment ||
+        this->m_file.find ("workshop/2821337237/effects/shadow_map") == std::string::npos ||
+        source.find ("#if SHADOWMASK != 0") == std::string::npos)
+        return source;
+    const auto tokens = shaderTokens (source);
+    for (size_t i = 0; i + 4 < tokens.size (); ++i) {
+        if (tokens[i].text != "vec3" || tokens[i + 1].text != "ShadowMask" || tokens[i + 2].text != "(")
+            continue;
+        size_t open = i + 2;
+        int parentheses = 0;
+        for (; open < tokens.size (); ++open) {
+            if (tokens[open].text == "(") ++parentheses;
+            else if (tokens[open].text == ")" && --parentheses == 0) { ++open; break; }
+        }
+        if (open == tokens.size () || tokens[open].text != "{") continue;
+        int braces = 1;
+        size_t close = open + 1;
+        for (; close < tokens.size (); ++close) {
+            if (tokens[close].text == "{") ++braces;
+            else if (tokens[close].text == "}" && --braces == 0) break;
+        }
+        if (close == tokens.size ()) continue;
+        source.insert (tokens[close].end, "\n#endif\n");
+        source.insert (tokens[i].start, "#if SHADOWMASK != 0\n");
+        sLog.out ("Guarded unused shadow mask helper in ", this->m_file);
+        return source;
+    }
+    return source;
+}
+
+std::string ShaderUnit::applyFragmentWritableInputCompatibility (std::string source) const {
+    if (this->m_type != GLSLContext::UnitType_Fragment || source.find ("_weMutableTexCoord") != std::string::npos)
+        return source;
+
+    const auto tokens = shaderTokens (source);
+    size_t bodyOpen = tokens.size ();
+    size_t bodyClose = tokens.size ();
+    for (size_t i = 0; i + 4 < tokens.size (); ++i) {
+        if (tokens[i].text != "void" || tokens[i + 1].text != "main" || tokens[i + 2].text != "(") continue;
+        int parentheses = 1;
+        size_t next = i + 3;
+        for (; next < tokens.size (); ++next) {
+            if (tokens[next].text == "(") ++parentheses;
+            else if (tokens[next].text == ")" && --parentheses == 0) { ++next; break; }
+        }
+        if (next < tokens.size () && tokens[next].text == "{") { bodyOpen = next; break; }
+    }
+    if (bodyOpen == tokens.size ()) return source;
+    int braces = 1;
+    for (size_t i = bodyOpen + 1; i < tokens.size (); ++i) {
+        if (tokens[i].text == "{") ++braces;
+        else if (tokens[i].text == "}" && --braces == 0) { bodyClose = i; break; }
+    }
+    if (bodyClose == tokens.size ()) return source;
+
+    size_t declarationCount = 0;
+    bool writesInput = false;
+    for (size_t i = 0; i < tokens.size (); ++i) {
+        if (tokens[i].text != "v_TexCoord") continue;
+        if (i <= bodyOpen || i >= bodyClose) {
+            if (i >= 2 && i + 1 < tokens.size () && tokens[i - 2].text == "varying" &&
+                tokens[i - 1].text == "vec2" && tokens[i + 1].text == ";") ++declarationCount;
+            else return source; // A helper outside main may need the original global input.
+            continue;
+        }
+        if (i > 0 && (tokens[i - 1].text == "vec2" || tokens[i - 1].text == "vec4"))
+            return source; // An authored main-local shadow already makes writes legal.
+        if (i > 0 && tokens[i - 1].text == ".")
+            return source; // A struct member with this name is a different object.
+        size_t next = i + 1;
+        if (next + 1 < tokens.size () && tokens[next].text == "." && tokens[next + 1].identifier)
+            next += 2;
+        if (next < tokens.size () && tokens[next].text == "=" &&
+            (next + 1 == tokens.size () || tokens[next + 1].text != "=")) writesInput = true;
+        if (next + 1 < tokens.size () &&
+            ((tokens[next].text == "+" || tokens[next].text == "-" ||
+              tokens[next].text == "*" || tokens[next].text == "/") && tokens[next + 1].text == "="))
+            writesInput = true;
+        if (next + 1 < tokens.size () &&
+            ((tokens[next].text == "+" && tokens[next + 1].text == "+") ||
+             (tokens[next].text == "-" && tokens[next + 1].text == "-"))) writesInput = true;
+    }
+    if (declarationCount != 1 || !writesInput) return source;
+
+    std::string lowered = source.substr (0, tokens[bodyOpen].end);
+    lowered += "\nvec2 _weMutableTexCoord = v_TexCoord.xy;\n";
+    size_t consumed = tokens[bodyOpen].end;
+    for (size_t i = bodyOpen + 1; i < bodyClose; ++i) {
+        if (tokens[i].text != "v_TexCoord") continue;
+        lowered += source.substr (consumed, tokens[i].start - consumed);
+        lowered += "_weMutableTexCoord";
+        consumed = tokens[i].end;
+    }
+    lowered += source.substr (consumed);
+    sLog.out ("Lowered writable fragment texture coordinates in ", this->m_file);
+    return lowered;
+}
+
+std::string ShaderUnit::applySineWaveOpacityCompatibility (std::string source) const {
+    if (this->m_type != GLSLContext::UnitType_Fragment ||
+        this->m_file.find ("workshop/2402621362/effects/sine_wave") == std::string::npos ||
+        source.find ("vec2 waveCoord = ") == std::string::npos ||
+        source.find ("waveCoord = pow(") == std::string::npos)
+        return source;
+    const std::string authored = "u_WaveOpacity * waveCoord)";
+    const size_t call = source.find (authored);
+    if (call == std::string::npos) return source;
+    source.replace (call, authored.size (), "u_WaveOpacity * waveCoord.x)");
+    sLog.out ("Selected scalar opacity from wave coordinate in ", this->m_file);
+    return source;
+}
+
+std::string ShaderUnit::applySampledLocalConstCompatibility (std::string source) const {
+    if (this->m_type != GLSLContext::UnitType_Fragment) return source;
+    const auto tokens = shaderTokens (source);
+    std::vector<size_t> qualifiers;
+    int depth = 0;
+    for (size_t i = 0; i < tokens.size (); ++i) {
+        if (tokens[i].text == "{") { ++depth; continue; }
+        if (tokens[i].text == "}") { --depth; continue; }
+        if (depth <= 0 || tokens[i].text != "const" || i + 4 >= tokens.size () ||
+            tokens[i + 1].text != "float" || !tokens[i + 2].identifier ||
+            tokens[i + 3].text != "=") continue;
+        bool sampled = false;
+        bool multipleDeclarators = false;
+        int parentheses = 0;
+        for (size_t j = i + 4; j < tokens.size () && tokens[j].text != ";"; ++j) {
+            if (tokens[j].text == "(") ++parentheses;
+            else if (tokens[j].text == ")") --parentheses;
+            else if (tokens[j].text == "," && parentheses == 0) multipleDeclarators = true;
+            if (tokens[j].text == "texSample2D" || tokens[j].text == "texture") sampled = true;
+        }
+        if (sampled && !multipleDeclarators) qualifiers.push_back (tokens[i].start);
+    }
+    for (auto it = qualifiers.rbegin (); it != qualifiers.rend (); ++it)
+        source.erase (*it, std::string ("const").size ());
+    if (!qualifiers.empty ()) sLog.out ("Lowered sampled local const in ", this->m_file);
+    return source;
+}
+
+std::string ShaderUnit::applyVertexPointerUVCompatibility (std::string source) const {
+    if (this->m_type != GLSLContext::UnitType_Vertex) return source;
+    const auto tokens = shaderTokens (source);
+    bool widePointer = false;
+    bool vectorScale = false;
+    bool vectorMultiplier = false;
+    for (size_t i = 0; i + 3 < tokens.size (); ++i) {
+        if (tokens[i].text == "varying" && tokens[i + 1].text == "vec4" &&
+            tokens[i + 2].text == "v_PointerUV" && tokens[i + 3].text == ";") widePointer = true;
+        if (tokens[i].text == "uniform" && tokens[i + 1].text == "vec2" &&
+            tokens[i + 2].text == "g_Scale" && tokens[i + 3].text == ";") vectorScale = true;
+        if (tokens[i].text == "uniform" && tokens[i + 1].text == "vec2" &&
+            tokens[i + 2].text == "g_Scale_Multiplier" && tokens[i + 3].text == ";") vectorMultiplier = true;
+    }
+    if (!widePointer || !vectorScale || !vectorMultiplier) return source;
+    for (size_t i = 0; i + 11 < tokens.size (); ++i) {
+        if (tokens[i].text == "vec2" && tokens[i + 1].text == "da" &&
+            tokens[i + 2].text == "=" && tokens[i + 3].text == "v_PointerUV" &&
+            tokens[i + 4].text == "*" && tokens[i + 5].text == "(" &&
+            tokens[i + 6].text == "g_Scale" && tokens[i + 7].text == "*" &&
+            tokens[i + 8].text == "g_Scale_Multiplier" && tokens[i + 9].text == ")" &&
+            tokens[i + 10].text == "*") {
+            const size_t scalarStart = tokens[i + 11].start;
+            const size_t semicolon = source.find (';', scalarStart);
+            if (semicolon == std::string::npos ||
+                source.substr (scalarStart, semicolon - scalarStart) != "0.001") continue;
+            source.insert (tokens[i + 3].end, ".xy");
+            sLog.out ("Selected pointer UV.xy for vec2 iris offset in ", this->m_file);
+            break;
+        }
+    }
     return source;
 }
 
 std::string ShaderUnit::applyFragmentTexCoordCompatibility (std::string source) const {
-    if (this->m_type != GLSLContext::UnitType_Fragment) {
-	return source;
+    if (this->m_type != GLSLContext::UnitType_Fragment) return source;
+    const auto tokens = shaderTokens (source);
+    bool wideCoordinate = false;
+    for (size_t i = 0; i + 3 < tokens.size (); ++i) {
+        if (tokens[i].text == "varying" &&
+            (tokens[i + 1].text == "vec3" || tokens[i + 1].text == "vec4") &&
+            tokens[i + 2].text == "v_TexCoord" && tokens[i + 3].text == ";") {
+            wideCoordinate = true;
+            break;
+        }
     }
+    if (!wideCoordinate) return source;
 
-    const std::regex texCoordBeforeCast2 (R"(\bv_TexCoord\b(\s*[-+*/]\s*CAST2\s*\())");
-    const std::regex cast2BeforeTexCoord (R"((CAST2\s*\([^)]+\)\s*[-+*/]\s*)\bv_TexCoord\b)");
-
-    const std::regex wideTexCoordDecl (R"(\bvarying\s+vec[34]\s+v_TexCoord\s*;)");
-    if (!std::regex_search (source, wideTexCoordDecl)
-	|| (!std::regex_search (source, texCoordBeforeCast2) && !std::regex_search (source, cast2BeforeTexCoord))) {
-	return source;
+    const auto arithmetic = [](const std::string& op) {
+        return op == "+" || op == "-" || op == "*" || op == "/";
+    };
+    std::vector<size_t> closingParenthesis (tokens.size (), tokens.size ());
+    std::vector<size_t> openParentheses;
+    for (size_t i = 0; i < tokens.size (); ++i) {
+        if (tokens[i].text == "(") openParentheses.push_back (i);
+        else if (tokens[i].text == ")" && !openParentheses.empty ()) {
+            closingParenthesis[openParentheses.back ()] = i;
+            openParentheses.pop_back ();
+        }
     }
-
-    const std::string original = source;
-    source = std::regex_replace (source, texCoordBeforeCast2, "v_TexCoord.xy$1");
-    source = std::regex_replace (source, cast2BeforeTexCoord, "$1v_TexCoord.xy");
-
-    if (source != original) {
-	sLog.out ("Applied fragment TexCoord vec2 compatibility in ", this->m_file);
+    std::vector<size_t> insertions;
+    // HLSL truncates a wider coordinate when an arithmetic expression is
+    // assigned to a float2.  GLSL instead rejects the first mixed-width
+    // operator.  Limit this conversion to a vec2 initializer whose bare
+    // coordinate is used in arithmetic, outside calls and swizzles.  A call
+    // may consume all four lanes, even when its result is assigned to vec2.
+    for (size_t i = 0; i + 3 < tokens.size (); ++i) {
+        if (tokens[i].text != "vec2" || !tokens[i + 1].identifier ||
+            tokens[i + 2].text != "=") continue;
+        size_t end = i + 3;
+        int depth = 0;
+        bool callable = false;
+        bool wideConstructor = false;
+        bool arithmeticExpression = false;
+        std::vector<size_t> coordinates;
+        for (; end < tokens.size (); ++end) {
+            const auto& token = tokens[end];
+            if (token.text == ";" && depth == 0) break;
+            if (token.text == "(") {
+                if (end > i + 3 && tokens[end - 1].identifier &&
+                    tokens[end - 1].text != "CAST2") callable = true;
+                ++depth;
+            } else if (token.text == ")") {
+                if (--depth < 0) break;
+            }
+            if (token.text == "vec3" || token.text == "vec4" ||
+                token.text == "CAST3" || token.text == "CAST4") wideConstructor = true;
+            if (arithmetic (token.text)) arithmeticExpression = true;
+            if (token.text == "v_TexCoord" &&
+                (end == i + 3 || tokens[end - 1].text != ".") &&
+                (end + 1 == tokens.size () ||
+                 (tokens[end + 1].text != "." && tokens[end + 1].text != "[")))
+                coordinates.push_back (token.end);
+        }
+        if (end < tokens.size () && tokens[end].text == ";" && depth == 0 &&
+            arithmeticExpression && !callable && !wideConstructor)
+            insertions.insert (insertions.end (), coordinates.begin (), coordinates.end ());
+        i = end;
     }
+    for (size_t i = 0; i < tokens.size (); ++i) {
+        // v_TexCoord * CAST2(...) is an authored vec2 operation. Do not
+        // change an already-swizzled coordinate or a struct member.
+        if (i + 3 < tokens.size () && tokens[i].text == "v_TexCoord" &&
+            (i == 0 || tokens[i - 1].text != ".") && arithmetic (tokens[i + 1].text) &&
+            tokens[i + 2].text == "CAST2" && tokens[i + 3].text == "(")
+            insertions.push_back (tokens[i].end);
 
-    return source;
+        // CAST2(expr) * v_TexCoord permits nested parentheses in expr.
+        if (tokens[i].text != "CAST2" || i + 1 >= tokens.size () || tokens[i + 1].text != "(")
+            continue;
+        const size_t close = closingParenthesis[i + 1];
+        if (close + 2 < tokens.size () && arithmetic (tokens[close + 1].text) &&
+            tokens[close + 2].text == "v_TexCoord" &&
+            (close + 3 == tokens.size () || (tokens[close + 3].text != "." &&
+                                            tokens[close + 3].text != "[")))
+            insertions.push_back (tokens[close + 2].end);
+    }
+    std::sort (insertions.begin (), insertions.end ());
+    insertions.erase (std::unique (insertions.begin (), insertions.end ()), insertions.end ());
+    if (insertions.empty ()) return source;
+    std::string rewritten;
+    rewritten.reserve (source.size () + 3 * insertions.size ());
+    size_t consumed = 0;
+    for (const size_t insertion : insertions) {
+        rewritten.append (source, consumed, insertion - consumed);
+        rewritten += ".xy";
+        consumed = insertion;
+    }
+    rewritten.append (source, consumed, std::string::npos);
+    sLog.out ("Applied fragment TexCoord vec2 compatibility in ", this->m_file);
+    return rewritten;
 }
 
 void ShaderUnit::parseComboConfiguration (const std::string& content, const int defaultValue) {
-    // TODO: SUPPORT REQUIRES SO WE PROPERLY FOLLOW THE REQUIRED CHAIN
+    // Native 14016ce60 stores only combo/default for runtime compilation.
+    // Authored `require` controls editor visibility; it must not gate an
+    // explicitly selected runtime permutation.
     JSON data;
     try {
-	data = JSON::parse (content);
+	data = WallpaperEngine::Data::JSON::parseAuthoringJson (content, this->m_file + ":combo");
     } catch (const std::exception& e) {
 	sLog.error ("Cannot parse combo metadata in shader ", this->m_file, ": ", e.what ());
 	return;
@@ -484,7 +987,7 @@ void ShaderUnit::parseParameterConfiguration (
 ) {
     JSON data;
     try {
-	data = JSON::parse (content);
+	data = WallpaperEngine::Data::JSON::parseAuthoringJson (content, this->m_file + ":parameter:" + name);
     } catch (const std::exception& e) {
 	sLog.error ("Cannot parse parameter metadata for ", name, " in shader ", this->m_file, ": ", e.what ());
 	return;
@@ -494,14 +997,21 @@ void ShaderUnit::parseParameterConfiguration (
     // auto range = data.find ("range");
     const auto combo = data.find ("combo");
 
-    // this is not a real parameter
-    auto constant = this->m_constants.end ();
-
+    // Override constants take precedence over the pass's authored constants.
+    const UserSetting* constant = nullptr;
     if (material.has_value ()) {
-	constant = this->m_constants.find (*material);
+	if (const auto override = this->m_constants.find (*material); override != this->m_constants.end ())
+	    constant = override->second.get ();
+	else if (this->m_baseConstants != nullptr) {
+	    if (const auto base = this->m_baseConstants->find (*material); base != this->m_baseConstants->end ())
+		constant = base->second.get ();
+	}
     }
 
-    if (constant == this->m_constants.end () && !defvalue.has_value ()) {
+    const DynamicValue* constantValue = constant != nullptr && constant->value != nullptr
+	? constant->value.get () : nullptr;
+
+    if (constantValue == nullptr && !defvalue.has_value ()) {
 	if (type != "sampler2D") {
 	    sLog.exception ("Cannot parse parameter data for ", name, " in shader ", this->m_file);
 	}
@@ -510,20 +1020,66 @@ void ShaderUnit::parseParameterConfiguration (
     Variables::ShaderVariable* parameter = nullptr;
 
     if (type == "vec4") {
-	parameter
-	    = new Variables::ShaderVariableVector4 (VectorBuilder::parse<glm::vec4> (defvalue->get<std::string> ()));
-    } else if (type == "vec3") {
-	parameter = new Variables::ShaderVariableVector3 (VectorBuilder::parse<glm::vec3> (*defvalue));
-    } else if (type == "vec2") {
-	parameter = new Variables::ShaderVariableVector2 (VectorBuilder::parse<glm::vec2> (*defvalue));
-    } else if (type == "float") {
-	if (defvalue->is_string ()) {
-	    parameter = new Variables::ShaderVariableFloat (std::stoi (defvalue->get<std::string> ()));
+	if (!defvalue.has_value ()) {
+	    if (constantValue->getType () != DynamicValue::UnderlyingType::Vec4)
+		throw std::invalid_argument ("Expected vec4 material constant for " + name + " in shader " + this->m_file);
+	    parameter = new Variables::ShaderVariableVector4 (constantValue->getVec4 ());
 	} else {
-	    parameter = new Variables::ShaderVariableFloat (defvalue->get<float> ());
+	    parameter = new Variables::ShaderVariableVector4 (VectorBuilder::parse<glm::vec4> (defvalue->get<std::string> ()));
 	}
+    } else if (type == "vec3") {
+	if (!defvalue.has_value ()) {
+	    if (constantValue->getType () != DynamicValue::UnderlyingType::Vec3)
+		throw std::invalid_argument ("Expected vec3 material constant for " + name + " in shader " + this->m_file);
+	    parameter = new Variables::ShaderVariableVector3 (constantValue->getVec3 ());
+	} else {
+	    parameter = new Variables::ShaderVariableVector3 (VectorBuilder::parse<glm::vec3> (*defvalue));
+	}
+    } else if (type == "vec2") {
+	if (!defvalue.has_value ()) {
+	    if (constantValue->getType () != DynamicValue::UnderlyingType::Vec2)
+		throw std::invalid_argument ("Expected vec2 material constant for " + name + " in shader " + this->m_file);
+	    parameter = new Variables::ShaderVariableVector2 (constantValue->getVec2 ());
+	} else {
+	    parameter = new Variables::ShaderVariableVector2 (VectorBuilder::parse<glm::vec2> (*defvalue));
+	}
+    } else if (type == "float") {
+	float value = 0.0f;
+	if (!defvalue.has_value ()) {
+	    if (constantValue->getType () != DynamicValue::UnderlyingType::Float)
+		throw std::invalid_argument ("Expected float material constant for " + name + " in shader " + this->m_file);
+	    value = constantValue->getFloat ();
+	} else if (defvalue->is_string ()) {
+	    std::string token = defvalue->get<std::string> ();
+	    const auto first = token.find_first_not_of (" \t\r\n");
+	    if (first == std::string::npos)
+		throw std::invalid_argument ("Empty float default for " + name + " in shader " + this->m_file);
+	    const auto last = token.find_last_not_of (" \t\r\n");
+	    token = token.substr (first, last - first + 1);
+	    try {
+		size_t consumed = 0;
+		value = std::stof (token, &consumed);
+		if (consumed != token.size ())
+		    throw std::invalid_argument ("Float default contains trailing data");
+	    } catch (const std::invalid_argument&) {
+		throw std::invalid_argument ("Invalid float default for " + name + " in shader " + this->m_file);
+	    } catch (const std::out_of_range&) {
+		throw std::invalid_argument ("Float default is out of range for " + name + " in shader " + this->m_file);
+	    }
+	} else if (defvalue->is_number ()) {
+	    value = defvalue->get<float> ();
+	} else {
+	    throw std::invalid_argument ("Float default must be numeric for " + name + " in shader " + this->m_file);
+	}
+	if (!std::isfinite (value))
+	    throw std::invalid_argument ("Float default must be finite for " + name + " in shader " + this->m_file);
+	parameter = new Variables::ShaderVariableFloat (value);
     } else if (type == "int") {
-	if (defvalue->is_string ()) {
+	if (!defvalue.has_value ()) {
+	    if (constantValue->getType () != DynamicValue::UnderlyingType::Int)
+		throw std::invalid_argument ("Expected int material constant for " + name + " in shader " + this->m_file);
+	    parameter = new Variables::ShaderVariableInteger (constantValue->getInt ());
+	} else if (defvalue->is_string ()) {
 	    parameter = new Variables::ShaderVariableInteger (std::stoi (defvalue->get<std::string> ()));
 	} else {
 	    parameter = new Variables::ShaderVariableInteger (defvalue->get<int> ());
@@ -547,6 +1103,13 @@ void ShaderUnit::parseParameterConfiguration (
 	    // if the texture exists (and is not null), add to the combo
 	    const auto textureSlotUsed
 		= this->m_passTextures.contains (index) || this->m_overrideTextures.contains (index);
+	    const auto effectiveCombo = [this] (const std::string& macro) -> std::optional<int> {
+		if (const auto override = this->m_overrideCombos.find (macro); override != this->m_overrideCombos.end ())
+		    return override->second;
+		if (const auto authored = this->m_combos.find (macro); authored != this->m_combos.end ())
+		    return authored->second;
+		return std::nullopt;
+	    };
 	    bool isRequired = false;
 	    int comboValue = 1;
 
@@ -560,11 +1123,10 @@ void ShaderUnit::parseParameterConfiguration (
 		    // any of the values set are valid, check for them
 		    for (const auto& item : require->items ()) {
 			const std::string& macro = item.key ();
-			const auto it = this->m_combos.find (macro);
+			const auto value = effectiveCombo (macro);
 
-			// if any of the values matched, this option is required
-			if (it == this->m_combos.end () || this->m_overrideCombos.contains (macro)
-			    || it->second != item.value ()) {
+			// Preserve existing dependency gating while reading the effective combo safely.
+			if (!value.has_value () || *value != item.value ()) {
 			    isRequired = true;
 			    break;
 			}
@@ -575,11 +1137,10 @@ void ShaderUnit::parseParameterConfiguration (
 		    // all values must match for it to be required
 		    for (const auto& item : require->items ()) {
 			const std::string& macro = item.key ();
-			const auto it = this->m_combos.find (macro);
+			const auto value = effectiveCombo (macro);
 
-			// these can not exist and that'd be fine, we just care about the values
-			if ((it != this->m_combos.end () || this->m_overrideCombos.contains (macro))
-			    && it->second == item.value ()) {
+			// Preserve existing dependency gating while reading the effective combo safely.
+			if (value.has_value () && *value == item.value ()) {
 			    isRequired = false;
 			    break;
 			}
@@ -632,6 +1193,7 @@ void ShaderUnit::parseParameterConfiguration (
     if (material.has_value () && parameter != nullptr) {
 	parameter->setIdentifierName (*material);
 	parameter->setName (name);
+	parameter->setPosition (data.optional<bool> ("position", false));
 
 	this->m_parameters.push_back (parameter);
     }
@@ -714,8 +1276,15 @@ const std::string& ShaderUnit::compile () {
     }
 
     // this should be the rest of the shader
-    this->m_final
-	+= this->applyFragmentTexCoordCompatibility (this->applyLinkedVaryingCompatibility (this->m_preprocessed));
+    std::string shaderSource = this->applyLinkedVaryingCompatibility (this->m_preprocessed);
+    shaderSource = this->applyFragmentLinkedBoundsCompatibility (std::move (shaderSource));
+    shaderSource = this->applyFragmentShadowMaskCompatibility (std::move (shaderSource));
+    shaderSource = this->applyFragmentWritableInputCompatibility (std::move (shaderSource));
+    shaderSource = this->applySineWaveOpacityCompatibility (std::move (shaderSource));
+    shaderSource = this->applyFragmentTexCoordCompatibility (std::move (shaderSource));
+    shaderSource = this->applyVertexPointerUVCompatibility (std::move (shaderSource));
+    shaderSource = this->applySampledLocalConstCompatibility (std::move (shaderSource));
+    this->m_final += shaderSource;
 
     // the pass itself handles shader compilation, the unit doesn't have enough information for this step
     return this->m_final;

@@ -12,10 +12,86 @@
 #include "WallpaperEngine/Logging/Log.h"
 
 #include <glm/gtc/constants.hpp>
+#include <algorithm>
+#include <cmath>
+#include <cstdint>
+#include <limits>
+#include <locale>
 #include <sstream>
+#include <stdexcept>
 
 using namespace WallpaperEngine::Data::Parsers;
 using namespace WallpaperEngine::Data::Model;
+
+namespace {
+void mergeAuthoredNonNull (JSON& target, const JSON& overlay) {
+    if (overlay.is_null ()) return;
+    if (overlay.is_object ()) {
+        if (!target.is_object ()) target = JSON::object ();
+        for (const auto& field : overlay.items ())
+            if (!field.value ().is_null ())
+                mergeAuthoredNonNull (target[field.key ()], field.value ());
+    } else if (overlay.is_array ()) {
+        if (!target.is_array ()) target = JSON::array ();
+        for (size_t index = 0; index < overlay.size (); ++index) {
+            if (overlay[index].is_null ()) continue;
+            while (target.size () <= index) target.push_back (nullptr);
+            mergeAuthoredNonNull (target[index], overlay[index]);
+        }
+    } else {
+        target = overlay;
+    }
+}
+
+int dependencyInteger (const JSON& value, const char* field) {
+    if (!value.is_number_integer ()) {
+        throw std::invalid_argument (std::string ("Object dependency ") + field + " must be an integer");
+    }
+    const double number = value.get<double> ();
+    if (number < std::numeric_limits<int>::min () || number > std::numeric_limits<int>::max ()) {
+        throw std::invalid_argument (std::string ("Object dependency ") + field + " is out of range");
+    }
+    return value.get<int> ();
+}
+
+glm::vec2 textPaddingValue (const JSON& authored) {
+    if (authored.is_number ()) {
+        const double value = authored.get<double> ();
+	if (!std::isfinite (value) || std::abs (value) > std::numeric_limits<float>::max ())
+	    throw std::invalid_argument ("Text padding scalar is not a finite float");
+	return glm::vec2 (static_cast<float> (value));
+    }
+    if (authored.is_string ()) {
+        std::istringstream input (authored.get<std::string> ());
+	input.imbue (std::locale::classic ());
+	float horizontal = 0.0f, vertical = 0.0f;
+	std::string remainder;
+	if (!(input >> horizontal >> vertical) || (input >> remainder) || !std::isfinite (horizontal)
+	    || !std::isfinite (vertical))
+	    throw std::invalid_argument ("Text padding must contain exactly two finite numbers");
+	return {horizontal, vertical};
+    }
+    throw std::invalid_argument ("Text padding must be a number or a two-number string");
+}
+
+UserSettingUniquePtr textPadding (const JSON& object, const Project& project) {
+    const auto authored = object.optional ("padding");
+    if (!authored.has_value ())
+        return WallpaperEngine::Data::Builders::UserSettingBuilder::fromValue (glm::vec2 (32.0f));
+    if (!authored->is_object ())
+        return WallpaperEngine::Data::Builders::UserSettingBuilder::fromValue (textPaddingValue (*authored));
+
+    JSON normalized = *authored;
+    const auto value = authored->require ("value", "Text padding setting requires a value");
+    const glm::vec2 parsed = textPaddingValue (value);
+    std::ostringstream encoded;
+    encoded.imbue (std::locale::classic ());
+    encoded.precision (std::numeric_limits<float>::max_digits10);
+    encoded << parsed.x << ' ' << parsed.y;
+    normalized["value"] = encoded.str ();
+    return UserSettingParser::parse (normalized, project.properties);
+}
+}
 
 ObjectUniquePtr ObjectParser::parse (const JSON& it, const Project& project) {
     const auto imageIt = it.find ("image");
@@ -23,6 +99,8 @@ ObjectUniquePtr ObjectParser::parse (const JSON& it, const Project& project) {
     const auto particleIt = it.find ("particle");
     const auto textIt = it.find ("text");
     const auto lightIt = it.find ("light");
+    const auto modelIt = it.find ("model");
+    const auto cameraIt = it.find ("camera");
     // use shape to refer to VolumeLight
     const auto shapeIt = it.find ("shape");
 
@@ -34,7 +112,10 @@ ObjectUniquePtr ObjectParser::parse (const JSON& it, const Project& project) {
 	    .id = it.require<int> ("id", "Object must have an id"),
 	    .name = it.require<std::string> ("name", "Object must have a name"),
 	    .dependencies = parseDependencies (it),
+	    .typedDependencies = parseTypedDependencies (it),
 	    .parent = it.optional<int> ("parent"),
+	    .attachment = it.optional<std::string> ("attachment"),
+	    .solid = it.optional ("solid", false),
 	    .origin = it.user ("origin", project.properties, glm::vec3 (0.0f)),
 	    .groupScale = it.user ("scale", project.properties, glm::vec3 (1.0f)),
 	    .groupAngles = it.user ("angles", project.properties, glm::vec3 (0.0f)),
@@ -57,7 +138,10 @@ ObjectUniquePtr ObjectParser::parse (const JSON& it, const Project& project) {
 	    .id = id,
 	    .name = name,
 	    .dependencies = parseDependencies (it),
+	    .typedDependencies = parseTypedDependencies (it),
 	    .parent = it.optional<int> ("parent"),
+	    .attachment = it.optional<std::string> ("attachment"),
+	    .solid = it.optional ("solid", false),
 	    .origin = it.user ("origin", project.properties, glm::vec3 (0.0f)),
 	    .groupScale = it.user ("scale", project.properties, glm::vec3 (1.0f)),
 	    .groupAngles = it.user ("angles", project.properties, glm::vec3 (0.0f)),
@@ -65,16 +149,47 @@ ObjectUniquePtr ObjectParser::parse (const JSON& it, const Project& project) {
 	};
     }
 
+    for (const auto& dependency : basedata.typedDependencies) {
+	if (dependency.type == "emitterimage") continue;
+	sLog.error ("Typed scene dependency is not bound at runtime: object_id=", basedata.id,
+	            " target_id=", dependency.id, " index=", dependency.index,
+	            " type=", dependency.type);
+    }
+
     if (imageIt != it.end () && imageIt->is_string ()) {
 	return parseImage (it, project, std::move (basedata), *imageIt);
-    } else if (soundIt != it.end () && soundIt->is_array ()) {
-	return parseSound (it, std::move (basedata));
-    } else if (particleIt != it.end ()) {
+    } else if (soundIt != it.end () && (soundIt->is_array () || soundIt->is_string ())) {
+	return parseSound (it, project, std::move (basedata));
+    } else if (particleIt != it.end () && !particleIt->is_null ()) {
 	return parseParticle (it, project, std::move (basedata));
     } else if (textIt != it.end ()) {
 	return parseText (it, project, std::move (basedata));
+    } else if (modelIt != it.end () && modelIt->is_string ()) {
+	const auto path = modelIt->get<std::string> ();
+	if (path.empty ()) throw std::invalid_argument ("Scene model path must not be empty");
+	const int skin = it.optional ("skin", 0);
+	if (skin < 0) throw std::invalid_argument ("Scene model skin must be nonnegative");
+	return std::make_unique<SceneModel> (std::move (basedata), SceneModelData {.path = path, .skin = skin});
+    } else if (cameraIt != it.end () && cameraIt->is_string ()) {
+	return std::make_unique<SceneCamera> (std::move (basedata), SceneCameraData {
+	    .mode = cameraIt->get<std::string> (),
+	    .path = it.optional<std::string> ("path", ""),
+	    .fov = it.user ("fov", project.properties, 45.0f),
+	    .zoom = it.user ("zoom", project.properties, 1.0f),
+	});
     } else if (lightIt != it.end ()) {
-	sLog.error ("Light objects are not supported yet");
+	if (!lightIt->is_string () || (lightIt->get<std::string> () != "point"
+	                              && lightIt->get<std::string> () != "lpoint")) {
+	    sLog.error ("Scene light type is not supported yet: ", lightIt->dump ());
+	} else {
+	    return std::make_unique<ScenePointLight> (std::move (basedata), ScenePointLightData {
+	        .lightingV1 = lightIt->get<std::string> () == "lpoint",
+	        .color = it.user ("color", project.properties, glm::vec3 (0.0f)),
+	        .intensity = it.user ("intensity", project.properties, 0.0f),
+	        .radius = it.user ("radius", project.properties, 1.0f),
+	        .exponent = it.user ("exponent", project.properties, 2.0f),
+	    });
+	}
     } else if (shapeIt != it.end ()) {
 	sLog.error ("VolumeLight objects are not supported yet");
     } else {
@@ -99,18 +214,50 @@ std::vector<int> ObjectParser::parseDependencies (const JSON& it) {
     std::vector<int> result = {};
 
     for (const auto& cur : *dependenciesIt) {
-	result.push_back (cur);
+	if (cur.is_object ()) {
+	    const auto id = cur.find ("id");
+	    if (id == cur.end ()) throw std::invalid_argument ("Object dependency is missing id");
+	    result.push_back (dependencyInteger (*id, "id"));
+	} else {
+	    result.push_back (dependencyInteger (cur, "id"));
+	}
     }
 
     return result;
 }
 
-SoundUniquePtr ObjectParser::parseSound (const JSON& it, ObjectData base) {
+std::vector<ObjectDependency> ObjectParser::parseTypedDependencies (const JSON& it) {
+    const auto dependenciesIt = it.find ("dependencies");
+    if (dependenciesIt == it.end () || !dependenciesIt->is_array ()) return {};
+    std::vector<ObjectDependency> result;
+    for (const auto& cur : *dependenciesIt) {
+	if (!cur.is_object ()) continue;
+	const auto id = cur.find ("id");
+	const auto index = cur.find ("index");
+	const auto type = cur.find ("type");
+	if (id == cur.end () || index == cur.end () || type == cur.end () || !type->is_string ()) {
+	    throw std::invalid_argument ("Typed object dependency requires integer id/index and string type");
+	}
+	const auto mask = cur.find ("mask");
+	if (mask != cur.end () && !mask->is_string ())
+	    throw std::invalid_argument ("Typed object dependency mask must be a string");
+	result.push_back ({ dependencyInteger (*id, "id"), dependencyInteger (*index, "index"),
+	                    type->get<std::string> (),
+	                    mask == cur.end () ? std::string {} : mask->get<std::string> () });
+    }
+    return result;
+}
+
+SoundUniquePtr ObjectParser::parseSound (const JSON& it, const Project& project, ObjectData base) {
     const auto soundIt = it.require ("sound", "Object must have a sound");
     std::vector<std::string> sounds = {};
 
-    for (const auto& cur : soundIt) {
-	sounds.push_back (cur);
+    if (soundIt.is_string ()) {
+	sounds.push_back (soundIt.get<std::string> ());
+    } else if (soundIt.is_array ()) {
+	for (const auto& cur : soundIt) sounds.push_back (cur.get<std::string> ());
+    } else {
+	throw std::invalid_argument ("Sound must be a file path or array of file paths");
     }
 
     return std::make_unique<Sound> (
@@ -118,25 +265,46 @@ SoundUniquePtr ObjectParser::parseSound (const JSON& it, ObjectData base) {
 	SoundData {
 	    .playbackmode = it.optional<std::string> ("playbackmode"),
 	    .sounds = sounds,
+	    .volume = it.user ("volume", project.properties, 1.0f),
+	    .minTime = it.optional<float> ("mintime", 0.0f),
+	    .maxTime = it.optional<float> ("maxtime", 0.0f),
+	    .startSilent = it.optional<bool> ("startsilent", false),
+	    .spatialization = it.optional<bool> ("spatialization", false),
+	    .attenuation = it.optional<float> ("attenuation", 1.0f),
+	    .minDistance = it.optional<float> ("mindistance", 0.0f),
 	}
     );
 }
 
 TextUniquePtr ObjectParser::parseText (const JSON& it, const Project& project, ObjectData base) {
+    const auto effects = it.optional ("effects");
     return std::make_unique<Text> (
 	std::move (base),
 	TextData {
-	    .text = it.user ("text", project.properties),
+	    .text = UserSettingParser::parse (
+	        it.require ("text", "Text object requires text"), project.properties, false, true),
 	    .font = it.optional ("font", std::string ()),
 	    .pointSize = it.user ("pointsize", project.properties, 32.0f),
+	    .spacing = it.user ("spacing", project.properties, glm::vec2 (0.0f)),
+	    .limitRows = it.user ("limitrows", project.properties, false),
+	    .maxRows = it.user ("maxrows", project.properties, 1),
+	    .limitWidth = it.user ("limitwidth", project.properties, false),
+	    .maxWidth = it.user ("maxwidth", project.properties, 500.0f),
+	    .limitUseEllipsis = it.user ("limituseellipsis", project.properties, false),
+	    .opaqueBackground = it.user ("opaquebackground", project.properties, false),
+	    .backgroundColor = it.color ("backgroundcolor", project.properties, Builders::ColorBuilder::Black),
+	    .effects = effects.has_value ()
+	        ? parseEffects (*effects, project)
+	        : std::vector<ImageEffectUniquePtr> {},
 	    .size = it.optional ("size", glm::vec2 (0.0f)),
 	    .scale = it.user ("scale", project.properties, glm::vec3 (1.0f)),
 	    .color = it.color ("color", project.properties, Builders::ColorBuilder::White),
 	    .alpha = it.user ("alpha", project.properties, 1.0f),
 	    .visible = it.user ("visible", project.properties, true),
+	    .parallaxDepth = it.user ("parallaxDepth", project.properties, glm::vec2 (0.0f)),
 	    .alignment = it.optional ("horizontalalign", it.optional ("alignment", std::string ("center"))),
 	    .verticalalign = it.optional ("verticalalign", std::string ("center")),
-	    .padding = it.optional ("padding", 0),
+            .padding = textPadding (it, project),
 	}
     );
 }
@@ -155,8 +323,9 @@ ObjectParser::parseImage (const JSON& it, const Project& project, ObjectData bas
 	    .visible = it.user ("visible", properties, true),
 	    .alpha = it.user ("alpha", properties, 1.0f),
 	    .color = it.color ("color", properties, Builders::ColorBuilder::White),
+	    .copyBackground = it.user ("copybackground", properties, true),
 	    .alignment = it.optional ("horizontalalign", it.optional ("alignment", std::string ("center"))),
-	    .size = it.user ("size", properties, glm::vec2 (0.0f))->value->getVec2 (),
+	    .size = it.user ("size", properties, glm::vec2 (0.0f)),
 	    .parallaxDepth = it.user ("parallaxDepth", properties, glm::vec2 (0.0f)),
 	    .colorBlendMode = it.user ("colorBlendMode", properties, 0),
 	    .brightness = it.user ("brightness", properties, 1.0f),
@@ -175,14 +344,38 @@ ObjectParser::parseImage (const JSON& it, const Project& project, ObjectData bas
 
 	if (instanceTextures.has_value ()) {
 	    const auto parsed = TextureParser::parseTextureMap (*instanceTextures);
-	    firstPass.textures.insert (parsed.begin (), parsed.end ());
+	    for (const auto& [slot, texture] : parsed) firstPass.textures.insert_or_assign (slot, texture);
 	}
 
 	const auto instanceUserTextures = instance->optional ("usertextures");
 
 	if (instanceUserTextures.has_value ()) {
-	    const auto parsed = TextureParser::parseTextureMap (*instanceUserTextures);
-	    firstPass.usertextures.insert (parsed.begin (), parsed.end ());
+	    const auto parsed = TextureParser::parseUserTextureMap (*instanceUserTextures);
+	    for (const auto& [slot, texture] : parsed) firstPass.usertextures.insert_or_assign (slot, texture);
+	}
+
+	const auto instanceCombos = instance->optional ("combos");
+	if (instanceCombos.has_value ()) {
+	    JSON nonNull = JSON::object ();
+	    if (instanceCombos->is_object ())
+		for (const auto& field : instanceCombos->items ())
+		    if (!field.value ().is_null ()) nonNull[field.key ()] = field.value ();
+	    const auto parsed = parseComboMap (nonNull);
+	    for (const auto& [name, value] : parsed) firstPass.combos.insert_or_assign (name, value);
+	}
+
+	const auto instanceConstants = instance->optional ("constantshadervalues");
+	if (instanceConstants.has_value () && instanceConstants->is_object () && !instanceConstants->empty ()) {
+	    // Native material loading merges the instance JSON into pass zero before
+	    // parsing constants. Keep nested script/user metadata when an instance
+	    // changes only the value of a structured constant.
+	    const auto& filename = result->model->material->filename;
+	    const JSON source = WallpaperEngine::Data::JSON::parseAuthoringJson (
+		project.assetLocator->readString (filename), filename);
+	    const auto passes = source.require ("passes", "Material must have passes to render");
+	    JSON merged = passes.at (0).optional ("constantshadervalues").value_or (JSON::object ());
+	    mergeAuthoredNonNull (merged, *instanceConstants);
+	    firstPass.constants = ShaderConstantParser::parse (merged, project);
 	}
     }
 
@@ -243,7 +436,7 @@ ImageEffectPassOverrideUniquePtr ObjectParser::parseEffectPass (const JSON& it, 
 	= constants.has_value () ? ShaderConstantParser::parse (constants.value (), project) : ShaderConstantMap {},
 	.textures = textures.has_value () ? TextureParser::parseTextureMap (textures.value ()) : TextureMap {},
 	.usertextures
-	= usertextures.has_value () ? TextureParser::parseTextureMap (usertextures.value ()) : TextureMap {},
+	= usertextures.has_value () ? TextureParser::parseUserTextureMap (usertextures.value ()) : UserTextureMap {},
     });
 }
 
@@ -284,6 +477,10 @@ ImageAnimationLayerUniquePtr ObjectParser::parseAnimationLayer (const JSON& it, 
 	.visible = it.user ("visible", properties, false),
 	.blend = it.user ("blend", properties, 1.0f),
 	.animation = it.user ("animation", properties, 0),
+	.additive = it.optional ("additive", false),
+	.blendIn = it.optional ("blendin", false),
+	.blendOut = it.optional ("blendout", false),
+	.blendTime = it.optional ("blendtime", 0.5f),
     });
 }
 
@@ -317,13 +514,14 @@ ParticleUniquePtr ObjectParser::parseParticle (const JSON& it, const Project& pr
 		    .instanceOverride = {
 		        .enabled = Builders::UserSettingBuilder::fromValue(false),
 			.alpha = Builders::UserSettingBuilder::fromValue(1.0f),
+			.brightness = Builders::UserSettingBuilder::fromValue(1.0f),
 			.size = Builders::UserSettingBuilder::fromValue(1.0f),
 			.lifetime = Builders::UserSettingBuilder::fromValue(1.0f),
 			.rate = Builders::UserSettingBuilder::fromValue(1.0f),
 			.speed = Builders::UserSettingBuilder::fromValue(1.0f),
 			.count = Builders::UserSettingBuilder::fromValue(1.0f),
 			.color = Builders::UserSettingBuilder::fromValue(1.0f),
-			.colorn = Builders::UserSettingBuilder::fromValue(1.0f),
+			.colorn = Builders::UserSettingBuilder::fromValue(glm::vec3 (-1.0f)),
 		    },
 		}
 	    );
@@ -338,14 +536,24 @@ ParticleUniquePtr ObjectParser::parseParticle (const JSON& it, const Project& pr
 	JSON particleJson = JSON::object ();
 	if (!particleFile.empty ()) {
 	    try {
-		particleJson
-		    = WallpaperEngine::Data::JSON::JSON::parse (project.assetLocator->readString (particleFile));
+		particleJson = WallpaperEngine::Data::JSON::parseAuthoringJson (
+		    project.assetLocator->readString (particleFile), particleFile);
 	    } catch (std::runtime_error& e) {
 		sLog.error ("Cannot load particle file: ", particleFile, " - ", e.what ());
 	    }
 	} else if (particleIt->is_object ()) {
 	    particleJson = *particleIt;
 	}
+	const auto reportUnsupported = [&] (const char* component, size_t index, const JSON& entry,
+	                                    const char* action) {
+	    const auto nameIt = entry.find ("name");
+	    const std::string name = nameIt != entry.end () && nameIt->is_string ()
+	        ? nameIt->get<std::string> () : "<missing>";
+	    sLog.error ("Unsupported particle component: object_id=", base.id,
+	                " source=", particleFile.empty () ? "<inline>" : particleFile,
+	                " path=particle.", component, "[", index, "] name=", name,
+	                " action=", action);
+	};
 
 	// Parse emitters (note: field is named "emitter" not "emitters")
 	std::vector<ParticleEmitter> emitters;
@@ -360,10 +568,14 @@ ParticleUniquePtr ObjectParser::parseParticle (const JSON& it, const Project& pr
 	std::vector<ParticleInitializerUniquePtr> initializers;
 	const auto initializersIt = particleJson.find ("initializer");
 	if (initializersIt != particleJson.end () && initializersIt->is_array ()) {
-	    for (const auto& initializer : *initializersIt) {
-		auto init = parseParticleInitializer (initializer, project.properties);
+	    for (size_t index = 0; index < initializersIt->size (); ++index) {
+		const auto& initializer = (*initializersIt)[index];
+		auto init = parseParticleInitializer (
+                    initializer, project.properties, project.sceneOrthogonalProjection);
 		if (init) {
 		    initializers.push_back (std::move (init));
+		} else {
+		    reportUnsupported ("initializer", index, initializer, "skipped");
 		}
 	    }
 	}
@@ -372,10 +584,25 @@ ParticleUniquePtr ObjectParser::parseParticle (const JSON& it, const Project& pr
 	std::vector<ParticleOperatorUniquePtr> operators;
 	const auto operatorsIt = particleJson.find ("operator");
 	if (operatorsIt != particleJson.end () && operatorsIt->is_array ()) {
-	    for (const auto& op : *operatorsIt) {
+	    for (size_t index = 0; index < operatorsIt->size (); ++index) {
+	const auto& op = (*operatorsIt)[index];
 		auto oper = parseParticleOperator (op, project.properties);
 		if (oper) {
+		    const bool hasBlend = op.find ("blendinstart") != op.end ()
+		        || op.find ("blendinend") != op.end ()
+		        || op.find ("blendoutstart") != op.end ()
+		        || op.find ("blendoutend") != op.end ();
+		    if (hasBlend) {
+			oper->blendEnvelope.emplace (ParticleOperatorBase::BlendEnvelope {
+			    op.user ("blendinstart", project.properties, 0.0f),
+			    op.user ("blendinend", project.properties, 0.0f),
+			    op.user ("blendoutstart", project.properties, 1.0f),
+			    op.user ("blendoutend", project.properties, 1.0f),
+			});
+		    }
 		    operators.push_back (std::move (oper));
+		} else {
+		    reportUnsupported ("operator", index, op, "skipped");
 		}
 	    }
 	}
@@ -384,7 +611,15 @@ ParticleUniquePtr ObjectParser::parseParticle (const JSON& it, const Project& pr
 	std::vector<ParticleRenderer> renderers;
 	const auto renderersIt = particleJson.find ("renderer");
 	if (renderersIt != particleJson.end () && renderersIt->is_array ()) {
-	    for (const auto& renderer : *renderersIt) {
+	    for (size_t index = 0; index < renderersIt->size (); ++index) {
+		const auto& renderer = (*renderersIt)[index];
+		const auto nameIt = renderer.find ("name");
+		if (nameIt != renderer.end () && nameIt->is_string ()) {
+		    const auto& name = nameIt->get_ref<const std::string&> ();
+		    if (name != "sprite" && name != "spritetrail" && name != "rope" && name != "ropetrail") {
+			reportUnsupported ("renderer", index, renderer, "sprite_fallback");
+		    }
+		}
 		renderers.push_back (parseParticleRenderer (renderer));
 	    }
 	}
@@ -394,6 +629,9 @@ ParticleUniquePtr ObjectParser::parseParticle (const JSON& it, const Project& pr
 	    renderers.push_back (
 		ParticleRenderer {
 		    .name = "sprite",
+		    .orientation = "screen",
+		    .axis = glm::vec3 (0.0f),
+		    .flags = 0,
 		    .length = 0.05f,
 		    .maxLength = 10.0f,
 		    .minLength = 0.0f,
@@ -430,13 +668,14 @@ ParticleUniquePtr ObjectParser::parseParticle (const JSON& it, const Project& pr
 	ParticleInstanceOverride instanceOverride = {
 	    .enabled = Builders::UserSettingBuilder::fromValue (false),
 	    .alpha = Builders::UserSettingBuilder::fromValue (1.0f),
+	    .brightness = Builders::UserSettingBuilder::fromValue (1.0f),
 	    .size = Builders::UserSettingBuilder::fromValue (1.0f),
 	    .lifetime = Builders::UserSettingBuilder::fromValue (1.0f),
 	    .rate = Builders::UserSettingBuilder::fromValue (1.0f),
 	    .speed = Builders::UserSettingBuilder::fromValue (1.0f),
 	    .count = Builders::UserSettingBuilder::fromValue (1.0f),
 	    .color = Builders::UserSettingBuilder::fromValue (1.0f),
-	    .colorn = Builders::UserSettingBuilder::fromValue (1.0f),
+	    .colorn = Builders::UserSettingBuilder::fromValue (glm::vec3 (-1.0f)),
 	};
 	const auto instanceOverrideIt = it.optional ("instanceoverride");
 	if (instanceOverrideIt.has_value ()) {
@@ -481,8 +720,30 @@ ParticleUniquePtr ObjectParser::parseParticle (const JSON& it, const Project& pr
 	// Parse numeric fields safely
 	float sequenceMultiplier = 1.0f;
 	uint32_t maxCount = 100;
-	uint32_t startTime = 0;
+	float startTime = 0.0f;
 	uint32_t flags = 0;
+	// 1401c45f0 synthesizes the compiled preset's colorn/hascolor from its
+	// color components, overwriting any top-level authored values. Color-random
+	// uses the midpoint; color-change's start color takes precedence afterward.
+	glm::vec3 presetColorN (1.0f);
+	bool presetHasColor = false;
+	for (const auto& initializer : initializers) {
+	    if (initializer->is<ColorRandomInitializer> ()) {
+		const auto* random = initializer->as<ColorRandomInitializer> ();
+		presetColorN = (random->min->value->getVec3 ()
+		    + random->max->value->getVec3 ()) * 0.5f;
+		presetHasColor = true;
+		break;
+	    }
+	}
+	for (const auto& op : operators) {
+	    if (op->is<ColorChangeOperator> ()) {
+		const auto* change = op->as<ColorChangeOperator> ();
+		presetColorN = change->startValue->value->getVec3 ();
+		presetHasColor = true;
+		break;
+	    }
+	}
 
 	const auto seqMultIt = particleJson.find ("sequencemultiplier");
 	if (seqMultIt != particleJson.end () && seqMultIt->is_number ()) {
@@ -490,13 +751,31 @@ ParticleUniquePtr ObjectParser::parseParticle (const JSON& it, const Project& pr
 	}
 
 	const auto maxCountIt = particleJson.find ("maxcount");
-	if (maxCountIt != particleJson.end () && maxCountIt->is_number ()) {
-	    maxCount = maxCountIt->get<uint32_t> ();
+	if (maxCountIt != particleJson.end () && !maxCountIt->is_null ()) {
+	    if (!maxCountIt->is_number_integer ()) {
+		throw std::invalid_argument ("Particle maxcount must be a nonnegative integer");
+	    }
+	    if (maxCountIt->is_number_unsigned ()) {
+		const auto value = maxCountIt->get<uint64_t> ();
+		if (value > std::numeric_limits<uint32_t>::max ()) {
+		    throw std::invalid_argument ("Particle maxcount exceeds uint32 range");
+		}
+		maxCount = static_cast<uint32_t> (value);
+	    } else {
+		const auto value = maxCountIt->get<int64_t> ();
+		if (value < 0 || static_cast<uint64_t> (value) > std::numeric_limits<uint32_t>::max ()) {
+		    throw std::invalid_argument ("Particle maxcount must fit a nonnegative uint32");
+		}
+		maxCount = static_cast<uint32_t> (value);
+	    }
 	}
 
 	const auto startTimeIt = particleJson.find ("starttime");
 	if (startTimeIt != particleJson.end () && startTimeIt->is_number ()) {
-	    startTime = startTimeIt->get<uint32_t> ();
+	    startTime = startTimeIt->get<float> ();
+	    if (!std::isfinite (startTime) || startTime < 0.0f) {
+		throw std::invalid_argument ("Particle starttime must be finite and nonnegative");
+	    }
 	}
 
 	const auto flagsIt = particleJson.find ("flags");
@@ -517,6 +796,10 @@ ParticleUniquePtr ObjectParser::parseParticle (const JSON& it, const Project& pr
 		.maxCount = maxCount,
 		.startTime = startTime,
 		.flags = flags,
+		.presetColorN = presetColorN,
+		.presetHasColor = presetHasColor,
+		.presetTintCompiled = (flags & 0x200000u) != 0
+		    || !presetHasColor || project.sceneVersion < 5,
 		.material = std::move (material),
 		.emitters = std::move (emitters),
 		.initializers = std::move (initializers),
@@ -567,6 +850,9 @@ ParticleEmitter ObjectParser::parseParticleEmitter (const JSON& it) {
 	if (fieldIt == it.end ()) {
 	    return defaultValue;
 	}
+	if (fieldIt->is_string ()) {
+	    return it.optional (fieldName, defaultValue);
+	}
 	if (fieldIt->is_array () && fieldIt->size () >= 3) {
 	    return glm::ivec3 ((*fieldIt)[0].get<int> (), (*fieldIt)[1].get<int> (), (*fieldIt)[2].get<int> ());
 	}
@@ -588,25 +874,35 @@ ParticleEmitter ObjectParser::parseParticleEmitter (const JSON& it) {
     };
 
     try {
+	const float rate = it.optional ("rate", 10.0f);
+	if (!std::isfinite (rate) || rate < 0.0f) {
+	    throw std::invalid_argument ("Particle emitter rate must be finite and nonnegative");
+	}
 	return ParticleEmitter {
 	    .id = it.optional ("id", -1),
 	    .name = name,
 	    .directions = parseVec3 ("directions", glm::vec3 (1.0f, 1.0f, 0.0f)),
 	    .distanceMin = parseVec3 ("distancemin", glm::vec3 (0.0f, 0.0f, 0.0f)),
 	    .distanceMax = parseVec3 ("distancemax", glm::vec3 (256.0f, 256.0f, 0.0f)),
+	    .distanceMaxAuthored = it.find ("distancemax") != it.end (),
 	    .origin = parseVec3 ("origin", glm::vec3 (0.0f)),
+	    .offsetMin = parseVec3 ("offsetmin", name == "layerimage"
+	        ? glm::vec3 (-5.0f, -5.0f, 0.0f) : glm::vec3 (0.0f)),
+	    .offsetMax = parseVec3 ("offsetmax", name == "layerimage"
+	        ? glm::vec3 (5.0f, 5.0f, 0.0f) : glm::vec3 (0.0f)),
 	    .sign = parseIVec3 ("sign", glm::ivec3 (0)),
 	    .instantaneous = it.optional ("instantaneous", 0u),
-	    .speedMin = it.optional ("speedmin", 0.0f),
-	    .speedMax = it.optional ("speedmax", 0.0f),
-	    .rate = it.optional ("rate", 10.0f),
+	    .speedMin = it.optional ("speedmin", name == "layerimage" ? 0.1f : 0.0f),
+	    .speedMax = it.optional ("speedmax", name == "layerimage" ? 0.2f : 0.0f),
+	    .rate = rate,
 	    .controlPoint = it.optional ("controlpoint", 0),
-	    .flags = it.optional ("flags", 0u),
+	    .flags = it.optional ("flags", name == "layerimage" ? 0x10000u
+	        : (name == "sphererandom" ? 1u : 0u)),
 	    .cone = it.optional ("cone", 0.0f),
 	    .delay = it.optional ("delay", 0.0f),
 	    .duration = it.optional ("duration", 0.0f),
 	    .audioProcessingBounds = parseVec2 ("audioprocessingbounds", glm::vec2 (0.8f, 1.0f)),
-	    .audioProcessingExponent = it.optional ("audioprocessingexponent", 2),
+	    .audioProcessingExponent = it.optional ("audioprocessingexponent", 2.0f),
 	    .audioProcessingFrequencyStart = it.optional ("audioprocessingfrequencystart", 0),
 	    .audioProcessingFrequencyEnd = it.optional ("audioprocessingfrequencyend", 1),
 	    .audioProcessingMode = it.optional ("audioprocessingmode", 0),
@@ -614,15 +910,17 @@ ParticleEmitter ObjectParser::parseParticleEmitter (const JSON& it) {
 	    .maxPeriodicDelay = it.optional ("maxperiodicdelay", 2.0f),
 	    .minPeriodicDuration = it.optional ("minperiodicduration", 2.0f),
 	    .maxPeriodicDuration = it.optional ("maxperiodicduration", 3.0f),
+	    .maxToEmitPerPeriod = it.optional ("maxtoemitperperiod", 0u),
 	};
-    } catch (nlohmann::json::exception& e) {
+    } catch (const std::exception& e) {
 	sLog.error ("Error parsing emitter: ", e.what ());
 	sLog.error ("Emitter JSON: ", it.dump ());
 	throw;
     }
 }
 
-ParticleInitializerUniquePtr ObjectParser::parseParticleInitializer (const JSON& it, const Properties& properties) {
+ParticleInitializerUniquePtr ObjectParser::parseParticleInitializer (
+    const JSON& it, const Properties& properties, bool orthogonalScene) {
     std::string name = it.optional<std::string> ("name", "");
 
     if (name == "colorrandom") {
@@ -631,13 +929,18 @@ ParticleInitializerUniquePtr ObjectParser::parseParticleInitializer (const JSON&
 	    it.color ("max", properties, Builders::ColorBuilder::White)
 	);
     } else if (name == "sizerandom") {
+	// 1401b9e70 inserts missing bounds according to the native scene
+	// projection context before decoding the initializer. Perspective
+	// defaults are 0.001..1; orthographic defaults are 5..50.
 	return std::make_unique<SizeRandomInitializer> (
-	    it.user ("min", properties, 0.0f), it.user ("max", properties, 20.0f),
+	    it.user ("min", properties, orthogonalScene ? 5.0f : 0.001f),
+            it.user ("max", properties, orthogonalScene ? 50.0f : 1.0f),
 	    it.user ("exponent", properties, 1.0f)
 	);
     } else if (name == "alpharandom") {
 	return std::make_unique<AlphaRandomInitializer> (
-	    it.user ("min", properties, 0.05f), it.user ("max", properties, 1.0f)
+	    it.user ("min", properties, 0.05f), it.user ("max", properties, 1.0f),
+	    it.user ("exponent", properties, 1.0f)
 	);
     } else if (name == "lifetimerandom") {
 	return std::make_unique<LifetimeRandomInitializer> (
@@ -663,12 +966,22 @@ ParticleInitializerUniquePtr ObjectParser::parseParticleInitializer (const JSON&
 	    it.user ("scale", properties, 1.0f), it.user ("offset", properties, 0.0f),
 	    it.user ("forward", properties, glm::vec3 (0.0f, 1.0f, 0.0f)), it.user ("timescale", properties, 1.0f),
 	    it.user ("phasemin", properties, 0.0f), it.user ("phasemax", properties, 0.1f),
-	    it.user ("right", properties, glm::vec3 (0.0f, 0.0f, 1.0f))
+	    it.user ("right", properties, glm::vec3 (0.0f, 0.0f, 1.0f)),
+	    it.user ("audioprocessingmode", properties, 0),
+	    it.user ("audioprocessingbounds", properties, glm::vec2 (0.8f, 1.0f)),
+	    it.user ("audioprocessingexponent", properties, 2.0f),
+	    it.user ("audioprocessingfrequencystart", properties, 0),
+	    it.user ("audioprocessingfrequencyend", properties, 1),
+	    !it.contains ("speedmin"), !it.contains ("speedmax")
 	);
     } else if (name == "mapsequencearoundcontrolpoint") {
 	return std::make_unique<MapSequenceAroundControlPointInitializer> (
 	    it.user ("controlpoint", properties, 0), it.user ("count", properties, 1),
-	    it.user ("speedmin", properties, glm::vec3 (0.0f)), it.user ("speedmax", properties, glm::vec3 (100.0f))
+	    it.user ("speedmin", properties, glm::vec3 (0.0f)), it.user ("speedmax", properties, glm::vec3 (0.0f)),
+	    it.optional ("bounds", glm::vec2 (0.0f, 1.0f)),
+	    it.optional ("axis", glm::vec3 (0.0f, 0.0f, 1.0f)),
+	    it.optional<std::string> ("limitbehavior", "repeat"),
+	    it.optional<uint32_t> ("flags", 0)
 	);
     }
 
@@ -686,6 +999,190 @@ ParticleOperatorUniquePtr ObjectParser::parseParticleOperator (const JSON& it, c
 	return std::make_unique<AngularMovementOperator> (
 	    it.user ("drag", properties, 0.0f), it.user ("force", properties, glm::vec3 (0.0f))
 	);
+    } else if (name == "capvelocity") {
+	return std::make_unique<CapVelocityOperator> (
+	    it.user ("maxspeed", properties, 100.0f), !it.contains ("maxspeed"));
+    } else if (name == "remapvalue") {
+	// Only the numeric scalar path is represented. Native 1401bfbb0 inserts
+	// numeric range defaults; property-driven/vector ranges remain unsupported.
+	const auto isDefaultNumber = [&it] (const char* key, float value) {
+	    if (!it.contains (key)) return true;
+	    const auto& field = it.at (key);
+	    return field.is_number () && field.get<float> () == value;
+	};
+	const auto isNumber = [&it] (const char* key) {
+	    return !it.contains (key) || it.at (key).is_number ();
+	};
+	const auto transform = it.optional<std::string> ("transformfunction", "none");
+	if ((transform != "none" && transform != "sine" && transform != "square"
+	     && transform != "saw" && transform != "triangle"
+	     && transform != "simplexnoise" && transform != "fbmnoise")
+	    || !isDefaultNumber ("outputcontrolpoint0", 0.0f)
+	    || !isDefaultNumber ("outputcontrolpoint1", 1.0f)
+	    || !isNumber ("transforminputscale")
+	    || (transform == "fbmnoise" ?
+	        (it.contains ("transformoctaves")
+	         && !it.at ("transformoctaves").is_number_integer ())
+	        : !isDefaultNumber ("transformoctaves", 3.0f))) return nullptr;
+	const int transformOctaves = it.optional<int> ("transformoctaves", 3);
+	if (transform == "fbmnoise" && (transformOctaves < 0 || transformOctaves > 32))
+	    return nullptr;
+	const auto output = it.optional<std::string> ("output", "size");
+	const auto input = it.optional<std::string> ("input", "lifetimefraction");
+	const auto inputComponent = it.optional<std::string> ("inputcomponent", "all");
+	const auto operation = it.optional<std::string> ("operation", "multiply");
+	const bool controlPointInput = input == "distancetocontrolpoint"
+	    || input == "positionbetweentwocontrolpoints"
+	    || input == "controlpoint" || input == "deltatocontrolpoint"
+	    || input == "directiontocontrolpoint";
+	if (controlPointInput) {
+	    if (it.contains ("inputcontrolpoint0")
+	        && !it.at ("inputcontrolpoint0").is_number_integer ()) return nullptr;
+	} else if (!isDefaultNumber ("inputcontrolpoint0", 0.0f)) return nullptr;
+	const int authoredControlPoint = it.optional<int> ("inputcontrolpoint0", 0);
+	const int inputControlPoint = static_cast<int> (std::min (
+	    static_cast<uint32_t> (authoredControlPoint), 7u));
+	if (input == "positionbetweentwocontrolpoints") {
+	    if (it.contains ("inputcontrolpoint1")
+	        && !it.at ("inputcontrolpoint1").is_number_integer ()) return nullptr;
+	} else if (!isDefaultNumber ("inputcontrolpoint1", 1.0f)) return nullptr;
+	const int authoredControlPoint1 = it.optional<int> ("inputcontrolpoint1", 1);
+	const int inputControlPoint1 = static_cast<int> (std::min (
+	    static_cast<uint32_t> (authoredControlPoint1), 7u));
+	const auto outputComponent = it.optional<std::string> ("outputcomponent", "all");
+	const bool vectorOutput = output == "color" || output == "position" || output == "velocity";
+	if (it.contains ("flags") && !it.at ("flags").is_number_integer ()) return nullptr;
+	const int flags = it.optional<int> ("flags", 1);
+	if (output != "size" && output != "opacity" && output != "speed"
+	    && !vectorOutput) return nullptr;
+	if (vectorOutput) {
+	    if (outputComponent != "all" && outputComponent != "x"
+	        && outputComponent != "y" && outputComponent != "z") return nullptr;
+	} else if (outputComponent != "all" || !isNumber ("inputrangemin")
+	    || !isNumber ("inputrangemax") || !isNumber ("outputrangemin")
+	    || !isNumber ("outputrangemax")) return nullptr;
+	if (input != "lifetimefraction" && input != "maxlifetime"
+	    && input != "size" && input != "opacity" && input != "speed"
+	    && input != "rotation" && input != "angularspeed"
+	    && !controlPointInput
+	    && input != "color" && input != "position" && input != "velocity") return nullptr;
+	const bool vectorInput = input == "color" || input == "position" || input == "velocity"
+	    || input == "controlpoint" || input == "deltatocontrolpoint"
+	    || input == "directiontocontrolpoint";
+	if (vectorInput) {
+	    if (inputComponent != "all" && inputComponent != "x"
+	        && inputComponent != "y" && inputComponent != "z"
+	        && inputComponent != "sum" && inputComponent != "average"
+	        && inputComponent != "max" && inputComponent != "min") return nullptr;
+	} else if (inputComponent != "all") return nullptr;
+	if (operation != "remap" && operation != "multiply"
+	    && operation != "add" && operation != "subtract") return nullptr;
+	if (flags < 0 || flags > 3) return nullptr;
+	const float transformScale = it.optional<float> ("transforminputscale", 2.0f);
+	if (vectorOutput) {
+	    const auto vectorRange = [&] (const char* key, float defaultValue) -> std::optional<glm::vec3> {
+	        if (!it.contains (key)) return glm::vec3 (defaultValue);
+	        const auto& field = it.at (key);
+	        if (field.is_number ()) return glm::vec3 (field.get<float> ());
+	        if (field.is_string ()) return it.optional (key, glm::vec3 (defaultValue));
+	        if (field.is_array () && field.size () == 3
+	            && field[0].is_number () && field[1].is_number () && field[2].is_number ())
+	            return glm::vec3 (field[0].get<float> (), field[1].get<float> (), field[2].get<float> ());
+	        return std::nullopt;
+	    };
+	    const auto inputMin = vectorRange ("inputrangemin", 0.0f);
+	    const auto inputMax = vectorRange ("inputrangemax", 1.0f);
+	    const auto outputMin = vectorRange ("outputrangemin", 0.0f);
+	    const auto outputMax = vectorRange ("outputrangemax", 1.0f);
+	    if (!inputMin || !inputMax || !outputMin || !outputMax) return nullptr;
+	    return std::make_unique<VectorRemapValueOperator> (
+	        input == "lifetimefraction" ? VectorRemapValueOperator::Input::LifetimeFraction
+	        : input == "maxlifetime" ? VectorRemapValueOperator::Input::MaxLifetime
+	        : input == "size" ? VectorRemapValueOperator::Input::Size
+	        : input == "opacity" ? VectorRemapValueOperator::Input::Opacity
+	        : input == "speed" ? VectorRemapValueOperator::Input::Speed
+	        : input == "rotation" ? VectorRemapValueOperator::Input::Rotation
+	        : input == "angularspeed" ? VectorRemapValueOperator::Input::AngularSpeed
+	        : input == "distancetocontrolpoint" ? VectorRemapValueOperator::Input::DistanceToControlPoint
+	        : input == "positionbetweentwocontrolpoints" ? VectorRemapValueOperator::Input::PositionBetweenTwoControlPoints
+	        : input == "controlpoint" ? VectorRemapValueOperator::Input::ControlPoint
+	        : input == "deltatocontrolpoint" ? VectorRemapValueOperator::Input::DeltaToControlPoint
+	        : input == "directiontocontrolpoint" ? VectorRemapValueOperator::Input::DirectionToControlPoint
+	        : input == "color" ? VectorRemapValueOperator::Input::Color
+	        : input == "position" ? VectorRemapValueOperator::Input::Position
+	                               : VectorRemapValueOperator::Input::Velocity,
+	        inputComponent == "x" ? VectorRemapValueOperator::InputComponent::X
+	        : inputComponent == "y" ? VectorRemapValueOperator::InputComponent::Y
+	        : inputComponent == "z" ? VectorRemapValueOperator::InputComponent::Z
+	        : inputComponent == "sum" ? VectorRemapValueOperator::InputComponent::Sum
+	        : inputComponent == "average" ? VectorRemapValueOperator::InputComponent::Average
+	        : inputComponent == "max" ? VectorRemapValueOperator::InputComponent::Max
+	        : inputComponent == "min" ? VectorRemapValueOperator::InputComponent::Min
+	                                  : VectorRemapValueOperator::InputComponent::All,
+	        output == "color" ? VectorRemapValueOperator::Output::Color
+	        : output == "position" ? VectorRemapValueOperator::Output::Position
+	                               : VectorRemapValueOperator::Output::Velocity,
+	        outputComponent == "x" ? VectorRemapValueOperator::OutputComponent::X
+	        : outputComponent == "y" ? VectorRemapValueOperator::OutputComponent::Y
+	        : outputComponent == "z" ? VectorRemapValueOperator::OutputComponent::Z
+	                                   : VectorRemapValueOperator::OutputComponent::All,
+	        operation == "remap" ? VectorRemapValueOperator::Operation::Set
+	        : operation == "multiply" ? VectorRemapValueOperator::Operation::Multiply
+	        : operation == "add" ? VectorRemapValueOperator::Operation::Add
+	                              : VectorRemapValueOperator::Operation::Subtract,
+	        flags, *inputMin, *inputMax, *outputMin, *outputMax,
+	        transform == "sine" ? VectorRemapValueOperator::Transform::Sine
+	        : transform == "square" ? VectorRemapValueOperator::Transform::Square
+	        : transform == "saw" ? VectorRemapValueOperator::Transform::Saw
+	        : transform == "triangle" ? VectorRemapValueOperator::Transform::Triangle
+	        : transform == "simplexnoise" ? VectorRemapValueOperator::Transform::SimplexNoise
+	        : transform == "fbmnoise" ? VectorRemapValueOperator::Transform::FBMNoise
+	                            : VectorRemapValueOperator::Transform::Identity,
+	        transformScale, inputControlPoint, transformOctaves, inputControlPoint1);
+	}
+	return std::make_unique<ScalarRemapValueOperator> (
+	    input == "lifetimefraction" ? ScalarRemapValueOperator::Input::LifetimeFraction
+	    : input == "maxlifetime" ? ScalarRemapValueOperator::Input::MaxLifetime
+	    : input == "size" ? ScalarRemapValueOperator::Input::Size
+	    : input == "opacity" ? ScalarRemapValueOperator::Input::Opacity
+	    : input == "speed" ? ScalarRemapValueOperator::Input::Speed
+	    : input == "rotation" ? ScalarRemapValueOperator::Input::Rotation
+	    : input == "angularspeed" ? ScalarRemapValueOperator::Input::AngularSpeed
+	    : input == "distancetocontrolpoint" ? ScalarRemapValueOperator::Input::DistanceToControlPoint
+	    : input == "positionbetweentwocontrolpoints" ? ScalarRemapValueOperator::Input::PositionBetweenTwoControlPoints
+	    : input == "controlpoint" ? ScalarRemapValueOperator::Input::ControlPoint
+	    : input == "deltatocontrolpoint" ? ScalarRemapValueOperator::Input::DeltaToControlPoint
+	    : input == "directiontocontrolpoint" ? ScalarRemapValueOperator::Input::DirectionToControlPoint
+	    : input == "color" ? ScalarRemapValueOperator::Input::Color
+	    : input == "position" ? ScalarRemapValueOperator::Input::Position
+	                            : ScalarRemapValueOperator::Input::Velocity,
+	    inputComponent == "x" ? ScalarRemapValueOperator::InputComponent::X
+	    : inputComponent == "y" ? ScalarRemapValueOperator::InputComponent::Y
+	    : inputComponent == "z" ? ScalarRemapValueOperator::InputComponent::Z
+	    : inputComponent == "sum" ? ScalarRemapValueOperator::InputComponent::Sum
+	    : inputComponent == "average" ? ScalarRemapValueOperator::InputComponent::Average
+	    : inputComponent == "max" ? ScalarRemapValueOperator::InputComponent::Max
+	    : inputComponent == "min" ? ScalarRemapValueOperator::InputComponent::Min
+	                               : ScalarRemapValueOperator::InputComponent::All,
+	    output == "size" ? ScalarRemapValueOperator::Output::Size
+	    : output == "speed" ? ScalarRemapValueOperator::Output::Speed
+	                         : ScalarRemapValueOperator::Output::Opacity,
+	    operation == "remap" ? ScalarRemapValueOperator::Operation::Set
+	    : operation == "multiply" ? ScalarRemapValueOperator::Operation::Multiply
+	    : operation == "add" ? ScalarRemapValueOperator::Operation::Add
+	                           : ScalarRemapValueOperator::Operation::Subtract,
+	    flags, it.optional<float> ("inputrangemin", 0.0f),
+	    it.optional<float> ("inputrangemax", 1.0f),
+	    it.optional<float> ("outputrangemin", 0.0f),
+	    it.optional<float> ("outputrangemax", 1.0f),
+	    transform == "sine" ? ScalarRemapValueOperator::Transform::Sine
+	    : transform == "square" ? ScalarRemapValueOperator::Transform::Square
+	    : transform == "saw" ? ScalarRemapValueOperator::Transform::Saw
+	    : transform == "triangle" ? ScalarRemapValueOperator::Transform::Triangle
+	    : transform == "simplexnoise" ? ScalarRemapValueOperator::Transform::SimplexNoise
+	    : transform == "fbmnoise" ? ScalarRemapValueOperator::Transform::FBMNoise
+	                        : ScalarRemapValueOperator::Transform::Identity,
+	    transformScale, inputControlPoint, transformOctaves, inputControlPoint1);
     } else if (name == "alphafade") {
 	return std::make_unique<AlphaFadeOperator> (
 	    it.user ("fadeintime", properties, 0.5f), it.user ("fadeouttime", properties, 0.5f)
@@ -717,32 +1214,43 @@ ParticleOperatorUniquePtr ObjectParser::parseParticleOperator (const JSON& it, c
 	    it.user ("audioprocessingfrequencyend", properties, 15)
 	);
     } else if (name == "vortex" || name == "vortex_v2") {
+	const bool v2 = name == "vortex_v2";
 	return std::make_unique<VortexOperator> (
+	    v2 ? VortexOperator::Variant::VortexV2 : VortexOperator::Variant::Vortex,
+	    VortexOperator::SceneDefaults {
+		it.find ("distanceinner") == it.end (), it.find ("distanceouter") == it.end (),
+		it.find ("speedinner") == it.end ()
+	    },
 	    it.optional ("controlpoint", 0),
 	    it.optional ("flags", 0), // 1 = infinite axis, 2 = maintain distance, 4 = ring shape
-	    it.user ("axis", properties, glm::vec3 (0.0f, 0.0f, 1.0f)),
+	    it.user ("axis", properties, glm::vec3 (1.0f, 0.0f, 0.0f)),
 	    it.user ("offset", properties, glm::vec3 (0.0f)), it.user ("distanceinner", properties, 500.0f),
 	    it.user ("distanceouter", properties, 650.0f), it.user ("speedinner", properties, 2500.0f),
 	    it.user ("speedouter", properties, 0.0f), it.user ("centerforce", properties, 1.0f),
 	    it.user ("ringradius", properties, 300.0f), it.user ("ringwidth", properties, 50.0f),
 	    it.user ("ringpulldistance", properties, 50.0f), it.user ("ringpullforce", properties, 10.0f),
 	    it.user ("audioprocessingmode", properties, 0),
-	    it.user ("audioprocessingbounds", properties, glm::vec2 (0.0f, 1.0f))
+	    it.user ("audioprocessingbounds", properties, glm::vec2 (0.8f, 1.0f)),
+	    it.user ("audioprocessingexponent", properties, 2.0f),
+	    it.user ("audioprocessingfrequencystart", properties, 0),
+	    it.user ("audioprocessingfrequencyend", properties, 1)
 	);
     } else if (name == "controlpointattract") {
 	return std::make_unique<ControlPointAttractOperator> (
-	    it.optional ("controlpoint", 0), it.user ("origin", properties, glm::vec3 (0.0f)),
-	    it.user ("scale", properties, 100.0f), it.user ("threshold", properties, 1000.0f)
+	    it.optional ("controlpoint", 0),
+	    it.user (it.contains ("offset") ? "offset" : "origin", properties, glm::vec3 (0.0f)),
+	    it.user ("scale", properties, 100.0f), it.user ("threshold", properties, 1000.0f),
+	    it.optional<uint32_t> ("flags", 2u)
 	);
     } else if (name == "oscillatealpha") {
 	return std::make_unique<OscillateAlphaOperator> (
-	    it.user ("frequencymin", properties, 0.0f), it.user ("frequencymax", properties, 10.0f),
+	    it.user ("frequencymin", properties, 1.0f), it.user ("frequencymax", properties, 10.0f),
 	    it.user ("scalemin", properties, 0.0f), it.user ("scalemax", properties, 1.0f),
 	    it.user ("phasemin", properties, 0.0f), it.user ("phasemax", properties, glm::two_pi<float> ())
 	);
     } else if (name == "oscillatesize") {
 	return std::make_unique<OscillateSizeOperator> (
-	    it.user ("frequencymin", properties, 0.0f), it.user ("frequencymax", properties, 10.0f),
+	    it.user ("frequencymin", properties, 1.0f), it.user ("frequencymax", properties, 10.0f),
 	    it.user ("scalemin", properties, 0.8f), it.user ("scalemax", properties, 1.2f),
 	    it.user ("phasemin", properties, 0.0f), it.user ("phasemax", properties, glm::two_pi<float> ())
 	);
@@ -771,6 +1279,9 @@ ParticleRenderer ObjectParser::parseParticleRenderer (const JSON& it) {
 
     return ParticleRenderer {
 	.name = name,
+	.orientation = it.optional ("orientation", std::string ("screen")),
+	.axis = it.optional ("axis", glm::vec3 (0.0f)),
+	.flags = static_cast<uint8_t> (it.optional ("flags", 0)),
 	.length = it.optional ("length", lengthDefault),
 	.maxLength = it.optional ("maxlength", 10.0f),
 	.minLength = it.optional ("minlength", 0.0f),
@@ -785,38 +1296,42 @@ ParticleRenderer ObjectParser::parseParticleRenderer (const JSON& it) {
 }
 
 ParticleControlPoint ObjectParser::parseParticleControlPoint (const JSON& it) {
-    // Parse offset - can be string "x y z" or array [x,y,z]
-    glm::vec3 offset (0.0f);
-    const auto offsetIt = it.find ("offset");
-    if (offsetIt != it.end ()) {
-	if (offsetIt->is_string ()) {
-	    // Parse string format "x y z"
-	    std::string offsetStr = offsetIt->get<std::string> ();
-	    std::istringstream iss (offsetStr);
-	    iss >> offset.x >> offset.y >> offset.z;
-	} else {
-	    // Try parsing as vec3 directly
-	    try {
-		offset = it.optional ("offset", glm::vec3 (0.0f));
-	    } catch (...) {
-		offset = glm::vec3 (0.0f);
-	    }
-	}
-    }
+    auto parseVec3 = [&it] (const char* fieldName) {
+        glm::vec3 value (0.0f);
+        const auto field = it.find (fieldName);
+        if (field == it.end ()) return value;
+        if (field->is_string ()) {
+            std::istringstream input (field->get<std::string> ());
+            input >> value.x >> value.y >> value.z;
+        } else {
+            try { value = it.optional (fieldName, value); }
+            catch (...) { value = glm::vec3 (0.0f); }
+        }
+        return value;
+    };
 
     return ParticleControlPoint {
 	.id = it.optional ("id", -1),
 	.flags = it.optional ("flags", 0u),
-	.offset = offset,
+	.parentControlPoint = it.optional ("parentcontrolpoint", 0),
+	.offset = parseVec3 ("offset"),
+	.angles = parseVec3 ("angles"),
 	.lockToPointer = it.optional ("locktopointer", false),
     };
 }
 
 ParticleChild ObjectParser::parseParticleChild (const JSON& it, const Project& project) {
+    // Native 1401c5490 reads the child asset from `name` (DAT_1404748b8).
+    // Retain `particle` as an explicit Linux fixture override, including an
+    // intentionally empty value; Workshop child descriptors use `name` alone.
     std::string particleFile = "";
     const auto particleIt = it.find ("particle");
     if (particleIt != it.end () && particleIt->is_string ()) {
 	particleFile = particleIt->get<std::string> ();
+    } else if (particleIt == it.end ()) {
+        const auto nameIt = it.find ("name");
+        if (nameIt != it.end () && nameIt->is_string ())
+            particleFile = nameIt->get<std::string> ();
     }
 
     std::string type = "static";
@@ -854,6 +1369,7 @@ ParticleChild ObjectParser::parseParticleChild (const JSON& it, const Project& p
     return ParticleChild {
 	.type = type,
 	.name = name,
+	.flags = it.optional ("flags", 0u),
 	.maxCount = it.optional ("maxcount", 20),
 	.controlPointStartIndex = it.optional ("controlpointstartindex", 0),
 	.probability = it.optional ("probability", 1.0f),
@@ -865,15 +1381,36 @@ ParticleChild ObjectParser::parseParticleChild (const JSON& it, const Project& p
 }
 
 ParticleInstanceOverride ObjectParser::parseParticleInstanceOverride (const JSON& it, const Properties& properties) {
-    return ParticleInstanceOverride {
+    // Native 14022af30 rewrites an authored 0..255 `color` string into the
+    // normalized `colorn` context field before parsing the instance registry.
+    // It wins over a simultaneous raw `colorn` entry. With neither field,
+    // 14024d760 leaves the negative tint sentinel in the context.
+    auto compiledColorn = it.user ("colorn", properties, glm::vec3 (-1.0f));
+    const auto authoredColor = it.optional ("color");
+    if (authoredColor && authoredColor->is_string ()) {
+        compiledColorn = Builders::UserSettingBuilder::fromValue (
+            Builders::VectorBuilder::parse<glm::vec3> (
+                authoredColor->get<std::string> ()) / 255.0f);
+    }
+    ParticleInstanceOverride result {
 	.enabled = it.user ("enabled", properties, true),
 	.alpha = it.user ("alpha", properties, 1.0f),
+	.brightness = it.user ("brightness", properties, 1.0f),
 	.size = it.user ("size", properties, 1.0f),
 	.lifetime = it.user ("lifetime", properties, 1.0f),
 	.rate = it.user ("rate", properties, 1.0f),
 	.speed = it.user ("speed", properties, 1.0f),
 	.count = it.user ("count", properties, 1.0f),
 	.color = it.user ("color", properties, glm::vec3 (1.0f)),
-	.colorn = it.user ("colorn", properties, glm::vec3 (1.0f)),
+	.colorn = std::move (compiledColorn),
     };
+    for (size_t index = 0; index < result.controlPoints.size (); ++index) {
+        const std::string key = "controlpoint" + std::to_string (index);
+        if (it.contains (key))
+            result.controlPoints[index] = it.user (key, properties, glm::vec3 (0.0f));
+        const std::string angleKey = "controlpointangle" + std::to_string (index);
+        if (it.contains (angleKey))
+            result.controlPointAngles[index] = it.user (angleKey, properties, glm::vec3 (0.0f));
+    }
+    return result;
 }

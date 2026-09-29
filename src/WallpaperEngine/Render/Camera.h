@@ -16,10 +16,25 @@ using namespace WallpaperEngine::Data::Model;
 
 class Camera {
 public:
-    Camera (Wallpapers::CScene& scene, const SceneData::Camera& camera);
+    struct Pose {
+        glm::vec3 eye;
+        glm::vec3 center;
+        glm::vec3 up;
+    };
+
+    Camera (Wallpapers::CScene& scene, const SceneData::Camera& camera,
+            const SceneCamera* activeObject = nullptr);
     ~Camera ();
 
+    [[nodiscard]] static const SceneCamera* selectActiveSceneCamera (const ObjectList& objects);
+    [[nodiscard]] static Pose poseForSceneCamera (const SceneCamera& camera);
+
     void setOrthogonalProjection (const float width, const float height);
+    void setPerspectiveProjection (float width, float height);
+    [[nodiscard]] static glm::mat4 makePerspectiveProjectionForScene (
+        float width, float height, float authoredFov, float authoredNearZ, float authoredFarZ);
+    [[nodiscard]] static glm::mat4 makeOrthogonalProjectionForScene (
+        float width, float height, float authoredNearZ, float authoredFarZ, const glm::vec3& eye);
 
     [[nodiscard]] const glm::vec3& getCenter () const;
     [[nodiscard]] const glm::vec3& getEye () const;
@@ -31,6 +46,7 @@ public:
     [[nodiscard]] float getWidth () const;
     [[nodiscard]] float getHeight () const;
     [[nodiscard]] float getFov () const;
+    [[nodiscard]] float getPerspectiveOverrideFov () const;
     [[nodiscard]] float getNearZ () const;
     [[nodiscard]] float getFarZ () const;
 
@@ -40,7 +56,9 @@ private:
     bool m_isOrthogonal = false;
     glm::mat4 m_projection = {};
     glm::mat4 m_lookat = {};
+    Pose m_pose;
     const SceneData::Camera& m_camera;
+    const SceneCamera* m_activeObject;
     Wallpapers::CScene& m_scene;
 };
 } // namespace WallpaperEngine::Render

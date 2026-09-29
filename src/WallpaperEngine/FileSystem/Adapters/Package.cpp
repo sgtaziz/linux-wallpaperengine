@@ -9,39 +9,62 @@
 #include "WallpaperEngine/Data/Utils/MemoryStream.h"
 
 #include <algorithm>
+#include <string_view>
 
 using namespace WallpaperEngine::FileSystem;
 using namespace WallpaperEngine::FileSystem::Adapters;
 
-ReadStreamSharedPtr PackageAdapter::open (const std::filesystem::path& path) const {
-    // find the file entry
-    const auto it = std::ranges::find_if (this->package->files, [&path] (const auto& file) {
-	return file->filename == path.string ();
-    });
+namespace {
+bool equalAsciiCaseInsensitive (std::string_view left, std::string_view right) {
+    if (left.size () != right.size ()) return false;
+    for (size_t i = 0; i < left.size (); ++i) {
+        const auto lower = [] (unsigned char c) {
+            return c >= 'A' && c <= 'Z' ? static_cast<unsigned char> (c - 'A' + 'a') : c;
+        };
+        if (lower (static_cast<unsigned char> (left[i]))
+            != lower (static_cast<unsigned char> (right[i]))) return false;
+    }
+    return true;
+}
 
-    if (it == this->package->files.end ()) {
+const FileEntry* findEntry (const Package& package, const std::filesystem::path& path) {
+    const std::string requested = path.generic_string ();
+    // An exact package name always wins. Some Workshop assets authored on
+    // Windows use a different ASCII case in the JSON reference and archive.
+    for (const auto& file : package.files)
+        if (file->filename == requested) return file.get ();
+
+    const FileEntry* fallback = nullptr;
+    for (const auto& file : package.files) {
+        if (!equalAsciiCaseInsensitive (file->filename, requested)) continue;
+        // If two archive names differ only by case, do not choose an
+        // arbitrary entry for an inexact reference.
+        if (fallback) return nullptr;
+        fallback = file.get ();
+    }
+    return fallback;
+}
+}
+
+ReadStreamSharedPtr PackageAdapter::open (const std::filesystem::path& path) const {
+    const auto* file = findEntry (*this->package, path);
+    if (!file) {
 	throw std::filesystem::filesystem_error ("Cannot find file", path, std::error_code ());
     }
 
     // read file into memory
-    auto buffer = std::make_unique<char[]> (it->get ()->length);
+    auto buffer = std::make_unique<char[]> (file->length);
 
     // go to the file's position and read into the buffer
-    this->package->file->base ().seekg (it->get ()->offset + this->package->baseOffset, std::ios::beg);
-    this->package->file->next (buffer.get (), it->get ()->length);
+    this->package->file->base ().seekg (file->offset + this->package->baseOffset, std::ios::beg);
+    this->package->file->next (buffer.get (), file->length);
 
     // create a memory stream and return that
-    return std::make_shared<MemoryStream> (std::move (buffer), it->get ()->length);
+    return std::make_shared<MemoryStream> (std::move (buffer), file->length);
 }
 
 bool PackageAdapter::exists (const std::filesystem::path& path) const {
-    for (const auto& file : this->package->files) {
-	if (file->filename == path.string ()) {
-	    return true;
-	}
-    }
-
-    return false;
+    return findEntry (*this->package, path) != nullptr;
 }
 
 std::filesystem::path PackageAdapter::physicalPath (const std::filesystem::path& path) const {

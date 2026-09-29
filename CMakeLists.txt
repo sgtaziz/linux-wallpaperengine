@@ -37,6 +37,10 @@ find_package(LZ4 REQUIRED)
 find_package(FFMPEG REQUIRED)
 find_package(PulseAudio REQUIRED)
 find_package(Freetype REQUIRED)
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(HARFBUZZ REQUIRED IMPORTED_TARGET harfbuzz)
+pkg_check_modules(FONTCONFIG REQUIRED IMPORTED_TARGET fontconfig)
+pkg_check_modules(WEBP REQUIRED IMPORTED_TARGET libwebp)
 
 set(ENABLE_OPT OFF)
 set(SPIRV_CROSS_FORCE_PIC ON)
@@ -356,6 +360,8 @@ set(COMMON_SOURCES
 
     src/WallpaperEngine/Media/MediaSource.h
     src/WallpaperEngine/Media/MediaSource.cpp
+    src/WallpaperEngine/Media/MediaArtwork.h
+    src/WallpaperEngine/Media/MediaArtwork.cpp
     src/WallpaperEngine/Media/DBusMediaSource.h
     src/WallpaperEngine/Media/DBusMediaSource.cpp
 
@@ -434,6 +440,10 @@ set(COMMON_SOURCES
     src/WallpaperEngine/Render/Objects/CRenderable.h
     src/WallpaperEngine/Render/Objects/CImage.h
     src/WallpaperEngine/Render/Objects/CImage.cpp
+    src/WallpaperEngine/Render/Objects/CModel.cpp
+    src/WallpaperEngine/Render/Objects/PuppetMeshParser.h
+    src/WallpaperEngine/Render/Objects/PuppetMeshParser.cpp
+    src/WallpaperEngine/Render/Objects/PuppetSkinning.h
     src/WallpaperEngine/Render/Objects/CSound.h
     src/WallpaperEngine/Render/Objects/CSound.cpp
     src/WallpaperEngine/Render/Objects/CParticle.h
@@ -445,6 +455,7 @@ set(COMMON_SOURCES
     src/WallpaperEngine/Render/CFBO.cpp
     src/WallpaperEngine/Render/Objects/Effects/CPass.h
     src/WallpaperEngine/Render/Objects/Effects/CPass.cpp
+    src/WallpaperEngine/Render/Objects/Effects/UniformArrayUpload.h
 
     src/WallpaperEngine/WebBrowser/CEF/RenderHandler.cpp
     src/WallpaperEngine/WebBrowser/CEF/RenderHandler.h
@@ -474,6 +485,7 @@ set(COMMON_SOURCES
     src/WallpaperEngine/Data/Model/UserSetting.h
     src/WallpaperEngine/Data/Model/DynamicValue.h
     src/WallpaperEngine/Data/Model/DynamicValue.cpp
+    src/WallpaperEngine/Data/Model/PropertyAnimation.cpp
     src/WallpaperEngine/Data/Model/Property.h
     src/WallpaperEngine/Data/Utils/TypeCaster.h
     src/WallpaperEngine/Data/Utils/BinaryReader.cpp
@@ -534,10 +546,21 @@ set(COMMON_SOURCES
 
     src/WallpaperEngine/Scripting/ConsoleObject.h
     src/WallpaperEngine/Scripting/ConsoleObject.cpp
+    src/WallpaperEngine/Scripting/EffectThisObject.h
+    src/WallpaperEngine/Scripting/EffectThisObject.cpp
+    src/WallpaperEngine/Scripting/MaterialThisObject.h
+    src/WallpaperEngine/Scripting/MaterialThisObject.cpp
+    src/WallpaperEngine/Scripting/PropertyAnimationThisObject.cpp
     src/WallpaperEngine/Scripting/EngineObject.h
     src/WallpaperEngine/Scripting/EngineObject.cpp
+    src/WallpaperEngine/Scripting/EngineTimers.h
+    src/WallpaperEngine/Scripting/EngineTimers.cpp
     src/WallpaperEngine/Scripting/InputObject.h
     src/WallpaperEngine/Scripting/InputObject.cpp
+    src/WallpaperEngine/Scripting/LocalStorageObject.h
+    src/WallpaperEngine/Scripting/LocalStorageObject.cpp
+    src/WallpaperEngine/Scripting/MediaEventPayloads.h
+    src/WallpaperEngine/Scripting/MediaEventPayloads.cpp
     src/WallpaperEngine/Scripting/SceneObject.h
     src/WallpaperEngine/Scripting/SceneObject.cpp
     src/WallpaperEngine/Scripting/ScriptEngine.h
@@ -565,6 +588,32 @@ if(BUILD_TESTING)
         src/WallpaperEngine/Testing/Harnesses/RenderHarness.h
         src/WallpaperEngine/Testing/Cases/MouseCoordinates.cpp
         src/WallpaperEngine/Testing/Cases/PropertyParser.cpp)
+    target_sources(tests PRIVATE src/WallpaperEngine/Testing/Cases/ParticleCore.cpp)
+    target_sources(tests PRIVATE src/WallpaperEngine/Testing/Cases/AuthoringJson.cpp)
+    target_sources(tests PRIVATE src/WallpaperEngine/Testing/Cases/AuthoringJsonCorpus.cpp)
+    target_sources(tests PRIVATE src/WallpaperEngine/Testing/Cases/SceneDependencies.cpp)
+    target_sources(tests PRIVATE src/WallpaperEngine/Testing/Cases/SceneTransform.cpp)
+    target_sources(tests PRIVATE src/WallpaperEngine/Testing/Cases/SceneCameraParser.cpp)
+    target_sources(tests PRIVATE src/WallpaperEngine/Testing/Cases/EngineTimers.cpp)
+    target_sources(tests PRIVATE src/WallpaperEngine/Testing/Cases/LocalStorage.cpp)
+    target_sources(tests PRIVATE src/WallpaperEngine/Testing/Cases/MediaTimeline.cpp)
+    target_sources(tests PRIVATE src/WallpaperEngine/Testing/Cases/MediaArtwork.cpp)
+    target_sources(tests PRIVATE src/WallpaperEngine/Testing/Cases/AlbumArtworkUpload.cpp)
+    target_sources(tests PRIVATE src/WallpaperEngine/Testing/Cases/TextPadding.cpp)
+    target_sources(tests PRIVATE src/WallpaperEngine/Testing/Cases/TextUtf8.cpp)
+    target_sources(tests PRIVATE src/WallpaperEngine/Testing/Cases/AudioLifecycle.cpp)
+    target_sources(tests PRIVATE src/WallpaperEngine/Testing/Cases/TypedFBO.cpp)
+    target_sources(tests PRIVATE src/WallpaperEngine/Testing/Cases/TextureAnimation.cpp)
+    target_sources(tests PRIVATE src/WallpaperEngine/Testing/Cases/ShaderIncludes.cpp)
+    target_sources(tests PRIVATE src/WallpaperEngine/Testing/Cases/ImageDeviceColor.cpp)
+    target_sources(tests PRIVATE src/WallpaperEngine/Testing/Cases/KnownAudioBarsVertex.cpp)
+    target_sources(tests PRIVATE src/WallpaperEngine/Testing/Cases/VirtualAdapter.cpp)
+    target_sources(tests PRIVATE src/WallpaperEngine/Testing/Cases/TextureParser.cpp)
+    target_sources(tests PRIVATE src/WallpaperEngine/Testing/Cases/PuppetMeshParser.cpp)
+    target_sources(tests PRIVATE src/WallpaperEngine/Testing/Cases/ScriptPropertyBindings.cpp)
+    target_sources(tests PRIVATE src/WallpaperEngine/Testing/Cases/WorkshopScriptAssetPath.cpp)
+    target_sources(tests PRIVATE src/WallpaperEngine/Testing/Cases/PropertyAnimation.cpp)
+    target_compile_definitions(tests PRIVATE PARTICLE_CORE_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/docs/reports/scene-parity-2026-09-26/particle-core-fixtures")
 endif()
 
 add_library(
@@ -586,6 +635,9 @@ target_link_libraries (linux-wallpaperengine-lib PUBLIC
     ${MPV_LIBRARY}
     ${PULSEAUDIO_LIBRARY}
     Freetype::Freetype
+    PkgConfig::HARFBUZZ
+    PkgConfig::FONTCONFIG
+    PkgConfig::WEBP
     ${WAYLAND_LIBRARIES}
     ${X11_LIBRARIES}
     ${DBUS_LIBRARIES}
@@ -612,6 +664,9 @@ if (BUILD_TESTING)
         ${MPV_LIBRARY}
         ${PULSEAUDIO_LIBRARY}
         Freetype::Freetype
+        PkgConfig::HARFBUZZ
+        PkgConfig::FONTCONFIG
+        PkgConfig::WEBP
         ${WAYLAND_LIBRARIES}
         ${X11_LIBRARIES}
         ${DBUS_LIBRARIES}

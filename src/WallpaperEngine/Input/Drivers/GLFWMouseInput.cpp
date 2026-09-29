@@ -22,9 +22,14 @@ void GLFWMouseInput::update () {
     // update current mouse position
     glfwGetCursorPos (this->m_driver.getWindow (), &this->m_mousePosition.x, &this->m_mousePosition.y);
 
-    // Convert from GLFW coordinate system (Y=0 at top) to OpenGL coordinate system (Y=0 at bottom)
+    // GLFW reports window units, while viewport and compositor code use
+    // framebuffer pixels. The ratio can differ on each axis on HiDPI output.
+    int windowWidth = 0;
+    int windowHeight = 0;
+    glfwGetWindowSize (m_driver.getWindow (), &windowWidth, &windowHeight);
     const glm::ivec2 framebufferSize = this->m_driver.getFramebufferSize ();
-    this->m_mousePosition.y = static_cast<double> (framebufferSize.y) - this->m_mousePosition.y;
+    m_mousePosition = cursorFramebufferPosition (m_mousePosition, {windowWidth, windowHeight},
+                                                 framebufferSize);
 
     // interpolate to the new position
     this->m_reportedPosition = glm::mix (this->m_reportedPosition, this->m_mousePosition, 1.0);

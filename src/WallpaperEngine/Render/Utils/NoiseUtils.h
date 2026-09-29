@@ -1,6 +1,8 @@
 #pragma once
 
 #include <cmath>
+#include <cstdint>
+#include <optional>
 #include <glm/glm.hpp>
 
 namespace WallpaperEngine::Render::Utils {
@@ -146,6 +148,113 @@ inline glm::vec3 curlNoise (const glm::vec3& p) {
     float z = (x1.y - x0.y) - (y1.x - y0.x);
 
     return glm::vec3 (x, y, z) / (2.0f * e);
+}
+
+// Scalar lane of native 1400fd010, the 3-D simplex primitive called by the
+// turbulence SIMD kernel. Its permutation is the same 256-entry table above;
+// the native gradient-index table is permutation modulo 12. This helper is
+// deliberately separate from the provisional Perlin curl operator until the
+// native turbulence component permutations and field scaling are recovered.
+inline std::optional<float> nativeSimplex3 (glm::vec3 point) {
+    if (!std::isfinite (point.x) || !std::isfinite (point.y) || !std::isfinite (point.z)
+        || std::abs (point.x) >= 1.0e6f || std::abs (point.y) >= 1.0e6f
+        || std::abs (point.z) >= 1.0e6f)
+        return std::nullopt;
+    constexpr glm::vec3 gradients[12] = {
+        {1, 1, 0}, {-1, 1, 0}, {1, -1, 0}, {-1, -1, 0},
+        {1, 0, 1}, {-1, 0, 1}, {1, 0, -1}, {-1, 0, -1},
+        {0, 1, 1}, {0, -1, 1}, {0, 1, -1}, {0, -1, -1},
+    };
+    const float skew = (point.y + point.z + point.x) * (1.0f / 3.0f);
+    const int i = static_cast<int> (std::floor (point.x + skew));
+    const int j = static_cast<int> (std::floor (point.y + skew));
+    const int k = static_cast<int> (std::floor (point.z + skew));
+    const float unskew = static_cast<float> (i + j + k) * (1.0f / 6.0f);
+    const glm::vec3 base {
+        point.x - (static_cast<float> (i) - unskew),
+        point.y - (static_cast<float> (j) - unskew),
+        point.z - (static_cast<float> (k) - unskew),
+    };
+    glm::ivec3 first, second;
+    if (base.x >= base.y) {
+        if (base.y >= base.z) { first = {1, 0, 0}; second = {1, 1, 0}; }
+        else if (base.x >= base.z) { first = {1, 0, 0}; second = {1, 0, 1}; }
+        else { first = {0, 0, 1}; second = {1, 0, 1}; }
+    } else {
+        if (base.y < base.z) { first = {0, 0, 1}; second = {0, 1, 1}; }
+        else if (base.x < base.z) { first = {0, 1, 0}; second = {0, 1, 1}; }
+        else { first = {0, 1, 0}; second = {1, 1, 0}; }
+    }
+    const auto corner = [&] (glm::ivec3 offset, float shift, bool fourth = false) {
+        const float x = (base.x - static_cast<float> (offset.x)) + shift;
+        const float y = (base.y - static_cast<float> (offset.y)) + shift;
+        const float z = (base.z - static_cast<float> (offset.z)) + shift;
+        const float radius = ((0.6f - x * x) - y * y) - z * z;
+        if (radius < 0.0f) return 0.0f;
+        // The fourth corner in 1400fd010 hashes k (rather than k + 1)
+        // before applying the +1 offsets to j and i. This differs from
+        // conventional simplex noise and is visible in native SIMD output.
+        const uint8_t zHash = PERLIN_PERM[(k + (fourth ? 0 : offset.z)) & 255];
+        const uint8_t yHash = PERLIN_PERM[(zHash + j + offset.y) & 255];
+        const glm::vec3 gradient = gradients[PERLIN_PERM[(yHash + i + offset.x) & 255] % 12];
+        const float dot = (gradient.z * z + gradient.y * y) + gradient.x * x;
+        // 1400fd5db/5e2, fd7d3 and fd965 square the radius twice before
+        // multiplying the gradient dot; the decompiler's left fold differs.
+        const float radiusSquared = radius * radius;
+        return dot * (radiusSquared * radiusSquared);
+    };
+    const float value = corner ({1, 1, 1}, 0.5f, true)
+        + corner (second, 1.0f / 3.0f)
+        + corner (first, 1.0f / 6.0f)
+        + corner ({0, 0, 0}, 0.0f);
+    return value * 32.0f;
+}
+
+// Native 140242f0c–140243156 selects these cyclic coordinate orders for the
+// X/Y/Z turbulence velocity streams. The caller is responsible for assembling
+// the native coordinate vector and applying its speed, step and envelope.
+inline std::optional<glm::vec3> nativeTurbulenceNoise (glm::vec3 coordinate, uint32_t axisMask) {
+    glm::vec3 result (0.0f);
+    if ((axisMask & 1u) != 0) {
+        const auto x = nativeSimplex3 (coordinate);
+        if (!x) return std::nullopt;
+        result.x = *x;
+    }
+    if ((axisMask & 2u) != 0) {
+        const auto y = nativeSimplex3 ({coordinate.z, coordinate.x, coordinate.y});
+        if (!y) return std::nullopt;
+        result.y = *y;
+    }
+    if ((axisMask & 4u) != 0) {
+        const auto z = nativeSimplex3 ({coordinate.y, coordinate.z, coordinate.x});
+        if (!z) return std::nullopt;
+        result.z = *z;
+    }
+    return result;
+}
+
+// One finite lane of opcode 0x24 after its audio and envelope inputs have
+// been resolved. The interpreter uses the same birth-random stream for phase
+// and speed, and its third (damped) clock argument for the XYZ mask gains.
+// This isolated helper does not choose the native scene clock or convert the
+// authored particle coordinate basis; the caller must supply those explicitly.
+inline std::optional<glm::vec3> nativeTurbulenceVelocityDelta (
+    glm::vec3 position, float birthRandom, float phaseMin, float phaseDelta,
+    float speedMin, float speedDelta, float scale, float timeScale, float sceneTime,
+    glm::vec3 mask, float dampingClock, float envelope) {
+    const uint32_t axisMask = (mask.x != 0.0f ? 1u : 0u)
+        | (mask.y != 0.0f ? 2u : 0u) | (mask.z != 0.0f ? 4u : 0u);
+    if (axisMask == 0) return glm::vec3 (0.0f);
+    const float phase = (birthRandom * phaseDelta + phaseMin) + timeScale * sceneTime;
+    const float speed = (birthRandom * speedDelta + speedMin) * envelope;
+    const glm::vec3 coordinate = (position + glm::vec3 (phase)) * scale;
+    const auto noise = nativeTurbulenceNoise (coordinate, axisMask);
+    if (!noise) return std::nullopt;
+    glm::vec3 delta (0.0f);
+    delta.x = (noise->x * (dampingClock * mask.x)) * speed;
+    delta.y = (noise->y * (dampingClock * mask.y)) * speed;
+    delta.z = (noise->z * (dampingClock * mask.z)) * speed;
+    return delta;
 }
 
 } // namespace WallpaperEngine::Render::Utils

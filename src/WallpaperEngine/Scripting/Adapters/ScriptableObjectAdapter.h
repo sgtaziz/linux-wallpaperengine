@@ -9,6 +9,8 @@ public:
 
     JSValue instantiate (ScriptableObject& object) override;
     JSValue instantiate (Data::Model::DynamicValue& value) override;
+    /** Resolve a live ILayer wrapper without accepting arbitrary JS objects. */
+    static ScriptableObject* resolve (JSValueConst value);
 
 private:
     JSClassExoticMethods m_exoticMethods;

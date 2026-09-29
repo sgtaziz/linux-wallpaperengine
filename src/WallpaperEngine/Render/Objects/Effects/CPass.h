@@ -6,6 +6,7 @@
 
 #include "../../TextureProvider.h"
 #include "WallpaperEngine/Data/Model/Material.h"
+#include "WallpaperEngine/Data/Model/Property.h"
 #include "WallpaperEngine/Render/CFBO.h"
 #include "WallpaperEngine/Render/FBOProvider.h"
 #include "WallpaperEngine/Render/Helpers/ContextAware.h"
@@ -35,12 +36,15 @@ public:
 
     void setDestination (std::shared_ptr<const CFBO> drawTo);
     void setInput (std::shared_ptr<const TextureProvider> input);
+    void setTexture0Override (std::shared_ptr<const TextureProvider> texture);
+    void setTextureFrameOverride (std::optional<uint32_t> frame);
     void setPreviousInput (std::shared_ptr<const TextureProvider> input);
-    void setTexCoord (GLuint texcoord);
+    void setTexCoord (GLuint texcoord, float topV = 0.0f, float bottomV = 1.0f);
     void setPosition (GLuint position);
     void setModelViewProjectionMatrix (const glm::mat4* projection);
     void setModelViewProjectionMatrixInverse (const glm::mat4* projection);
     void setModelMatrix (const glm::mat4* model);
+    void setNormalModelMatrix (const glm::mat3* normalModel);
     void setViewProjectionMatrix (const glm::mat4* viewProjection);
     void setBlendingMode (BlendingMode blendingmode);
     [[nodiscard]] BlendingMode getBlendingMode () const;
@@ -60,14 +64,20 @@ public:
 
     // Public uniform setters for external callers (pointer-based, updated per-frame)
     void addUniform (const std::string& name, const float* value, int count = 1);
-    void addUniform (const std::string& name, const glm::vec3* value);
-    void addUniform (const std::string& name, const glm::vec4* value);
-    void addUniform (const std::string& name, const glm::mat4* value);
+    void addUniform (const std::string& name, const glm::vec3* value, int count = 1);
+    void addUniform (const std::string& name, const glm::vec4* value, int count = 1);
+    void addUniform (const std::string& name, const glm::mat4* value, int count = 1);
 
 private:
+    std::shared_ptr<const TextureProvider> m_texture0Override;
+    std::optional<uint32_t> m_textureFrameOverride;
     struct TextureChainEntry {
-	std::shared_ptr<const TextureProvider> texture;
+	mutable std::shared_ptr<const TextureProvider> texture;
+	std::shared_ptr<const TextureProvider> fallbackTexture;
 	std::shared_ptr<TextureChainEntry> next;
+        std::string resourceName;
+        const PropertySceneTexture* selection = nullptr;
+        mutable std::string selectedValue;
     };
 
     enum UniformType {
@@ -91,6 +101,7 @@ private:
 	UniformType type;
 	const void* value;
 	int count;
+	bool authoredPosition = false;
     };
 
     class ReferenceUniformEntry {
@@ -141,8 +152,8 @@ private:
     void addUniform (const std::string& name, glm::mat4 value);
     void addUniform (const std::string& name, const int* value, int count = 1);
     void addUniform (const std::string& name, const double* value, int count = 1);
-    void addUniform (const std::string& name, const glm::vec2* value);
-    void addUniform (const std::string& name, const glm::mat3* value);
+    void addUniform (const std::string& name, const glm::vec2* value, int count = 1);
+    void addUniform (const std::string& name, const glm::mat3* value, int count = 1);
     void addUniform (const std::string& name, const int** value);
     void addUniform (const std::string& name, const double** value);
     void addUniform (const std::string& name, const float** value);
@@ -161,7 +172,7 @@ private:
     [[nodiscard]] TextureAnimationState
     resolveTextureAnimationState (const std::shared_ptr<const TextureProvider>& texture) const;
     void bindTextureUnit (int index, const std::shared_ptr<const TextureProvider>& texture, uint32_t frame) const;
-    void bindTextureOverrides (uint32_t currentTexture, std::shared_ptr<const TextureProvider>& texture0) const;
+    void bindTextureOverrides (uint32_t currentTexture, std::shared_ptr<const TextureProvider>& texture0);
     void setupRenderUniforms ();
     void setupRenderReferenceUniforms ();
     void setupRenderAttributes () const;
@@ -183,17 +194,23 @@ private:
     std::map<std::string, int> m_combos = {};
     std::vector<AttribEntry*> m_attribs = {};
     std::map<std::string, UniformEntry*> m_uniforms = {};
+    float m_texcoordTopV = 0.0f;
+    float m_texcoordBottomV = 1.0f;
     std::map<std::string, ReferenceUniformEntry*> m_referenceUniforms = {};
     BlendingMode m_blendingmode = BlendingMode_Normal;
     const glm::mat4* m_modelViewProjectionMatrix;
     const glm::mat4* m_modelViewProjectionMatrixInverse;
     const glm::mat4* m_modelMatrix;
+    glm::mat3 m_identityNormalModelMatrix {1.0f};
+    const glm::mat3* m_normalModelMatrix = &m_identityNormalModelMatrix;
     const glm::mat4* m_viewProjectionMatrix;
 
     /**
      * Contains the final map of textures to be used
      */
     std::map<int, std::shared_ptr<TextureChainEntry>> m_textures = {};
+    std::map<int, glm::vec4> m_textureResolutions = {};
+    [[nodiscard]] std::shared_ptr<const TextureProvider> resolveChainTexture (const TextureChainEntry& entry) const;
 
     Render::Shaders::Shader* m_shader = nullptr;
 
@@ -201,6 +218,8 @@ private:
     std::shared_ptr<const TextureProvider> m_input = nullptr;
     std::shared_ptr<const TextureProvider> m_previousInput = nullptr;
     glm::vec4 m_texture0Resolution = {};
+    glm::vec2 m_sceneTexelSize = {};
+    glm::vec2 m_sceneTexelSizeHalf = {};
 
     GLuint m_programID;
 

@@ -1,5 +1,6 @@
 #include "SDLAudioDriver.h"
 #include "WallpaperEngine/Logging/Log.h"
+#include <algorithm>
 
 #define SDL_AUDIO_BUFFER_SIZE 4096
 #define MAX_AUDIO_FRAME_SIZE 192000
@@ -25,13 +26,7 @@ void audio_callback (void* userdata, uint8_t* streamData, int length) {
 
 	// sound is not initialized or stopped and is not in loop mode
 	// ignore mixing it in
-	if (!buffer->stream->isInitialized ()) {
-	    continue;
-	}
-
-	// check if queue is empty and signal the read thread
-	if (buffer->stream->isQueueEmpty ()) {
-	    SDL_CondSignal (buffer->stream->getWaitCondition ());
+	if (!buffer->stream->isInitialized () || buffer->stream->isPaused ()) {
 	    continue;
 	}
 
@@ -40,10 +35,12 @@ void audio_callback (void* userdata, uint8_t* streamData, int length) {
 		// get more data to fill the buffer
 		int audio_size = buffer->stream->decodeFrame (buffer->audio_buf, sizeof (buffer->audio_buf));
 
-		if (audio_size < 0) {
-		    // fallback for errors, silence
-		    buffer->audio_buf_size = 1024;
-		    memset (buffer->audio_buf, 0, buffer->audio_buf_size);
+		if (audio_size <= 0) {
+		    // The mix target was zeroed above. Leave the rest silent without
+		    // manufacturing a partial buffer that can hide stream completion.
+		    buffer->audio_buf_size = 0;
+		    buffer->audio_buf_index = 0;
+		    break;
 		} else {
 		    buffer->audio_buf_size = audio_size;
 		}
@@ -58,9 +55,13 @@ void audio_callback (void* userdata, uint8_t* streamData, int length) {
 	    }
 
 	    // mix the audio
+	    const int mixedVolume = std::clamp (
+	        static_cast<int> (driver->getApplicationContext ().state.audio.volume * buffer->stream->getMixerGain ()),
+	        0, SDL_MIX_MAXVOLUME
+	    );
 	    SDL_MixAudioFormat (
 		streamDataPointer, &buffer->audio_buf[buffer->audio_buf_index], driver->getSpec ().format, len1,
-		driver->getApplicationContext ().state.audio.volume
+		mixedVolume
 	    );
 
 	    streamLength -= len1;
@@ -85,6 +86,7 @@ SDLAudioDriver::SDLAudioDriver (
 
 	return;
     }
+    this->m_audioSubsystemInitialized = true;
 
     const SDL_AudioSpec requestedSpec = { .freq = 48000,
 					  .format = AUDIO_F32,
@@ -107,15 +109,19 @@ SDLAudioDriver::SDLAudioDriver (
 }
 
 SDLAudioDriver::~SDLAudioDriver () {
-    if (!this->m_initialized) {
-	return;
-    }
-
     if (this->m_deviceID != 0) {
 	SDL_CloseAudioDevice (this->m_deviceID);
     }
 
-    SDL_QuitSubSystem (SDL_INIT_AUDIO);
+    for (auto& [id, buffer] : this->m_streams) {
+	delete buffer;
+    }
+    this->m_streams.clear ();
+
+    if (this->m_streamListMutex != nullptr) {
+	SDL_DestroyMutex (this->m_streamListMutex);
+    }
+    if (this->m_audioSubsystemInitialized) SDL_QuitSubSystem (SDL_INIT_AUDIO);
 }
 
 int SDLAudioDriver::addStream (AudioStream* stream) {
@@ -130,7 +136,27 @@ int SDLAudioDriver::addStream (AudioStream* stream) {
 
     return newStreamId;
 }
-void SDLAudioDriver::removeStream (int streamId) { this->m_streams.erase (streamId); }
+void SDLAudioDriver::removeStream (int streamId) {
+    // The audio callback holds the same mutex while it reads a stream. Once
+    // this returns, CSound can safely destroy its AudioStream.
+    SDL_LockMutex (this->m_streamListMutex);
+    const auto it = this->m_streams.find (streamId);
+    if (it != this->m_streams.end ()) {
+	delete it->second;
+	this->m_streams.erase (it);
+    }
+    SDL_UnlockMutex (this->m_streamListMutex);
+}
+
+bool SDLAudioDriver::isStreamFinished (int streamId) const {
+    SDL_LockMutex (this->m_streamListMutex);
+    const auto it = this->m_streams.find (streamId);
+    const bool finished = it == this->m_streams.end ()
+	|| (it->second->stream->isPlaybackFinished ()
+	    && it->second->audio_buf_index >= it->second->audio_buf_size);
+    SDL_UnlockMutex (this->m_streamListMutex);
+    return finished;
+}
 
 const std::map<int, SDLAudioBuffer*>& SDLAudioDriver::getStreams () { return this->m_streams; }
 

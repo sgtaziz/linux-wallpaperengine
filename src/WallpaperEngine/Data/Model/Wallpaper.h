@@ -38,6 +38,8 @@ public:
 };
 
 struct SceneData {
+    /** Serialized native point-light shader slots; object count may differ. */
+    int pointLightSlots = 0;
     struct {
 	UserSettingUniquePtr ambient;
 	UserSettingUniquePtr skylight;
@@ -49,6 +51,8 @@ struct SceneData {
     struct Camera {
 	/** Enable fade effect */
 	UserSettingUniquePtr fade;
+	/** Authored HDR request; native enables it only with bloom and ultra postprocessing. */
+	bool hdr = false;
 	/** Used by the software to allow the users to preview the background or not? */
 	bool preview;
 
@@ -62,6 +66,13 @@ struct SceneData {
 	    UserSettingUniquePtr strength;
 	    /** Bloom's threshold to pass onto the shader */
 	    UserSettingUniquePtr threshold;
+	    /** Native ultra-only bloom controls. */
+	    UserSettingUniquePtr hdrStrength;
+	    UserSettingUniquePtr hdrThreshold;
+	    UserSettingUniquePtr hdrFeather;
+	    UserSettingUniquePtr hdrScatter;
+	    UserSettingUniquePtr hdrIterations;
+	    UserSettingUniquePtr tint;
 	} bloom;
 	/**
 	 * Parallax effect configuration
@@ -99,9 +110,12 @@ struct SceneData {
 	    int width;
 	    int height;
 	    bool isAuto;
+	    bool isOrthogonal;
 	    UserSettingUniquePtr nearz;
 	    UserSettingUniquePtr farz;
 	    UserSettingUniquePtr fov;
+	    /** Perspective FOV used to draw flag-4 particles in an orthographic scene. */
+	    UserSettingUniquePtr perspectiveOverrideFov;
 	} projection;
     } camera;
 

@@ -11,6 +11,7 @@
 #include <mpv/client.h>
 #include <mpv/render.h>
 #include <mpv/render_gl.h>
+#include <string>
 #include <vector>
 
 namespace WallpaperEngine::Render {
@@ -22,7 +23,7 @@ using namespace WallpaperEngine::VideoPlayback::MPV;
  */
 class CTexture final : public TextureProvider, public Helpers::ContextAware {
 public:
-    explicit CTexture (RenderContext& context, TextureUniquePtr header);
+    explicit CTexture (RenderContext& context, TextureUniquePtr header, std::string assetName = {});
     ~CTexture () override;
 
     [[nodiscard]] GLuint getTextureID (uint32_t imageIndex) const override;
@@ -60,6 +61,13 @@ public:
     void update () const override;
     bool isReady () const override;
 
+    /** Uploads one parsed mipmap. Exposed for GL readback tests of the production upload path. */
+    static void uploadLevel (const Texture& header, const Mipmap& mipmap, GLint internalFormat,
+                             GLuint textureID, GLint level, const std::string& assetName);
+    /** Selects the storage format used by the production texture constructor. */
+    static GLint storageFormat (const Texture& header);
+    static void configureSampling (const Texture& header, uint32_t imageIndex, GLuint textureID);
+
 private:
     /**
      * @return The texture header
@@ -70,10 +78,6 @@ private:
      * Calculate's texture's resolution vec4
      */
     void setupResolution ();
-    /**
-     * Determines the texture's internal storage format
-     */
-    GLint setupInternalFormat () const;
     /**
      * Prepares openGL parameters for loading texture data
      */
@@ -87,5 +91,6 @@ private:
     glm::vec4 m_resolution {};
     /** The video player in use */
     GLPlayerUniquePtr m_player;
+    std::string m_assetName;
 };
 } // namespace WallpaperEngine::Assets

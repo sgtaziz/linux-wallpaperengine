@@ -12,6 +12,7 @@ using namespace WallpaperEngine::Data::Model;
 
 class UserSettingParser {
 public:
-    static UserSettingUniquePtr parse (const json& data, const Properties& properties, bool expectColor = false);
+    static UserSettingUniquePtr parse (const json& data, const Properties& properties,
+                                       bool expectColor = false, bool expectString = false);
 };
 } // namespace WallpaperEngine::Data::Parsers

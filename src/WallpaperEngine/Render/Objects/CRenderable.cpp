@@ -3,6 +3,7 @@
 #include "WallpaperEngine/Data/Model/Material.h"
 #include "WallpaperEngine/Data/Model/Object.h"
 #include "WallpaperEngine/Data/Parsers/MaterialParser.h"
+#include "WallpaperEngine/Render/UserTextureSelection.h"
 
 using namespace WallpaperEngine;
 using namespace WallpaperEngine::Render::Objects;
@@ -14,15 +15,44 @@ CRenderable::CRenderable (Wallpapers::CScene& scene, const Object& object, const
     CObject (scene, object), Render::FBOProvider (&scene), m_material (material) { }
 
 void CRenderable::detectTexture () {
-    if (TextureMap* textures = &(*this->m_material.passes.begin ())->textures; !textures->empty ()) {
-	std::string textureName = textures->begin ()->second;
+    if (m_material.passes.empty () || !m_material.passes.front ()) return;
+    const auto& pass = *m_material.passes.front ();
 
-	if (textureName.find ("_rt_") == 0 || textureName.find ("_alias_") == 0) {
-	    this->m_texture = this->getScene ().findFBO (textureName);
-	} else {
-	    this->m_texture = this->getContext ().resolveTexture (textureName);
+    const auto resolveAuthored = [this] (const std::string& name) {
+	return name.starts_with ("_rt_") || name.starts_with ("_alias_")
+	    ? this->getScene ().findFBO (name) : this->getContext ().resolveTexture (name);
+    };
+    std::shared_ptr<const TextureProvider> authored;
+    if (const auto base = pass.textures.find (0); base != pass.textures.end ())
+	authored = resolveAuthored (base->second);
+
+    // ObjectParser has already merged instance textures with insert_or_assign.
+    // Apply CPass's selection helper so geometry and animation metadata use its
+    // selected-provider and fallback semantics at initial setup.
+    if (const auto selector = pass.usertextures.find (0); selector != pass.usertextures.end ()
+	&& selector->second.source == Data::Model::UserTextureSource::Ordinary) {
+	const auto& properties = getScene ().getScene ().project.properties;
+	const auto property = properties.find (selector->second.name);
+	const auto* sceneTexture = property == properties.end () ? nullptr
+	    : dynamic_cast<const Data::Model::PropertySceneTexture*> (property->second.get ());
+	if (sceneTexture) {
+	    std::string selectedValue;
+	    std::shared_ptr<const TextureProvider> selectedTexture;
+	    m_texture = resolveUserTextureSelection (
+		*sceneTexture, selectedValue, selectedTexture,
+		[this] (const std::string& selected) -> std::shared_ptr<const TextureProvider> {
+		    try {
+			return getContext ().resolveTexture (selected);
+		    } catch (const std::runtime_error&) {
+			return {};
+		    }
+		},
+		[&authored] { return authored; }
+	    );
+	    return;
 	}
     }
+    m_texture = std::move (authored);
 }
 
 void CRenderable::setup () {

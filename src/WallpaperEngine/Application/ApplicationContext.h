@@ -52,6 +52,11 @@ public:
 	WAYLAND_LAYER_OVERLAY = 3,
     };
 
+    enum POSTPROCESSING_QUALITY {
+        POSTPROCESSING_NORMAL = 0,
+        POSTPROCESSING_ULTRA = 1,
+    };
+
     struct PlaylistSettings {
 	uint32_t delayMinutes = 60;
 	std::string mode = "timer";
@@ -113,6 +118,8 @@ public:
 	    WINDOW_MODE mode;
 	    /** Maximum FPS */
 	    int maximumFPS;
+	    /** Opt-in native high-precision postprocessing path. */
+	    POSTPROCESSING_QUALITY postprocessing;
 	    /** Indicates if pausing should happen when something goes fullscreen */
 	    bool pauseOnFullscreen;
 	    /**
@@ -130,6 +137,9 @@ public:
 		bool baseOnly;
 		bool noSolidFinal;
 		bool passLog;
+		bool hdrPeek;
+		std::optional<uint32_t> particleSeed;
+		std::optional<float> particleStep;
 		std::optional<int> objectFilter;
 		std::vector<int> skipObjects;
 		std::vector<int> skipEffects;
@@ -200,6 +210,7 @@ public:
         .render = {
             .mode = NORMAL_WINDOW,
             .maximumFPS = 30,
+            .postprocessing = POSTPROCESSING_NORMAL,
             .pauseOnFullscreen = true,
             .pauseOnFullscreenOnlyWhenActive = false,
             .fullscreenPauseIgnoreAppIds = {},
@@ -207,6 +218,9 @@ public:
                 .baseOnly = false,
                 .noSolidFinal = false,
 	                .passLog = false,
+	                .hdrPeek = false,
+	                .particleSeed = std::nullopt,
+	                .particleStep = std::nullopt,
 	                .objectFilter = std::nullopt,
 	                .skipObjects = {},
 	                .skipEffects = {},

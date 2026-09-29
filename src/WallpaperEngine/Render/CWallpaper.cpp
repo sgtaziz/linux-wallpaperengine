@@ -7,6 +7,11 @@
 #include "WallpaperEngine/Data/Model/Project.h"
 #include "WallpaperEngine/Data/Model/Wallpaper.h"
 
+#include <algorithm>
+#include <cmath>
+#include <fstream>
+#include <vector>
+
 using namespace WallpaperEngine::Render;
 
 CWallpaper::CWallpaper (
@@ -49,10 +54,13 @@ CWallpaper::~CWallpaper () {
     }
 
     glDeleteProgram (this->m_shader);
+    if (m_hdrShader != GL_NONE) glDeleteProgram (m_hdrShader);
+    if (m_hdrPyramidShader != GL_NONE) glDeleteProgram (m_hdrPyramidShader);
 
     // destroy used buffers
     glDeleteBuffers (1, &this->m_texCoordBuffer);
     glDeleteBuffers (1, &this->m_positionBuffer);
+    if (m_hdrPositionBuffer != GL_NONE) glDeleteBuffers (1, &m_hdrPositionBuffer);
     glDeleteVertexArrays (1, &this->m_vaoBuffer);
 }
 
@@ -60,9 +68,13 @@ const AssetLocator& CWallpaper::getAssetLocator () const { return *this->m_wallp
 
 const Wallpaper& CWallpaper::getWallpaperData () const { return this->m_wallpaperData; }
 
-GLuint CWallpaper::getWallpaperFramebuffer () const { return this->m_sceneFBO->getFramebuffer (); }
+GLuint CWallpaper::getWallpaperFramebuffer () const {
+    return (m_hdrOutput ? m_hdrOutput : m_sceneFBO)->getFramebuffer ();
+}
 
-GLuint CWallpaper::getWallpaperTexture () const { return this->m_sceneFBO->getTextureID (0); }
+GLuint CWallpaper::getWallpaperTexture () const {
+    return (m_hdrOutput ? m_hdrOutput : m_sceneFBO)->getTextureID (0);
+}
 
 void CWallpaper::setupShaders () {
     // reserve shaders in OpenGL
@@ -171,6 +183,58 @@ void CWallpaper::setupShaders () {
     glDetachShader (this->m_shader, vertexShaderID);
     glDetachShader (this->m_shader, fragmentShaderID);
 
+    // Native ultra's final combine_hdr shader adds the separate bloom target
+    // before converting SDR output through its sRGB-to-linear branch. Keep
+    // this program independent of the ordinary direct-copy presentation.
+    const GLuint hdrFragment = glCreateShader (GL_FRAGMENT_SHADER);
+    const char* hdrSource = R"GLSL(#version 330
+precision highp float;
+uniform sampler2D g_Texture0;
+uniform sampler2D g_Texture1;
+uniform vec2 g_TexelSize;
+in vec2 v_TexCoord;
+out vec4 out_FragColor;
+vec3 lin(vec3 v) {
+    vec3 c = step(vec3(0.04045), v);
+    return c * pow((v + vec3(0.055)) / 1.055, vec3(2.4))
+        + (vec3(1.0) - c) * (v / 12.92);
+}
+void main() {
+    vec3 albedo = texture(g_Texture0, v_TexCoord).rgb;
+    vec2 t = g_TexelSize;
+    vec3 bloom = (texture(g_Texture1, v_TexCoord + t).rgb
+        + texture(g_Texture1, v_TexCoord - t).rgb
+        + texture(g_Texture1, v_TexCoord + vec2(t.x, -t.y)).rgb
+        + texture(g_Texture1, v_TexCoord + vec2(-t.x, t.y)).rgb) * 0.25;
+    out_FragColor = vec4(clamp(lin(albedo + bloom), 0.0, 1.0), 1.0);
+}
+)GLSL";
+    glShaderSource (hdrFragment, 1, &hdrSource, nullptr);
+    glCompileShader (hdrFragment);
+    glGetShaderiv (hdrFragment, GL_COMPILE_STATUS, &result);
+    if (result != GL_TRUE) {
+        GLint length = 0;
+        glGetShaderiv (hdrFragment, GL_INFO_LOG_LENGTH, &length);
+        std::string log (std::max (1, length), '\0');
+        glGetShaderInfoLog (hdrFragment, length, nullptr, log.data ());
+        sLog.exception ("HDR presentation shader: ", log);
+    }
+    m_hdrShader = glCreateProgram ();
+    glAttachShader (m_hdrShader, vertexShaderID);
+    glAttachShader (m_hdrShader, hdrFragment);
+    glLinkProgram (m_hdrShader);
+    glGetProgramiv (m_hdrShader, GL_LINK_STATUS, &result);
+    if (result != GL_TRUE) {
+        GLint length = 0;
+        glGetProgramiv (m_hdrShader, GL_INFO_LOG_LENGTH, &length);
+        std::string log (std::max (1, length), '\0');
+        glGetProgramInfoLog (m_hdrShader, length, nullptr, log.data ());
+        sLog.exception ("HDR presentation program: ", log);
+    }
+    glDetachShader (m_hdrShader, vertexShaderID);
+    glDetachShader (m_hdrShader, hdrFragment);
+    glDeleteShader (hdrFragment);
+
     glDeleteShader (vertexShaderID);
     glDeleteShader (fragmentShaderID);
 
@@ -178,6 +242,291 @@ void CWallpaper::setupShaders () {
     this->g_Texture0 = glGetUniformLocation (this->m_shader, "g_Texture0");
     this->a_Position = glGetAttribLocation (this->m_shader, "a_Position");
     this->a_TexCoord = glGetAttribLocation (this->m_shader, "a_TexCoord");
+    m_hdrTexture0 = glGetUniformLocation (m_hdrShader, "g_Texture0");
+    m_hdrTexture1 = glGetUniformLocation (m_hdrShader, "g_Texture1");
+    m_hdrTexelSize = glGetUniformLocation (m_hdrShader, "g_TexelSize");
+    m_hdrPosition = glGetAttribLocation (m_hdrShader, "a_Position");
+    m_hdrTexCoord = glGetAttribLocation (m_hdrShader, "a_TexCoord");
+}
+
+void CWallpaper::setHdrPresentation (const HdrBloomSettings& settings) {
+    m_hdrBloomSettings = settings;
+    m_hdrOutput = create ("_rt_HDRPresented", TextureFormat_ARGB8888, TextureFlags_ClampUVs,
+                          1.0f, {getWidth (), getHeight ()}, {getWidth (), getHeight ()});
+    int width = getWidth ();
+    int height = getHeight ();
+    for (int index = 0; index < 8 && std::min (width, height) >= 2; ++index) {
+        width = std::max (1, width / 2);
+        height = std::max (1, height / 2);
+        m_hdrPyramid.push_back (create (
+            "_rt_HDRBloomLevel" + std::to_string (index), TextureFormat_RGBA16161616f,
+            TextureFlags_ClampUVs, 1.0f, {width, height}, {width, height}));
+    }
+    if (m_hdrPyramid.empty ()) {
+        m_hdrPyramid.push_back (create ("_rt_HDRBloomLevel0", TextureFormat_RGBA16161616f,
+            TextureFlags_ClampUVs, 1.0f, {1, 1}, {1, 1}));
+    }
+    m_hdrBloom = m_hdrPyramid.front ();
+    updateHdrBloomSettings (settings);
+
+    // Native HDR framebuffer textures pass sampler-factory param3=1 via
+    // 1400eb440 -> 140099980, which selects max anisotropy one. CFBO's
+    // general default is eight; retain that for ordinary targets and scope
+    // the native sampler choice to this HDR graph.
+    m_sceneFBO->setMaxAnisotropy (1.0f);
+    m_hdrOutput->setMaxAnisotropy (1.0f);
+    for (const auto& target : m_hdrPyramid) target->setMaxAnisotropy (1.0f);
+
+    const GLuint vertex = glCreateShader (GL_VERTEX_SHADER);
+    const char* vertexSource = R"GLSL(#version 330
+out vec2 v_uv;
+void main() {
+    vec2 p[3] = vec2[3](vec2(-1,-1), vec2(3,-1), vec2(-1,3));
+    gl_Position = vec4(p[gl_VertexID], 0, 1);
+    v_uv = (p[gl_VertexID] + 1.0) * 0.5;
+}
+
+)GLSL";
+    glShaderSource (vertex, 1, &vertexSource, nullptr);
+    glCompileShader (vertex);
+    const GLuint fragment = glCreateShader (GL_FRAGMENT_SHADER);
+    const char* fragmentSource = R"GLSL(#version 330
+uniform sampler2D u_source;
+uniform vec2 u_texel;
+uniform float u_strength;
+uniform vec4 u_blend;
+uniform vec3 u_tint;
+uniform float u_scatter;
+uniform bool u_bloom;
+uniform bool u_upsample;
+uniform bool u_bicubic;
+in vec2 v_uv;
+out vec4 out_color;
+vec4 cubic(float v) {
+    vec4 n = vec4(1.0, 2.0, 3.0, 4.0) - v;
+    vec4 s = n*n*n;
+    float x=s.x, y=s.y-4.0*s.x, z=s.z-4.0*s.y+6.0*s.x;
+    return vec4(x,y,z,6.0-x-y-z)*(1.0/6.0);
+}
+vec3 bicubic(vec2 uv) {
+    vec2 texSize = 0.5/u_texel;
+    vec2 invSize = u_texel/0.5;
+    uv = uv*texSize-0.5;
+    vec2 fxy=fract(uv);
+    uv-=fxy;
+    vec4 xc=cubic(fxy.x), yc=cubic(fxy.y);
+    vec4 c=uv.xxyy+vec4(-0.5,1.5,-0.5,1.5);
+    vec4 s=vec4(xc.xz+xc.yw,yc.xz+yc.yw);
+    vec4 offset=(c+vec4(xc.yw,yc.yw)/s)*invSize.xxyy;
+    vec3 a=texture(u_source,offset.xz).rgb;
+    vec3 b=texture(u_source,offset.yz).rgb;
+    vec3 d=texture(u_source,offset.xw).rgb;
+    vec3 e=texture(u_source,offset.yw).rgb;
+    return mix(mix(e,d,s.x/(s.x+s.y)),mix(b,a,s.x/(s.x+s.y)),s.z/(s.z+s.w));
+}
+vec3 sampleAt(vec2 uv) {
+    return u_bicubic ? bicubic(uv) : texture(u_source,uv).rgb;
+}
+void main() {
+    vec2 t=u_texel;
+    vec3 color=(sampleAt(v_uv+t)+sampleAt(v_uv-t)
+        +sampleAt(v_uv+vec2(t.x,-t.y))+sampleAt(v_uv+vec2(-t.x,t.y)))*0.25;
+    if(u_upsample) color*=u_scatter;
+    if(u_bloom) {
+        color=max(color,vec3(0));
+        float brightness=max(color.r,max(color.g,color.b));
+        float soft=clamp(brightness-u_blend.y,0.0,u_blend.z);
+        soft=soft*soft*u_blend.w;
+        float contribution=max(soft,brightness-u_blend.x)/max(brightness,0.00001);
+        color*=contribution*u_strength*u_tint;
+    }
+    out_color=vec4(color,1);
+}
+)GLSL";
+    glShaderSource (fragment, 1, &fragmentSource, nullptr);
+    glCompileShader (fragment);
+    GLint compiled = GL_FALSE;
+    glGetShaderiv (vertex, GL_COMPILE_STATUS, &compiled);
+    if (compiled != GL_TRUE) sLog.exception ("HDR bloom vertex shader failed to compile");
+    glGetShaderiv (fragment, GL_COMPILE_STATUS, &compiled);
+    if (compiled != GL_TRUE) {
+        GLint length = 0;
+        glGetShaderiv (fragment, GL_INFO_LOG_LENGTH, &length);
+        std::string log (std::max (1, length), '\0');
+        glGetShaderInfoLog (fragment, length, nullptr, log.data ());
+        sLog.exception ("HDR bloom fragment shader: ", log);
+    }
+    m_hdrPyramidShader = glCreateProgram ();
+    glAttachShader (m_hdrPyramidShader, vertex);
+    glAttachShader (m_hdrPyramidShader, fragment);
+    glLinkProgram (m_hdrPyramidShader);
+    glGetProgramiv (m_hdrPyramidShader, GL_LINK_STATUS, &compiled);
+    if (compiled != GL_TRUE) sLog.exception ("HDR bloom program failed to link");
+    glDetachShader (m_hdrPyramidShader, vertex);
+    glDetachShader (m_hdrPyramidShader, fragment);
+    glDeleteShader (vertex);
+    glDeleteShader (fragment);
+    constexpr GLfloat normalPosition[] = {
+        -1.0f, -1.0f, 0.0f,  1.0f, -1.0f, 0.0f, -1.0f, 1.0f, 0.0f,
+        -1.0f,  1.0f, 0.0f,  1.0f, -1.0f, 0.0f,  1.0f, 1.0f, 0.0f,
+    };
+    glGenBuffers (1, &m_hdrPositionBuffer);
+    glBindBuffer (GL_ARRAY_BUFFER, m_hdrPositionBuffer);
+    glBufferData (GL_ARRAY_BUFFER, sizeof (normalPosition), normalPosition, GL_STATIC_DRAW);
+}
+
+void CWallpaper::resizeHdrPresentation (uint32_t width, uint32_t height) {
+    if (!m_hdrOutput) return;
+    m_hdrOutput->resize (width, height, width, height);
+    for (const auto& target : m_hdrPyramid) {
+        width = std::max (1u, width / 2);
+        height = std::max (1u, height / 2);
+        target->resize (width, height, width, height);
+    }
+}
+
+void CWallpaper::updateHdrBloomSettings (const HdrBloomSettings& settings) {
+    if (m_hdrPyramid.empty ()) return;
+    m_hdrBloomSettings = settings;
+    m_hdrActiveLevels = std::min<size_t> (m_hdrPyramid.size (), std::max (1, settings.iterations));
+}
+
+void CWallpaper::combineHdrFrame () {
+    if (!m_hdrOutput || !m_hdrBloom) return;
+    const bool peek = !m_hdrPeekDone
+        && getContext ().getApp ().getContext ().settings.render.debug.hdrPeek;
+    const auto peekTarget = [&] (const CFBO& target, const char* label) {
+        GLint previousRead = 0, previousPackBuffer = 0, alignment = 0;
+        GLint rowLength = 0, skipRows = 0, skipPixels = 0, swapBytes = 0;
+        glGetIntegerv (GL_READ_FRAMEBUFFER_BINDING, &previousRead);
+        glGetIntegerv (GL_PIXEL_PACK_BUFFER_BINDING, &previousPackBuffer);
+        glGetIntegerv (GL_PACK_ALIGNMENT, &alignment);
+        glGetIntegerv (GL_PACK_ROW_LENGTH, &rowLength);
+        glGetIntegerv (GL_PACK_SKIP_ROWS, &skipRows);
+        glGetIntegerv (GL_PACK_SKIP_PIXELS, &skipPixels);
+        glGetIntegerv (GL_PACK_SWAP_BYTES, &swapBytes);
+        glBindBuffer (GL_PIXEL_PACK_BUFFER, 0);
+        glPixelStorei (GL_PACK_ALIGNMENT, 4);
+        glPixelStorei (GL_PACK_ROW_LENGTH, 0);
+        glPixelStorei (GL_PACK_SKIP_ROWS, 0);
+        glPixelStorei (GL_PACK_SKIP_PIXELS, 0);
+        glPixelStorei (GL_PACK_SWAP_BYTES, GL_FALSE);
+        glBindFramebuffer (GL_READ_FRAMEBUFFER, target.getFramebuffer ());
+        for (int index = 0; index < 4; ++index) {
+            const int x = std::min (target.getRealWidth () - 1,
+                (2 * index + 1) * target.getRealWidth () / 8);
+            const int y = target.getRealHeight () / 2;
+            float value[4] = {};
+            glReadPixels (x, y, 1, 1, GL_RGBA, GL_FLOAT, value);
+            sLog.debug ("HDR_PEEK ", label, " x=", x, " y=", y,
+                        " rgb=", value[0], ",", value[1], ",", value[2]);
+        }
+        const auto& screenshot = getContext ().getApp ().getContext ().settings.screenshot;
+        if (screenshot.take && !screenshot.path.empty ()) {
+            const int width = target.getRealWidth ();
+            const int height = target.getRealHeight ();
+            std::vector<float> rgba (static_cast<size_t> (width) * height * 4);
+            glReadPixels (0, 0, width, height, GL_RGBA, GL_FLOAT, rgba.data ());
+            const auto path = screenshot.path.parent_path () /
+                (std::string ("hdr-") + label + "-f32.rgba");
+            std::ofstream stream (path, std::ios::binary);
+            stream.write (reinterpret_cast<const char*> (rgba.data ()),
+                          static_cast<std::streamsize> (rgba.size () * sizeof (float)));
+            if (!stream) sLog.exception ("Cannot write HDR debug readback ", path);
+            sLog.debug ("HDR_PEEK ", label, " raw=", path, " size=", width, "x", height);
+        }
+        glBindFramebuffer (GL_READ_FRAMEBUFFER, previousRead);
+        glBindBuffer (GL_PIXEL_PACK_BUFFER, previousPackBuffer);
+        glPixelStorei (GL_PACK_ALIGNMENT, alignment);
+        glPixelStorei (GL_PACK_ROW_LENGTH, rowLength);
+        glPixelStorei (GL_PACK_SKIP_ROWS, skipRows);
+        glPixelStorei (GL_PACK_SKIP_PIXELS, skipPixels);
+        glPixelStorei (GL_PACK_SWAP_BYTES, swapBytes);
+    };
+    if (peek) peekTarget (*m_sceneFBO, "scene");
+    glBindVertexArray (m_vaoBuffer);
+    glDisable (GL_DEPTH_TEST);
+    glDisable (GL_CULL_FACE);
+    glDisable (GL_BLEND);
+    glUseProgram (m_hdrPyramidShader);
+    glUniform1i (glGetUniformLocation (m_hdrPyramidShader, "u_source"), 0);
+    const float threshold = m_hdrBloomSettings.threshold;
+    const float knee = threshold * m_hdrBloomSettings.feather;
+    const float scatter = m_hdrBloomSettings.scatter;
+    const float strength = m_hdrBloomSettings.strength /
+        (std::pow (scatter, static_cast<float> (std::max<size_t> (m_hdrActiveLevels, 2) - 2)) + 1.0f);
+    glUniform1f (glGetUniformLocation (m_hdrPyramidShader, "u_strength"), strength);
+    glUniform4f (glGetUniformLocation (m_hdrPyramidShader, "u_blend"), threshold,
+                 threshold - knee, 2.0f * knee, 0.25f / (knee + 0.00001f));
+    glUniform3fv (glGetUniformLocation (m_hdrPyramidShader, "u_tint"), 1, &m_hdrBloomSettings.tint[0]);
+    glUniform1f (glGetUniformLocation (m_hdrPyramidShader, "u_scatter"), scatter);
+    for (size_t index = 0; index < m_hdrActiveLevels; ++index) {
+        const auto& source = index == 0 ? m_sceneFBO : m_hdrPyramid[index - 1];
+        const auto& target = m_hdrPyramid[index];
+        glBindFramebuffer (GL_FRAMEBUFFER, target->getFramebuffer ());
+        glViewport (0, 0, target->getRealWidth (), target->getRealHeight ());
+        glActiveTexture (GL_TEXTURE0);
+        glBindTexture (GL_TEXTURE_2D, source->getTextureID (0));
+        glUniform2f (glGetUniformLocation (m_hdrPyramidShader, "u_texel"),
+                     std::ldexp (1.0f, static_cast<int> (index)) / m_sceneFBO->getRealWidth (),
+                     std::ldexp (1.0f, static_cast<int> (index)) / m_sceneFBO->getRealHeight ());
+        glUniform1i (glGetUniformLocation (m_hdrPyramidShader, "u_bloom"), index == 0);
+        glUniform1i (glGetUniformLocation (m_hdrPyramidShader, "u_upsample"), 0);
+        glUniform1i (glGetUniformLocation (m_hdrPyramidShader, "u_bicubic"), 0);
+        glDrawArrays (GL_TRIANGLES, 0, 3);
+    }
+    if (peek && m_hdrActiveLevels > 1) {
+        peekTarget (*m_hdrPyramid[0], "level0-down");
+        peekTarget (*m_hdrPyramid[1], "level1-down");
+    }
+    glEnable (GL_BLEND);
+    glBlendFunc (GL_ONE, GL_ONE);
+    glUniform1i (glGetUniformLocation (m_hdrPyramidShader, "u_bloom"), 0);
+    glUniform1i (glGetUniformLocation (m_hdrPyramidShader, "u_upsample"), 1);
+    for (size_t index = m_hdrActiveLevels; index > 1; --index) {
+        const auto& source = m_hdrPyramid[index - 1];
+        const auto& target = m_hdrPyramid[index - 2];
+        glBindFramebuffer (GL_FRAMEBUFFER, target->getFramebuffer ());
+        glViewport (0, 0, target->getRealWidth (), target->getRealHeight ());
+        glBindTexture (GL_TEXTURE_2D, source->getTextureID (0));
+        glUniform2f (glGetUniformLocation (m_hdrPyramidShader, "u_texel"),
+                     std::ldexp (1.0f, static_cast<int> (index) - 1) / m_sceneFBO->getRealWidth (),
+                     std::ldexp (1.0f, static_cast<int> (index) - 1) / m_sceneFBO->getRealHeight ());
+        glUniform1i (glGetUniformLocation (m_hdrPyramidShader, "u_bicubic"),
+                     index >= m_hdrActiveLevels - 1);
+        glDrawArrays (GL_TRIANGLES, 0, 3);
+    }
+    glDisable (GL_BLEND);
+    if (peek) {
+        peekTarget (*m_hdrBloom, "bloom");
+        m_hdrPeekDone = true;
+    }
+    glBindFramebuffer (GL_FRAMEBUFFER, m_hdrOutput->getFramebuffer ());
+    glViewport (0, 0, m_hdrOutput->getRealWidth (), m_hdrOutput->getRealHeight ());
+    glBindVertexArray (m_vaoBuffer);
+    glDisable (GL_DEPTH_TEST);
+    glDisable (GL_CULL_FACE);
+    glUseProgram (m_hdrShader);
+    glActiveTexture (GL_TEXTURE0);
+    glBindTexture (GL_TEXTURE_2D, m_sceneFBO->getTextureID (0));
+    glActiveTexture (GL_TEXTURE1);
+    glBindTexture (GL_TEXTURE_2D, m_hdrBloom->getTextureID (0));
+    glActiveTexture (GL_TEXTURE0);
+    glUniform1i (m_hdrTexture0, 0);
+    glUniform1i (m_hdrTexture1, 1);
+    // Native g_TexelSize (builtin ID 7) uses full scene dimensions even
+    // though g_Texture1 samples the half-resolution bloom pyramid.
+    glUniform2f (m_hdrTexelSize, 1.0f / m_sceneFBO->getRealWidth (),
+                 1.0f / m_sceneFBO->getRealHeight ());
+    constexpr GLfloat texCoords[] = {0, 0, 1, 0, 0, 1, 0, 1, 1, 0, 1, 1};
+    glEnableVertexAttribArray (m_hdrTexCoord);
+    glBindBuffer (GL_ARRAY_BUFFER, m_texCoordBuffer);
+    glBufferData (GL_ARRAY_BUFFER, sizeof (texCoords), texCoords, GL_STATIC_DRAW);
+    glVertexAttribPointer (m_hdrTexCoord, 2, GL_FLOAT, GL_FALSE, 0, nullptr);
+    glEnableVertexAttribArray (m_hdrPosition);
+    glBindBuffer (GL_ARRAY_BUFFER, m_hdrPositionBuffer);
+    glVertexAttribPointer (m_hdrPosition, 3, GL_FLOAT, GL_FALSE, 0, nullptr);
+    glDrawArrays (GL_TRIANGLES, 0, 6);
 }
 
 void CWallpaper::setDestinationFramebuffer (GLuint framebuffer) { this->m_destFramebuffer = framebuffer; }
@@ -211,6 +560,7 @@ void CWallpaper::render (
 #endif /* !NDEBUG */
     if (needsSceneRender) {
 	this->renderFrame (sceneViewport);
+	this->combineHdrFrame ();
 	this->m_lastRenderedFrame = currentFrame;
     }
 #if !NDEBUG
@@ -283,19 +633,21 @@ void CWallpaper::render (
     glDisable (GL_DEPTH_TEST);
     glDisable (GL_CULL_FACE);
     // do not use any shader
-    glUseProgram (this->m_shader);
+    glUseProgram (m_shader);
     // activate scene texture
     glActiveTexture (GL_TEXTURE0);
     glBindTexture (GL_TEXTURE_2D, this->getWallpaperTexture ());
     // set uniforms and attribs
-    glEnableVertexAttribArray (this->a_TexCoord);
+    const GLint texCoordAttribute = a_TexCoord;
+    const GLint positionAttribute = a_Position;
+    glEnableVertexAttribArray (texCoordAttribute);
     glBindBuffer (GL_ARRAY_BUFFER, this->m_texCoordBuffer);
     glBufferData (GL_ARRAY_BUFFER, sizeof (texCoords), texCoords, GL_STATIC_DRAW);
-    glVertexAttribPointer (this->a_TexCoord, 2, GL_FLOAT, GL_FALSE, 0, nullptr);
+    glVertexAttribPointer (texCoordAttribute, 2, GL_FLOAT, GL_FALSE, 0, nullptr);
 
-    glEnableVertexAttribArray (this->a_Position);
+    glEnableVertexAttribArray (positionAttribute);
     glBindBuffer (GL_ARRAY_BUFFER, this->m_positionBuffer);
-    glVertexAttribPointer (this->a_Position, 3, GL_FLOAT, GL_FALSE, 0, nullptr);
+    glVertexAttribPointer (positionAttribute, 3, GL_FLOAT, GL_FALSE, 0, nullptr);
 
     glUniform1i (this->g_Texture0, 0);
     // write the framebuffer as is to the screen
@@ -309,14 +661,14 @@ void CWallpaper::render (
 
 void CWallpaper::setPause (bool newState) { }
 
-void CWallpaper::setupFramebuffers () {
+void CWallpaper::setupFramebuffers (TextureFormat format) {
     const uint32_t width = this->getWidth ();
     const uint32_t height = this->getHeight ();
     const uint32_t clamp = this->m_state.getClampingMode ();
 
     // create framebuffer for the scene
     this->m_sceneFBO = this->create (
-	"_rt_FullFrameBuffer", TextureFormat_ARGB8888, clamp, 1.0, { width, height }, { width, height }
+	"_rt_FullFrameBuffer", format, clamp, 1.0, { width, height }, { width, height }
     );
 
     this->alias ("_rt_MipMappedFrameBuffer", "_rt_FullFrameBuffer");

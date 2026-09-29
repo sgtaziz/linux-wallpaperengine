@@ -9,6 +9,7 @@ using namespace WallpaperEngine::Data::Model;
 
 DynamicValue::DynamicValue (const DynamicValue& other) {
     this->DynamicValue::update (other, UpdateSource::Initialization);
+    if (other.m_animation) m_animation = std::make_unique<PropertyAnimation> (*other.m_animation);
 }
 
 DynamicValue::DynamicValue (const glm::vec4& value) {

@@ -1,4 +1,5 @@
 #include "WallpaperEngine/Render/Objects/CImage.h"
+#include "WallpaperEngine/Render/Objects/CModel.h"
 #include "WallpaperEngine/Render/Objects/CParticle.h"
 #include "WallpaperEngine/Render/Objects/CSound.h"
 #include "WallpaperEngine/Render/Objects/CText.h"
@@ -6,12 +7,28 @@
 #include "WallpaperEngine/Render/WallpaperState.h"
 
 #include "CScene.h"
+#include "SceneDependencies.h"
+#include "SceneCursor.h"
+#include "ParticleSceneClock.h"
+#include "SceneTransform.h"
 #include "WallpaperEngine/Logging/Log.h"
 
 #include "WallpaperEngine/Data/Model/Wallpaper.h"
 #include "WallpaperEngine/Data/Parsers/ObjectParser.h"
+#include "WallpaperEngine/Data/Utils/ScopeGuard.h"
+#include "WallpaperEngine/Scripting/ScriptPropertyBindings.h"
+#include "WallpaperEngine/Scripting/ScriptableObject.h"
 
 #include <ranges>
+#include <algorithm>
+#include <chrono>
+#include <cmath>
+#include <functional>
+#include <limits>
+#include <stdexcept>
+#include <unordered_map>
+#include <unordered_set>
+#include <glm/gtc/matrix_transform.hpp>
 
 extern float g_Time;
 extern float g_TimeLast;
@@ -22,17 +39,49 @@ using namespace WallpaperEngine::Data::Model;
 using namespace WallpaperEngine::Data::Parsers;
 using namespace WallpaperEngine::Render::Wallpapers;
 
+namespace {
+class CPointLight final : public Scripting::ScriptableObject {
+public:
+    CPointLight (CScene& scene, const ScenePointLight& light) :
+        CObject (scene, light), ScriptableObject (scene, light) {
+        for (const auto& binding : Scripting::scriptPropertyBindings (light))
+            registerProperty (binding.name, binding.value);
+    }
+};
+}
+
 CScene::CScene (
     const Wallpaper& wallpaper, RenderContext& context, AudioContext& audioContext,
     const WallpaperState::TextureUVsScaling& scalingMode, const uint32_t& clampMode
 ) : CWallpaper (wallpaper, context, audioContext, scalingMode, clampMode) {
+    const auto explicitSeed = context.getApp ().getContext ().settings.render.debug.particleSeed;
+    const auto milliseconds = std::chrono::duration_cast<std::chrono::milliseconds> (
+        std::chrono::system_clock::now ().time_since_epoch ()).count ();
+    m_particleRandom.seed (explicitSeed.value_or (static_cast<uint32_t> (milliseconds)));
     // caller should check this, if not a std::bad_cast is good to throw
     auto scene = wallpaper.as<Scene> ();
+
+    // Native 14010df40 enables the float HDR route only for authored HDR
+    // scenes with bloom when host postprocessing quality is ultra.
+    m_hdrPostprocessing = scene->camera.hdr && scene->camera.bloom.enabled->value->getBool ()
+        && context.getApp ().getContext ().settings.render.postprocessing
+               == Application::ApplicationContext::POSTPROCESSING_ULTRA;
+    sLog.debug ("HDR gate authored=", scene->camera.hdr, " bloom=",
+                scene->camera.bloom.enabled->value->getBool (), " quality=",
+                context.getApp ().getContext ().settings.render.postprocessing,
+                " active=", m_hdrPostprocessing);
+
+    const auto dependencyReport = inspectSceneDependencies (scene->objects);
+    for (const auto& [id, reason] : dependencyReport.rejected) {
+	m_rejectedObjectIds.insert (id);
+	sLog.error ("Skipping scene object ", id, ": ", reason);
+    }
 
     // setup scripting engine
     this->m_scriptEngine = std::make_unique<Scripting::ScriptEngine> (*this, context.getMediaSource ());
     // setup the scene camera
-    this->m_camera = std::make_unique<Camera> (*this, scene->camera);
+    this->m_camera = std::make_unique<Camera> (
+        *this, scene->camera, Camera::selectActiveSceneCamera (scene->objects));
 
     float width = scene->camera.projection.width;
     float height = scene->camera.projection.height;
@@ -52,7 +101,7 @@ CScene::CScene (
 	    }
 
 	    const glm::vec3 origin = image->origin->value->getVec3 ();
-	    const glm::vec2 halfSize = image->size / 2.0f;
+	    const glm::vec2 halfSize = image->size->value->getVec2 () / 2.0f;
 
 	    maxExtent.x = glm::max (maxExtent.x, glm::abs (origin.x) + halfSize.x);
 	    maxExtent.y = glm::max (maxExtent.y, glm::abs (origin.y) + halfSize.y);
@@ -70,11 +119,23 @@ CScene::CScene (
 
     this->m_parallaxDisplacement = { 0, 0 };
 
-    // TODO: CONVERSION
-    this->m_camera->setOrthogonalProjection (width, height);
+    if (scene->camera.projection.isOrthogonal) {
+	this->m_camera->setOrthogonalProjection (width, height);
+    } else {
+	// Native 140186c90 leaves its orthographic bit clear when general has
+	// no valid orthogonalprojection. Perspective uses the output aspect.
+	width = this->getContext ().getOutput ().getFullWidth ();
+	height = this->getContext ().getOutput ().getFullHeight ();
+	this->m_camera->setPerspectiveProjection (width, height);
+    }
 
     // setup framebuffers here as they're required for the scene setup
-    this->setupFramebuffers ();
+    const auto sceneFormat = m_hdrPostprocessing ? TextureFormat_RGBA16161616f : TextureFormat_ARGB8888;
+    if (m_hdrPostprocessing) this->setBackbufferFormat (sceneFormat);
+    this->setupFramebuffers (sceneFormat);
+    // Native _rt_FullFrameBuffer uses D16 depth; effect and auxiliary targets
+    // request no depth attachment. Keep that lifetime tied to this target.
+    this->m_sceneFBO->attachDepth16 ();
 
     const uint32_t sceneWidth = this->m_camera->getWidth ();
     const uint32_t sceneHeight = this->m_camera->getHeight ();
@@ -90,6 +151,19 @@ CScene::CScene (
 
     glClearColor (clearColor.r, clearColor.g, clearColor.b, 1.0f);
 
+    // Native LIGHTS_POINT comes from the root lightconfig's four-bit count,
+    // not the number of light objects. Keep unused slots zero-filled.
+    const int pointLightSlots = scene->pointLightSlots;
+    m_pointLightColors.resize (pointLightSlots, glm::vec4 (0.0f));
+    m_pointLightOrigins.resize (pointLightSlots, glm::vec4 (0.0f));
+    for (const auto& object : scene->objects) {
+	if (!object->is<ScenePointLight> () || m_rejectedObjectIds.contains (object->id)) continue;
+	auto* light = object->as<ScenePointLight> ();
+	assignLegacyLightSlot (light);
+	m_pointLightObjects.push_back (light);
+    }
+    refreshPointLights ();
+
     // create all objects based off their dependencies
     for (const auto& object : scene->objects) {
 	this->createObject (*object);
@@ -102,17 +176,27 @@ CScene::CScene (
 
     // create extra framebuffers for the bloom effect
     this->_rt_4FrameBuffer = this->create (
-	"_rt_4FrameBuffer", TextureFormat_ARGB8888, TextureFlags_ClampUVs, 1.0, { sceneWidth / 4, sceneHeight / 4 },
+	"_rt_4FrameBuffer", sceneFormat, TextureFlags_ClampUVs, 1.0, { sceneWidth / 4, sceneHeight / 4 },
 	{ sceneWidth / 4, sceneHeight / 4 }
     );
     this->_rt_8FrameBuffer = this->create (
-	"_rt_8FrameBuffer", TextureFormat_ARGB8888, TextureFlags_ClampUVs, 1.0, { sceneWidth / 8, sceneHeight / 8 },
+	"_rt_8FrameBuffer", sceneFormat, TextureFlags_ClampUVs, 1.0, { sceneWidth / 8, sceneHeight / 8 },
 	{ sceneWidth / 8, sceneHeight / 8 }
     );
     this->_rt_Bloom = this->create (
-	"_rt_Bloom", TextureFormat_ARGB8888, TextureFlags_ClampUVs, 1.0, { sceneWidth / 8, sceneHeight / 8 },
+	"_rt_Bloom", sceneFormat, TextureFlags_ClampUVs, 1.0, { sceneWidth / 8, sceneHeight / 8 },
 	{ sceneWidth / 8, sceneHeight / 8 }
     );
+    if (m_hdrPostprocessing) {
+	this->setHdrPresentation ({
+	    .strength = scene->camera.bloom.hdrStrength->value->getFloat (),
+	    .threshold = scene->camera.bloom.hdrThreshold->value->getFloat (),
+	    .feather = scene->camera.bloom.hdrFeather->value->getFloat (),
+	    .scatter = scene->camera.bloom.hdrScatter->value->getFloat (),
+	    .iterations = scene->camera.bloom.hdrIterations->value->getInt (),
+	    .tint = scene->camera.bloom.tint->value->getVec3 (),
+	});
+    }
 
     //
     // Had to get a little creative with the effects to achieve the same bloom effect without any custom code
@@ -158,7 +242,7 @@ CScene::CScene (
 	      ) } };
 
     // create image for bloom passes
-    if (scene->camera.bloom.enabled->value->getBool ()) {
+    if (scene->camera.bloom.enabled->value->getBool () && !m_hdrPostprocessing) {
 	this->m_bloomObjectData = ObjectParser::parse (bloom, scene->project);
 	this->m_bloomObject = this->createObject (*this->m_bloomObjectData);
 
@@ -167,6 +251,10 @@ CScene::CScene (
 }
 
 CScene::~CScene () {
+    // Script destroy hooks may read their layer's model values, so run them
+    // while render objects and their bound DynamicValues are still alive.
+    m_shuttingDown = true;
+    if (m_scriptEngine) m_scriptEngine->shutdown ();
     // bloom object is in the objects list, so no need to explicitly delete it
     this->m_bloomObject = nullptr;
 
@@ -181,10 +269,21 @@ CScene::~CScene () {
 Render::CObject* CScene::createObject (const Object& object) {
     Render::CObject* renderObject = nullptr;
 
+    if (m_rejectedObjectIds.contains (object.id)) return nullptr;
+
     // ensure the item is not loaded already
     if (const auto current = this->m_objects.find (object.id); current != this->m_objects.end ()) {
 	return current->second;
     }
+
+    if (!m_creatingObjects.insert (object.id).second) {
+	throw std::invalid_argument ("Scene object creation cycle at id " + std::to_string (object.id));
+    }
+    struct CreationGuard {
+	std::set<int>& active;
+	int id;
+	~CreationGuard () { active.erase (id); }
+    } guard { m_creatingObjects, object.id };
 
     // check dependencies too!
     for (const auto& cur : object.dependencies) {
@@ -193,11 +292,13 @@ Render::CObject* CScene::createObject (const Object& object) {
 	    continue;
 	}
 
-	const auto dep
-	    = std::ranges::find_if (this->getScene ().objects, [&cur] (const auto& o) { return o->id == cur; });
-
-	if (dep != this->getScene ().objects.end ()) {
-	    this->createObject (**dep);
+	if (const auto* dep = findObjectData (cur)) {
+	    if (this->createObject (*dep) == nullptr) {
+		sLog.error ("Skipping scene object ", object.id,
+		            " because dependency ", cur, " could not be created");
+		m_rejectedObjectIds.insert (object.id);
+		return nullptr;
+	    }
 	}
     }
 
@@ -205,53 +306,77 @@ Render::CObject* CScene::createObject (const Object& object) {
     if (object.parent.has_value ()) {
 	int parentId = object.parent.value ();
 
-	const auto dep = std::ranges::find_if (this->getScene ().objects, [&parentId] (const auto& o) {
-	    return o->id == parentId;
-	});
-
-	if (dep == this->getScene ().objects.end ()) {
+	const auto* dep = findObjectData (parentId);
+	if (!dep) {
 	    sLog.exception ("Cannot find parent ", parentId, " for object ", object.id);
 	}
 
-	this->createObject (**dep);
+	if (this->createObject (*dep) == nullptr) {
+	    sLog.error ("Skipping scene object ", object.id,
+	                " because parent ", parentId, " could not be created");
+	    m_rejectedObjectIds.insert (object.id);
+	    return nullptr;
+	}
     }
 
     renderObject = this->dispatchObjectType (object);
 
     if (renderObject != nullptr) {
 	this->m_objects.emplace (renderObject->getId (), renderObject);
+    } else {
+	m_rejectedObjectIds.insert (object.id);
     }
 
     return renderObject;
 }
 
+const Object* CScene::findObjectData (int id) const {
+    const auto authored = std::ranges::find_if (getScene ().objects,
+        [id] (const auto& candidate) { return candidate->id == id; });
+    if (authored != getScene ().objects.end ()) return authored->get ();
+    const auto dynamic = m_scriptObjectData.find (id);
+    return dynamic == m_scriptObjectData.end () ? nullptr : dynamic->second.get ();
+}
+
 Render::CObject* CScene::dispatchObjectType (const Object& object) {
     Render::CObject* renderObject = nullptr;
 
-    if (object.is<Image> ()) {
-	renderObject = new Objects::CImage (*this, *object.as<Image> ());
-    } else if (object.is<Sound> ()) {
-	renderObject = new Objects::CSound (*this, *object.as<Sound> ());
-    } else if (object.is<Text> ()) {
-	renderObject = new Objects::CText (*this, *object.as<Text> ());
-    } else if (object.is<Particle> ()) {
-	const auto& particleData = *object.as<Particle> ();
-
-	if (this->getContext ().getApp ().getContext ().settings.general.disableParticles == true) {
-	    sLog.debug ("Ignoring particle system (disabled in settings): ", particleData.name);
-	    return nullptr;
-	}
-
-	renderObject = new Objects::CParticle (*this, particleData);
-    } else {
-	sLog.error ("Unknown object type, creating placeholder, empty object: ", object.id);
-	renderObject = new CObject (*this, object);
-    }
-
     try {
+	if (object.is<Image> ()) {
+	    renderObject = new Objects::CImage (*this, *object.as<Image> ());
+	} else if (object.is<SceneModel> ()) {
+	    renderObject = new Objects::CModel (*this, *object.as<SceneModel> ());
+	} else if (object.is<SceneCamera> ()) {
+	    // The camera participates in scene selection but has no draw call.
+	    renderObject = new CObject (*this, object);
+	} else if (object.is<ScenePointLight> ()) {
+	    renderObject = new CPointLight (*this, *object.as<ScenePointLight> ());
+	} else if (object.is<Sound> ()) {
+	    renderObject = new Objects::CSound (*this, *object.as<Sound> ());
+	} else if (object.is<Text> ()) {
+	    renderObject = new Objects::CText (*this, *object.as<Text> ());
+	} else if (object.is<Particle> ()) {
+	    const auto& particleData = *object.as<Particle> ();
+
+	    if (this->getContext ().getApp ().getContext ().settings.general.disableParticles == true) {
+		sLog.debug ("Ignoring particle system (disabled in settings): ", particleData.name);
+		return nullptr;
+	    }
+	    if (!particleData.material || !particleData.material->material
+	        || particleData.material->material->passes.empty ()) {
+		sLog.error ("Skipping particle system without a renderable material: ", particleData.name,
+	                    " (object ", particleData.id, ")");
+		return nullptr;
+	    }
+
+	    renderObject = new Objects::CParticle (*this, particleData);
+	} else {
+	    sLog.error ("Unknown object type, creating placeholder, empty object: ", object.id);
+	    renderObject = new CObject (*this, object);
+	}
 	renderObject->setup ();
     } catch (const std::exception& e) {
-	sLog.error ("Failed to setup object ", object.id, ": ", e.what ());
+	sLog.error ("Failed to create or setup object ", object.id, ": ", e.what ());
 	delete renderObject;
 	renderObject = nullptr;
     }
@@ -296,8 +421,49 @@ void CScene::addObjectToRenderOrder (const Object& object) {
 
 ScriptEngine& CScene::getScriptEngine () const { return *this->m_scriptEngine; }
 Camera& CScene::getCamera () const { return *this->m_camera; }
+std::shared_ptr<const CFBO> CScene::getActiveRenderTarget () const {
+    return m_activeRenderTarget ? m_activeRenderTarget : getFBO ();
+}
+const glm::mat4& CScene::getActiveRenderProjection () const { return m_activeRenderProjection; }
+bool CScene::isChildCompositionScope () const { return m_childCompositionScope; }
+bool CScene::isMaxAlphaCompositionScope () const { return m_maxAlphaCompositionScope; }
+const Audio::Drivers::Recorders::StereoSpectrum::Bands& CScene::getAudioSpectrum () const {
+    return this->m_audioSpectrum.bands ();
+}
 
 void CScene::renderFrame (const glm::ivec4& viewport) {
+    // Native scene resize (14017f1b0) updates the perspective projection and
+    // its render targets together. Otherwise a resized preview samples a
+    // stretched old root image through newly sized fullscreen effect targets.
+    if (!m_camera->isOrthogonal () && viewport.z > 1 && viewport.w > 1)
+        resizePerspectiveTargets (viewport.z, viewport.w);
+    // The projection now has the active output size for perspective scenes;
+    // fixed authored orthographic canvases retain their own dimensions. Use
+    // the presentation crop only for fullscreen postprocessing intermediates.
+    if (viewport.z > 0 && viewport.w > 0) {
+        auto presentation = getState ();
+        presentation.updateState (viewport, false, getWidth (), getHeight ());
+        const auto uv = presentation.getTextureUVs ();
+        const glm::vec2 span (std::abs (uv.uend - uv.ustart), std::abs (uv.vend - uv.vstart));
+        if (span.x > 0.0f && span.y > 0.0f)
+            m_presentationTextureSize = glm::ceil (glm::vec2 (viewport.z, viewport.w) / span);
+    }
+    // Native 14017fa70:217–225 advances this scene clock before its particle
+    // tree ticks. The float sent to the particle context wraps after 432000 s.
+    m_particleSceneTime = advanceParticleSceneClock (
+        m_particleSceneTimeAccumulator, getDeltaTime ());
+    // A scene owns its filter history. Repeated viewports at the same scene
+    // time consume one published frame; a paused scene retains its last one.
+    const auto& recorder = this->getAudioContext ().getRecorder ();
+    Audio::Drivers::Recorders::StereoSpectrum::Bands raw;
+    std::copy_n (recorder.audio64RawLeft, 64, raw.audio64[0].begin ());
+    std::copy_n (recorder.audio64RawRight, 64, raw.audio64[1].begin ());
+    // Native rate comes from the host's wproperties, whose Linux owner is
+    // not mapped to project.json custom properties. Both rate and visibility
+    // fade use their neutral visible-state value until that mapping is proven.
+    m_audioSpectrum.advance (raw, this->getContext ().getDriver ().getFrameCounter (),
+                             std::chrono::steady_clock::now (), 1.0f, 1.0f);
+
     // ensure the virtual mouse position is up to date
     this->updateMouse (viewport);
 
@@ -306,9 +472,8 @@ void CScene::renderFrame (const glm::ivec4& viewport) {
 	&& !this->getContext ().getApp ().getContext ().settings.mouse.disableparallax) {
 	const float influence = this->getScene ().camera.parallax.mouseInfluence->value->getFloat ();
 	const float amount = this->getScene ().camera.parallax.amount->value->getFloat ();
-	const float delay = glm::clamp (
-	    this->getScene ().camera.parallax.delay->value->getFloat () * (g_Time - g_TimeLast), 0.0f, 1.0f
-	);
+	const float delay = sceneParallaxDelayWeight (
+	    this->getScene ().camera.parallax.delay->value->getFloat (), g_Time - g_TimeLast);
 
 	const glm::vec2 centeredMouse = this->m_mousePosition - glm::vec2 (0.5f, 0.5f);
 	this->m_parallaxDisplacement
@@ -317,6 +482,26 @@ void CScene::renderFrame (const glm::ivec4& viewport) {
 
     // run a tick in the javascript logic
     this->getScriptEngine ().tick ();
+    if (m_hdrPostprocessing) {
+	const auto& bloom = this->getScene ().camera.bloom;
+	updateHdrBloomSettings ({
+	    .strength = bloom.hdrStrength->value->getFloat (),
+	    .threshold = bloom.hdrThreshold->value->getFloat (),
+	    .feather = bloom.hdrFeather->value->getFloat (),
+	    .scatter = bloom.hdrScatter->value->getFloat (),
+	    .iterations = bloom.hdrIterations->value->getInt (),
+	    .tint = bloom.tint->value->getVec3 (),
+	});
+    }
+    dispatchCursorEvents ();
+    flushDestroyedScriptLayers ();
+    refreshPointLights ();
+
+    // Sound scheduling follows scene time even when a sound layer is hidden
+    // by a render-only debug filter. Playback itself runs in the audio driver.
+    for (const auto& object : this->m_objectsByRenderOrder) {
+	if (object->is<Objects::CSound> ()) object->as<Objects::CSound> ()->tick (this->getDeltaTime ());
+    }
 
     // update main textures for images
     for (const auto& cur : this->m_objectsByRenderOrder) {
@@ -342,28 +527,138 @@ void CScene::renderFrame (const glm::ivec4& viewport) {
     // bind the vertex array
     glBindVertexArray (this->m_vaoBuffer);
     // use the scene's framebuffer by default
-    glBindFramebuffer (GL_FRAMEBUFFER, this->getWallpaperFramebuffer ());
+    glBindFramebuffer (GL_FRAMEBUFFER, this->m_sceneFBO->getFramebuffer ());
     // ensure we render over the whole framebuffer
     glViewport (0, 0, this->m_sceneFBO->getRealWidth (), this->m_sceneFBO->getRealHeight ());
 
+    // A final root image pass may mask alpha writes. Start each scene frame
+    // with all color channels enabled so earlier particle layers write alpha.
+    glColorMask (GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+
+    glDepthMask (GL_TRUE);
+    glClearDepth (1.0);
     glClear (GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-    for (const auto& cur : this->m_objectsByRenderOrder) {
-	const auto& debug = this->getContext ().getApp ().getContext ().settings.render.debug;
-	if (debug.objectFilter.has_value () && cur->getId () != debug.objectFilter.value ()) {
-	    continue;
-	}
-	if (std::ranges::find (debug.skipObjects, cur->getId ()) != debug.skipObjects.end ()) {
-	    continue;
-	}
+    m_activeRenderTarget = getFBO ();
+    m_activeRenderProjection = getCamera ().getProjection () * getCamera ().getLookAt ();
+    m_childCompositionScope = false;
+    m_maxAlphaCompositionScope = false;
 
-	cur->render ();
+    const auto& debug = this->getContext ().getApp ().getContext ().settings.render.debug;
+    if (debug.objectFilter.has_value () || !debug.skipObjects.empty ()) {
+	const auto scheduled = m_objectsByRenderOrder;
+	for (auto* cur : scheduled) {
+	    if (debug.objectFilter.has_value () && cur->getId () != debug.objectFilter.value ()) continue;
+	    if (std::ranges::find (debug.skipObjects, cur->getId ()) != debug.skipObjects.end ()) continue;
+	    cur->render ();
+	}
+	return;
     }
+
+    std::unordered_map<int, CObject*> present;
+    for (auto* object : m_objectsByRenderOrder) present.emplace (object->getId (), object);
+    std::unordered_map<int, std::vector<CObject*>> children;
+    std::vector<CObject*> roots;
+    // Keep ordinary objects in the authored/dependency render order. Only a
+    // passthrough image with an effect owns an offscreen child draw scope.
+    // Its descendants draw at that scope's position, even across ordinary
+    // transform-only ancestors; nested scopes recurse at their own position.
+    for (auto* object : m_objectsByRenderOrder) {
+	std::optional<int> owner;
+	auto parent = object->getObject ().parent;
+	while (parent) {
+	    const auto ancestor = present.find (*parent);
+	    if (ancestor == present.end ()) break;
+	    if (ancestor->second->is<Objects::CImage> ()
+		&& ancestor->second->as<Objects::CImage> ()->canComposeChildren ()) {
+		owner = *parent;
+		break;
+	    }
+	    parent = ancestor->second->getObject ().parent;
+	}
+	if (owner) children[*owner].push_back (object);
+	else roots.push_back (object);
+    }
+
+    std::function<void (CObject*)> renderNode = [&] (CObject* object) {
+	const auto childIt = children.find (object->getId ());
+	if (childIt == children.end () || childIt->second.empty () || !object->is<Objects::CImage> ()
+	    || !object->as<Objects::CImage> ()->canComposeChildren ()) {
+	    object->render ();
+	    if (childIt != children.end ()) for (auto* child : childIt->second) renderNode (child);
+	    return;
+	}
+	auto* image = object->as<Objects::CImage> ();
+	image->renderWithChildren ([&] (std::shared_ptr<const CFBO> target) {
+	    const auto transform = resolveSceneTransform (image->getImage (), [this] (int parentId) -> const Object* {
+		const auto* parent = getObject (parentId);
+		return parent ? &parent->getObject () : nullptr;
+	    }, [this] (const Object& parent, const std::string& name) {
+		return getPuppetAttachmentTransform (parent.id, name);
+	    });
+	    const glm::mat4 flip = glm::scale (glm::mat4 (1.0f), glm::vec3 (1.0f, -1.0f, 1.0f));
+	    const glm::mat4 world = getCamera ().isOrthogonal ()
+		? glm::translate (
+		      glm::mat4 (1.0f), glm::vec3 (-getWidth () * 0.5f, getHeight () * 0.5f, 0.0f))
+		      * flip * transform.authoredMatrix
+		: transform.authoredMatrix;
+	    const auto inverse = inverseFiniteTransform (world);
+	    if (!inverse) return;
+	    const float width = static_cast<float> (target->getRealWidth ());
+	    const float height = static_cast<float> (target->getRealHeight ());
+	    const glm::mat4 localFlip = getCamera ().isOrthogonal () ? flip : glm::mat4 (1.0f);
+	    const glm::mat4 projection = glm::ortho (-width * 0.5f, width * 0.5f,
+		-height * 0.5f, height * 0.5f, -1000.0f, 1000.0f) * localFlip * *inverse;
+	    const auto previousTarget = m_activeRenderTarget;
+	    const auto previousProjection = m_activeRenderProjection;
+	    const bool previousScope = m_childCompositionScope;
+	    const bool previousMaxAlpha = m_maxAlphaCompositionScope;
+	    m_activeRenderTarget = target;
+	    m_activeRenderProjection = projection;
+	    m_childCompositionScope = true;
+	    m_maxAlphaCompositionScope = previousMaxAlpha
+		|| !image->getImage ().copyBackground->value->getBool ();
+	    auto restore = [&] {
+		m_activeRenderTarget = previousTarget;
+		m_activeRenderProjection = previousProjection;
+		m_childCompositionScope = previousScope;
+		m_maxAlphaCompositionScope = previousMaxAlpha;
+	    };
+	    try {
+		for (auto* child : childIt->second) renderNode (child);
+	    } catch (...) {
+		restore ();
+		throw;
+	    }
+	    restore ();
+	});
+    };
+    for (auto* root : roots) renderNode (root);
+}
+
+void CScene::resizePerspectiveTargets (int width, int height) {
+    if (getWidth () == width && getHeight () == height) return;
+    const auto resize = [] (const std::shared_ptr<CFBO>& target, int w, int h) {
+        if (target) target->resize (w, h, w, h);
+    };
+    // Retain CFBO objects (and therefore references held by effect passes).
+    // CFBO::resize also replaces the root D16 attachment and texture storage.
+    resize (m_sceneFBO, width, height);
+    resize (_rt_shadowAtlas, width, height);
+    resize (_rt_4FrameBuffer, std::max (1, width / 4), std::max (1, height / 4));
+    resize (_rt_8FrameBuffer, std::max (1, width / 8), std::max (1, height / 8));
+    resize (_rt_Bloom, std::max (1, width / 8), std::max (1, height / 8));
+    resizeHdrPresentation (width, height);
+    m_camera->setPerspectiveProjection (width, height);
+    if (m_scriptEngine) m_scriptEngine->notifyScreenResize (width, height);
 }
 
 void CScene::updateMouse (const glm::ivec4& viewport) {
     // update virtual mouse position first
     const glm::dvec2 position = this->getContext ().getInputContext ().getMouseInput ().position ();
+    m_mouseScreenPosition = cursorScreenPosition (position, viewport);
+    m_mouseLeftDown = getContext ().getInputContext ().getMouseInput ().leftClick ()
+        == Input::MouseClickStatus::Clicked;
 
     // rollover the position to the last
     this->m_mousePositionLast = this->m_mousePosition;
@@ -390,6 +685,95 @@ void CScene::updateMouse (const glm::ivec4& viewport) {
     this->m_mousePosition.y = uvs.vstart + mouseY * (uvs.vend - uvs.vstart);
 }
 
+void CScene::dispatchCursorEvents () {
+    const auto world = getMouseWorldPosition ();
+    if (!world) return; // Cursor events are documented for 2D scene layers.
+    const bool moved = !m_cursorInputInitialized
+        || m_previousCursorScreenPosition != m_mouseScreenPosition;
+    const bool pressed = m_mouseLeftDown && !m_previousMouseLeftDown;
+    const bool released = !m_mouseLeftDown && m_previousMouseLeftDown;
+    m_cursorInputInitialized = true;
+    m_previousCursorScreenPosition = m_mouseScreenPosition;
+    m_previousMouseLeftDown = m_mouseLeftDown;
+
+    CObject* hit = nullptr;
+    glm::vec3 hitLocal {};
+    auto layerLocation = [this, &world] (const CObject& object)
+        -> std::optional<std::pair<glm::vec3, bool>> {
+        glm::vec2 size {};
+        glm::vec2 alignment {};
+        if (object.is<Objects::CImage> ()) {
+            const auto* image = object.as<Objects::CImage> ();
+            size = image->getSize ();
+            const auto& authored = image->getImage ().alignment;
+            if (authored.find ("top") != std::string::npos) alignment.y = -size.y * 0.5f;
+            else if (authored.find ("bottom") != std::string::npos) alignment.y = size.y * 0.5f;
+            if (authored.find ("left") != std::string::npos) alignment.x = size.x * 0.5f;
+            else if (authored.find ("right") != std::string::npos) alignment.x = -size.x * 0.5f;
+        } else if (object.is<Objects::CText> ()) {
+            const auto* text = object.as<Objects::CText> ();
+            size = text->getLayoutSize ();
+            alignment = text->getLayoutOffset ();
+        }
+        else return std::nullopt;
+        const auto transform = resolveSceneTransform (object.getObject (),
+            [this] (int parentId) -> const Object* {
+                const auto* parent = getObject (parentId);
+                return parent ? &parent->getObject () : nullptr;
+            }, [this] (const Object& parent, const std::string& name) {
+                return getPuppetAttachmentTransform (parent.id, name);
+            });
+        const auto local = cursorLocalPosition (*world, transform.authoredMatrix, size, alignment);
+        if (!local) return std::nullopt;
+        const bool inside = transform.visible && local->x >= 0.0f && local->x <= size.x
+            && local->y >= 0.0f && local->y <= size.y;
+        return std::pair {*local, inside};
+    };
+    // The last visible solid layer in render order receives the pointer.
+    // Alpha masks and puppet hit boxes need a separate native contract.
+    for (auto it = m_objectsByRenderOrder.rbegin (); it != m_objectsByRenderOrder.rend (); ++it) {
+        auto* object = *it;
+        if (!object->getObject ().solid || !object->is<Scripting::ScriptableObject> ()) continue;
+        const auto location = layerLocation (*object);
+        if (!location || !location->second) continue;
+        hit = object;
+        hitLocal = location->first;
+        break;
+    }
+
+    const auto previousHover = m_hoveredCursorLayerId;
+    const auto currentHover = hit ? std::optional<int> (hit->getId ()) : std::nullopt;
+    auto dispatch = [this, &world] (int id, const char* event, const glm::vec3& local) {
+        const auto* object = getObject (id);
+        if (object && object->is<Scripting::ScriptableObject> ())
+            m_scriptEngine->dispatchCursorEvent (*object->as<Scripting::ScriptableObject> (),
+                                                 event, *world, local);
+    };
+    if (previousHover != currentHover) {
+        if (previousHover) {
+            const auto* oldLayer = getObject (*previousHover);
+            const auto oldLocation = oldLayer ? layerLocation (*oldLayer) : std::nullopt;
+            if (oldLocation) dispatch (*previousHover, "cursorLeave", oldLocation->first);
+        }
+        if (currentHover) dispatch (*currentHover, "cursorEnter", hitLocal);
+    }
+    const bool localMoved = currentHover && previousHover == currentHover
+        && glm::length (hitLocal - m_hoveredCursorLocalPosition) > 1e-4f;
+    m_hoveredCursorLayerId = currentHover;
+    m_hoveredCursorLocalPosition = hitLocal;
+    if ((moved || localMoved) && currentHover) dispatch (*currentHover, "cursorMove", hitLocal);
+    if (pressed) {
+        m_pressedCursorLayerId = currentHover;
+        if (currentHover) dispatch (*currentHover, "cursorDown", hitLocal);
+    }
+    if (released) {
+        if (currentHover) dispatch (*currentHover, "cursorUp", hitLocal);
+        if (currentHover && m_pressedCursorLayerId == currentHover)
+            dispatch (*currentHover, "cursorClick", hitLocal);
+        m_pressedCursorLayerId.reset ();
+    }
+}
+
 const Scene& CScene::getScene () const { return *this->getWallpaperData ().as<Scene> (); }
 
 int CScene::getWidth () const { return this->m_camera->getWidth (); }
@@ -399,6 +783,8 @@ int CScene::getHeight () const { return this->m_camera->getHeight (); }
 float CScene::getTime () const { return g_Time; }
 
 float CScene::getDeltaTime () const { return g_Time - g_TimeLast; }
+
+float CScene::getParticleSceneTime () const { return m_particleSceneTime; }
 
 float CScene::getFps () const {
     const float dt = g_Time - g_TimeLast;
@@ -416,11 +802,247 @@ const glm::vec2* CScene::getMousePositionLast () const { return &this->m_mousePo
 
 const glm::vec2* CScene::getMousePositionNormalized () const { return &this->m_mousePositionNormalized; }
 
+const glm::vec2& CScene::getMouseScreenPosition () const { return m_mouseScreenPosition; }
+
+std::optional<glm::vec3> CScene::getMouseWorldPosition () const {
+    if (!m_camera->isOrthogonal ()) return std::nullopt;
+    return cursorWorldPosition (m_mousePositionNormalized, m_camera->getProjection (),
+                                m_camera->getWidth (), m_camera->getHeight ());
+}
+
+bool CScene::isMouseLeftDown () const { return m_mouseLeftDown; }
+
 const glm::vec2* CScene::getParallaxDisplacement () const { return &this->m_parallaxDisplacement; }
 
+glm::vec3 CScene::getLayerParallaxOffset (const glm::vec2& depth) const {
+    if (!getScene ().camera.parallax.enabled->value->getBool ()
+        || getContext ().getApp ().getContext ().settings.mouse.disableparallax)
+        return {};
+    return sceneParallaxOffset (depth, m_parallaxDisplacement, static_cast<float> (getWidth ()));
+}
+glm::vec3 CScene::getLayerParallaxOffset (const glm::vec3& origin,
+                                         const glm::vec2& depth) const {
+    if (!getScene ().camera.parallax.enabled->value->getBool ()
+        || getContext ().getApp ().getContext ().settings.mouse.disableparallax)
+        return {};
+    return sceneParticleParallaxOffset (
+        origin, m_camera->getEye (), depth, m_parallaxDisplacement,
+        static_cast<float> (getWidth ()), static_cast<float> (getHeight ()),
+        getScene ().camera.parallax.amount->value->getFloat ());
+}
+
 const std::vector<CObject*>& CScene::getObjectsByRenderOrder () const { return this->m_objectsByRenderOrder; }
+
+std::mt19937& CScene::getParticleRandom () { return m_particleRandom; }
 
 const CObject* CScene::getObject (int id) const {
     const auto object = this->m_objects.find (id);
     return object == this->m_objects.end () ? nullptr : object->second;
+}
+
+int CScene::getPointLightCount () const { return int (m_pointLightColors.size ()); }
+
+const glm::vec4* CScene::getPointLightColors () const { return m_pointLightColors.data (); }
+
+const glm::vec4* CScene::getPointLightOrigins () const { return m_pointLightOrigins.data (); }
+
+const glm::vec3* CScene::getLegacyLightPositions () const { return m_legacyLightPositions.data (); }
+
+const glm::vec4* CScene::getLegacyLightColors () const { return m_legacyLightColors.data (); }
+
+void CScene::assignLegacyLightSlot (const ScenePointLight* light) {
+    if (m_legacyLightSlots.contains (light)) return;
+    size_t slot = 0;
+    for (; slot < 4; ++slot) {
+        const bool occupied = std::any_of (m_legacyLightSlots.begin (), m_legacyLightSlots.end (),
+            [slot] (const auto& entry) { return entry.second == slot; });
+        if (!occupied) break;
+    }
+    // The native constructor falls back to slot zero when all four are used.
+    m_legacyLightSlots.emplace (light, slot == 4 ? 0 : slot);
+}
+
+void CScene::refreshPointLights () {
+    std::fill (m_pointLightColors.begin (), m_pointLightColors.end (), glm::vec4 (0.0f));
+    std::fill (m_pointLightOrigins.begin (), m_pointLightOrigins.end (), glm::vec4 (0.0f));
+    m_legacyLightPositions.fill (glm::vec3 (0.0f));
+    m_legacyLightColors.fill (glm::vec4 (0.0f, 0.0f, 0.0f, 1.0f));
+    size_t modernSlot = 0;
+    for (const ScenePointLight* lightPointer : m_pointLightObjects) {
+	const ScenePointLight& light = *lightPointer;
+        const auto transform = resolveSceneTransform (light,
+            [this] (int parentId) -> const Object* { return findObjectData (parentId); },
+            [this] (const Object& parent, const std::string& name) {
+                return getPuppetAttachmentTransform (parent.id, name);
+            });
+        const glm::vec3 color = light.color->value->getVec3 ();
+        const float intensity = light.intensity->value->getFloat ();
+        const float radius = light.radius->value->getFloat ();
+        const float exponent = light.exponent->value->getFloat ();
+        const glm::vec3 origin = glm::vec3 (transform.authoredMatrix[3]);
+        if (!std::isfinite (intensity) || !std::isfinite (radius) || !std::isfinite (exponent)
+            || !std::isfinite (color.x) || !std::isfinite (color.y) || !std::isfinite (color.z)
+            || !std::isfinite (origin.x) || !std::isfinite (origin.y) || !std::isfinite (origin.z))
+            continue;
+        // Legacy slots are assigned when the object is created. Removing
+        // another light does not renumber a surviving object's slot.
+        const size_t legacySlot = m_legacyLightSlots.at (lightPointer);
+        if (!light.lightingV1) {
+            m_legacyLightPositions[legacySlot] = origin;
+            if (transform.visible)
+                m_legacyLightColors[legacySlot] = glm::vec4 (color * intensity, radius);
+            else
+                m_legacyLightColors[legacySlot] = glm::vec4 (0.0f, 0.0f, 0.0f, 1.0f);
+        }
+        // LightingV1 uses the separate serialized slot count. The current
+        // point producer compacts visible objects into that array.
+        if (light.lightingV1 && transform.visible && modernSlot < m_pointLightColors.size ()) {
+            m_pointLightColors[modernSlot] = glm::vec4 (color * intensity, radius);
+            m_pointLightOrigins[modernSlot] = glm::vec4 (origin, exponent);
+            ++modernSlot;
+        }
+    }
+}
+
+std::optional<glm::mat4> CScene::getPuppetAttachmentTransform (
+    int parentId, const std::string& name
+) const {
+    const auto* parent = getObject (parentId);
+    if (!parent || !parent->is<Objects::CImage> ()) return std::nullopt;
+    return parent->as<Objects::CImage> ()->puppetAttachmentTransform (name);
+}
+
+CObject* CScene::createScriptLayer (const std::string& configurationJson,
+                                    std::shared_ptr<DynamicModelData> dynamicModel) {
+    if (m_shuttingDown) throw std::runtime_error ("Cannot create a layer during scene shutdown");
+    auto config = Data::JSON::JSON::parse (configurationJson);
+    if (!config.is_object ()) throw std::invalid_argument ("Layer configuration must be an object");
+    // SceneScript can create a plain colored rectangle from size/color/alpha
+    // without naming an image. Native scenes use this for progress bars; the
+    // built-in solid-layer model is the same resource used by authored bars.
+    if (config.contains ("size") && config.contains ("color")
+        && !config.contains ("image") && !config.contains ("text")
+        && !config.contains ("particle") && !config.contains ("sound")
+        && !config.contains ("model") && !config.contains ("light"))
+        config["image"] = "models/util/solidlayer.json";
+    if (m_nextScriptObjectId <= 0) throw std::overflow_error ("SceneScript layer IDs exhausted");
+    while (findObjectData (m_nextScriptObjectId) || m_objects.contains (m_nextScriptObjectId)
+           || m_creatingObjects.contains (m_nextScriptObjectId)
+           || m_rejectedObjectIds.contains (m_nextScriptObjectId)) {
+        if (m_nextScriptObjectId == std::numeric_limits<int>::max ())
+            throw std::overflow_error ("SceneScript layer IDs exhausted");
+        ++m_nextScriptObjectId;
+    }
+    const int id = m_nextScriptObjectId;
+    m_nextScriptObjectId = id == std::numeric_limits<int>::max () ? 0 : id + 1;
+    config["id"] = id;
+    if (!config.contains ("name") || !config["name"].is_string ())
+        config["name"] = "Script Layer " + std::to_string (id);
+    auto model = ObjectParser::parse (config, getScene ().project);
+    if (dynamicModel && model && model->is<SceneModel> ())
+        model->as<SceneModel> ()->dynamic = std::move (dynamicModel);
+    if (!model || (!model->is<Text> () && !model->is<Image> ()
+                   && !model->is<Particle> () && !model->is<Sound> ()
+                   && !model->is<ScenePointLight> () && !model->is<SceneModel> ()))
+        throw std::invalid_argument ("Unsupported SceneScript layer configuration");
+    // Destroy hooks run while their layers are still addressable. A new child
+    // attached to one of those layers would outlive the parent after flush.
+    std::set<int> ancestors;
+    auto parent = model->parent;
+    while (parent && ancestors.insert (*parent).second) {
+        if (m_pendingScriptLayerDestroy.contains (*parent)
+            || m_destroyingScriptLayerIds.contains (*parent))
+            throw std::invalid_argument ("Cannot attach a layer to a pending destroyed parent");
+        const auto* parentData = findObjectData (*parent);
+        parent = parentData ? parentData->parent : std::nullopt;
+    }
+    const auto inserted = m_scriptObjectData.emplace (id, std::move (model));
+    CObject* result = nullptr;
+    try {
+        result = createObject (*inserted.first->second);
+    } catch (...) {
+        m_scriptObjectData.erase (id);
+        throw;
+    }
+    if (!result) {
+        m_scriptObjectData.erase (id);
+        throw std::runtime_error ("SceneScript layer could not be initialized");
+    }
+    if (inserted.first->second->is<ScenePointLight> ()) {
+	auto* light = inserted.first->second->as<ScenePointLight> ();
+	assignLegacyLightSlot (light);
+	m_pointLightObjects.push_back (light);
+    }
+    m_objectsByRenderOrder.push_back (result);
+    return result;
+}
+
+bool CScene::destroyScriptLayer (const CObject* object) {
+    if (m_shuttingDown || !object) return false;
+    const auto found = m_objects.find (object->getId ());
+    if (found == m_objects.end () || found->second != object) return false;
+    m_pendingScriptLayerDestroy.insert (object->getId ());
+    return true;
+}
+
+void CScene::flushDestroyedScriptLayers () {
+    while (!m_pendingScriptLayerDestroy.empty ()) {
+        std::set<int> ids;
+        ids.swap (m_pendingScriptLayerDestroy);
+        // A child cannot keep a dangling parent transform after its parent is
+        // removed. Expand the pending set before invoking destroy callbacks.
+        bool changed = true;
+        while (changed) {
+            changed = false;
+            for (const auto& [id, object] : m_objects) {
+                const auto parent = object->getObject ().parent;
+                if (parent && ids.contains (*parent) && ids.insert (id).second)
+                    changed = true;
+            }
+        }
+        m_destroyingScriptLayerIds = ids;
+        Data::Utils::ScopeGuard destroyingGuard ([this] { m_destroyingScriptLayerIds.clear (); });
+        if (m_hoveredCursorLayerId && ids.contains (*m_hoveredCursorLayerId))
+            m_hoveredCursorLayerId.reset ();
+        if (m_pressedCursorLayerId && ids.contains (*m_pressedCursorLayerId))
+            m_pressedCursorLayerId.reset ();
+        std::vector<CObject*> removed;
+        for (const auto id : ids)
+            if (const auto found = m_objects.find (id); found != m_objects.end ())
+                removed.push_back (found->second);
+        for (auto* object : removed)
+            if (auto* scriptable = dynamic_cast<Scripting::ScriptableObject*> (object))
+                m_scriptEngine->destroyObjectModules (*scriptable);
+        std::erase_if (m_objectsByRenderOrder, [&] (const CObject* object) {
+            return ids.contains (object->getId ());
+        });
+        for (auto* object : removed) {
+            const int id = object->getId ();
+            if (object->getObject ().is<ScenePointLight> ()) {
+		auto* light = object->getObject ().as<ScenePointLight> ();
+		std::erase (m_pointLightObjects, light);
+		m_legacyLightSlots.erase (light);
+	    }
+            m_objects.erase (id);
+            delete object;
+            m_scriptObjectData.erase (id);
+            m_rejectedObjectIds.insert (id);
+        }
+    }
+}
+
+int CScene::getScriptLayerIndex (const CObject* object) const {
+    const auto found = std::find (m_objectsByRenderOrder.begin (), m_objectsByRenderOrder.end (), object);
+    return found == m_objectsByRenderOrder.end () ? -1
+        : static_cast<int> (found - m_objectsByRenderOrder.begin ());
+}
+
+bool CScene::sortScriptLayer (const CObject* object, int index) {
+    const int oldIndex = getScriptLayerIndex (object);
+    if (oldIndex < 0 || index < 0 || index >= static_cast<int> (m_objectsByRenderOrder.size ()))
+        return false;
+    auto* moved = m_objectsByRenderOrder[oldIndex];
+    m_objectsByRenderOrder.erase (m_objectsByRenderOrder.begin () + oldIndex);
+    m_objectsByRenderOrder.insert (m_objectsByRenderOrder.begin () + index, moved);
+    return true;
 }

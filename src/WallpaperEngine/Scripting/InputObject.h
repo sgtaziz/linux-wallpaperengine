@@ -13,6 +13,7 @@ public:
 
     const Render::Wallpapers::CScene& getScene () const { return m_scene; }
     JSValue getInstance () const { return m_instance; }
+    [[nodiscard]] static InputObject* lookup (JSValueConst value);
 
 protected:
     Render::Wallpapers::CScene& m_scene;

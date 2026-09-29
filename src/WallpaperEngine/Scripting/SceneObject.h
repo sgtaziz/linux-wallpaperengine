@@ -12,7 +12,10 @@ public:
     ~SceneObject ();
 
     const Render::Wallpapers::CScene& getScene () const { return m_scene; }
+    Render::Wallpapers::CScene& getMutableScene () { return m_scene; }
     JSValue getInstance () const { return m_instance; }
+    JSClassID getClassId () const { return m_classId; }
+    JSClassID getModelDataClassId () const { return m_modelDataClassId; }
     ScriptEngine& getEngine () const { return m_engine; }
 
 private:
@@ -20,6 +23,7 @@ private:
     ScriptEngine& m_engine;
 
     JSClassID m_classId;
+    JSClassID m_modelDataClassId;
     JSClassDef m_definition;
     JSValue m_instance;
 };

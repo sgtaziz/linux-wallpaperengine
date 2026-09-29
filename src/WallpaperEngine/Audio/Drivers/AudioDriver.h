@@ -47,6 +47,8 @@ namespace Audio {
 	     * @param streamId The stream to stop playing
 	     */
 	    virtual void removeStream (int streamId) = 0;
+	    /** The decoder has ended and SDL has consumed its last buffered samples. */
+	    [[nodiscard]] virtual bool isStreamFinished (int streamId) const = 0;
 
 	    /**
 	     * Updates status of the different audio settings

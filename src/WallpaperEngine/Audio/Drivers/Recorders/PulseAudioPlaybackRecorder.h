@@ -1,10 +1,10 @@
 #pragma once
 
 #include "PlaybackRecorder.h"
-#include "kiss_fftr.h"
+#include "StereoSpectrum.h"
 #include <pulse/pulseaudio.h>
-
-#define WAVE_BUFFER_SIZE 1024
+#include <chrono>
+#include <string>
 
 namespace WallpaperEngine::Audio::Drivers::Recorders {
 class PlaybackRecorder;
@@ -15,12 +15,14 @@ public:
      * Struct that contains all the required data for the PulseAudio callbacks
      */
     struct PulseAudioData {
-	kiss_fftr_cfg kisscfg;
-	uint8_t* audioBuffer;
-	uint8_t* audioBufferTmp;
-	size_t currentWritePointer;
-	bool fullFrameReady;
-	pa_stream* captureStream;
+	StereoSpectrum spectrum;
+	pa_stream* captureStream = nullptr;
+	std::string monitorName;
+	bool refreshRequested = true;
+	bool queryPending = false;
+	bool sawSinkInfo = false;
+	bool clearPublished = false;
+	std::chrono::steady_clock::time_point retryAfter {};
     };
 
     PulseAudioPlaybackRecorder ();
@@ -34,10 +36,7 @@ private:
     pa_context* m_context;
     PulseAudioData m_captureData;
 
-    float m_audioFFTbuffer[WAVE_BUFFER_SIZE] = { 0.0f };
-    kiss_fft_cpx m_FFTinfo[WAVE_BUFFER_SIZE / 2 + 1] = { { .r = 0.0f, .i = 0.0f } };
-    float m_FFTdestination64[64] = { 0 };
-    float m_FFTdestination32[32] = { 0 };
-    float m_FFTdestination16[16] = { 0 };
+    StereoSpectrum::Bands m_destination;
+    StereoSpectrum::Bands m_published;
 };
 } // namespace WallpaperEngine::Audio::Drivers::Recorders

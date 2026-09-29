@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <map>
 #include <optional>
 #include <string>
@@ -9,6 +10,7 @@
 #include <glm/glm.hpp>
 
 #include "DynamicValue.h"
+#include "DynamicModelData.h"
 #include "Effect.h"
 #include "Material.h"
 #include "Model.h"
@@ -20,11 +22,24 @@
 namespace WallpaperEngine::Data::Model {
 using namespace WallpaperEngine::Data::Utils;
 
+struct ObjectDependency {
+    int id;
+    int index;
+    std::string type;
+    std::string mask;
+};
+
 struct ObjectData {
     int id;
     std::string name;
     std::vector<int> dependencies;
+    /** Typed links used by emitter-image/collision integrations; order IDs remain above. */
+    std::vector<ObjectDependency> typedDependencies;
     std::optional<int> parent;
+    /** Named attachment on the parent puppet, when authored. */
+    std::optional<std::string> attachment;
+    /** Authored hit-test participation for SceneScript cursor events. */
+    bool solid = false;
     /** The point of origin of the object */
     UserSettingUniquePtr origin;
     /** Transform fields for generic scene/group objects. Typed objects keep their own transform fields. */
@@ -59,7 +74,7 @@ struct ImageEffectPassOverride {
     ComboMap combos;
     ShaderConstantMap constants;
     TextureMap textures;
-    TextureMap usertextures;
+    UserTextureMap usertextures;
     std::optional<std::string> shaderOverride; // Overrides MaterialPass::shader when set
 };
 
@@ -93,6 +108,10 @@ struct ImageAnimationLayer {
     UserSettingUniquePtr visible;
     UserSettingUniquePtr blend;
     UserSettingUniquePtr animation;
+    bool additive = false;
+    bool blendIn = false;
+    bool blendOut = false;
+    float blendTime = 0.5f;
 };
 
 struct ImageData {
@@ -106,11 +125,13 @@ struct ImageData {
     UserSettingUniquePtr alpha;
     /** The color of the image */
     UserSettingUniquePtr color;
+    /** Native child-composition blend setting; may be scripted or user-bound. */
+    UserSettingUniquePtr copyBackground;
     // TODO: WRITE A COUPLE OF ENUMS FOR THIS
     /** The alignment of the image */
     std::string alignment;
-    /** The size of the image in pixels */
-    glm::vec2 size;
+    /** Image dimensions, including live user and script updates. */
+    UserSettingUniquePtr size;
     /** Parallax depth used for parallax scrolling */
     UserSettingUniquePtr parallaxDepth;
     /** The color blending mode for this image */
@@ -132,11 +153,62 @@ public:
     ~Image () override = default;
 };
 
+/** A scene model references an MDLV mesh resource, unlike an image model JSON. */
+struct SceneModelData {
+    std::string path;
+    int skin = 0;
+    std::shared_ptr<DynamicModelData> dynamic;
+};
+
+class SceneModel : public Object, public SceneModelData {
+public:
+    explicit SceneModel (ObjectData data, SceneModelData modelData) noexcept :
+        Object (std::move (data)), SceneModelData (std::move (modelData)) { };
+    ~SceneModel () override = default;
+};
+
+/** Camera scene object; its pose and FOV can override the root scene camera. */
+struct SceneCameraData {
+    std::string mode;
+    std::string path;
+    UserSettingUniquePtr fov;
+    UserSettingUniquePtr zoom;
+};
+
+class SceneCamera : public Object, public SceneCameraData {
+public:
+    explicit SceneCamera (ObjectData data, SceneCameraData cameraData) noexcept :
+        Object (std::move (data)), SceneCameraData (std::move (cameraData)) { };
+    ~SceneCamera () override = default;
+};
+
+/** The bounded scene-light route currently supports unshadowed point lights. */
+struct ScenePointLightData {
+    bool lightingV1 = false;
+    UserSettingUniquePtr color;
+    UserSettingUniquePtr intensity;
+    UserSettingUniquePtr radius;
+    UserSettingUniquePtr exponent;
+};
+
+class ScenePointLight : public Object, public ScenePointLightData {
+public:
+    explicit ScenePointLight (ObjectData data, ScenePointLightData lightData) noexcept :
+        Object (std::move (data)), ScenePointLightData (std::move (lightData)) { };
+    ~ScenePointLight () override = default;
+};
+
 struct SoundData {
-    /** Playback mode, loop, */
-    // TODO: WRITE AN ENUM FOR THIS
+    /** Native modes are pool, random, single; loop is a legacy Linux alias. */
     std::optional<std::string> playbackmode;
     std::vector<std::string> sounds;
+    UserSettingUniquePtr volume;
+    float minTime = 0.0f;
+    float maxTime = 0.0f;
+    bool startSilent = false;
+    bool spatialization = false;
+    float attenuation = 1.0f;
+    float minDistance = 0.0f;
 };
 
 class Sound : public Object, public SoundData {
@@ -152,7 +224,9 @@ public:
 struct ParticleControlPoint {
     int id;
     uint32_t flags;
+    int parentControlPoint;
     glm::vec3 offset;
+    glm::vec3 angles;
     bool lockToPointer;
 };
 
@@ -165,7 +239,10 @@ struct ParticleEmitter {
     glm::vec3 directions;
     glm::vec3 distanceMin;
     glm::vec3 distanceMax;
+    bool distanceMaxAuthored;
     glm::vec3 origin;
+    glm::vec3 offsetMin;
+    glm::vec3 offsetMax;
     glm::ivec3 sign;
     uint32_t instantaneous;
     float speedMin;
@@ -177,7 +254,7 @@ struct ParticleEmitter {
     float delay;
     float duration;
     glm::vec2 audioProcessingBounds;
-    int audioProcessingExponent;
+    float audioProcessingExponent;
     int audioProcessingFrequencyStart;
     int audioProcessingFrequencyEnd;
     int audioProcessingMode;
@@ -185,6 +262,7 @@ struct ParticleEmitter {
     float maxPeriodicDelay;
     float minPeriodicDuration;
     float maxPeriodicDuration;
+    uint32_t maxToEmitPerPeriod;
 };
 
 /**
@@ -214,10 +292,11 @@ public:
 
 class AlphaRandomInitializer : public ParticleInitializerBase {
 public:
-    AlphaRandomInitializer (UserSettingUniquePtr min, UserSettingUniquePtr max) :
-	min (std::move (min)), max (std::move (max)) { }
+    AlphaRandomInitializer (UserSettingUniquePtr min, UserSettingUniquePtr max, UserSettingUniquePtr exponent) :
+	min (std::move (min)), max (std::move (max)), exponent (std::move (exponent)) { }
     UserSettingUniquePtr min;
     UserSettingUniquePtr max;
+    UserSettingUniquePtr exponent;
 };
 
 class LifetimeRandomInitializer : public ParticleInitializerBase {
@@ -259,11 +338,20 @@ public:
     TurbulentVelocityRandomInitializer (
 	UserSettingUniquePtr speedMin, UserSettingUniquePtr speedMax, UserSettingUniquePtr scale,
 	UserSettingUniquePtr offset, UserSettingUniquePtr forward, UserSettingUniquePtr timeScale,
-	UserSettingUniquePtr phaseMin, UserSettingUniquePtr phaseMax, UserSettingUniquePtr right
+	UserSettingUniquePtr phaseMin, UserSettingUniquePtr phaseMax, UserSettingUniquePtr right,
+	UserSettingUniquePtr audioProcessingMode, UserSettingUniquePtr audioProcessingBounds,
+	UserSettingUniquePtr audioProcessingExponent, UserSettingUniquePtr audioProcessingFrequencyStart,
+	UserSettingUniquePtr audioProcessingFrequencyEnd, bool speedMinDefault, bool speedMaxDefault
     ) :
 	speedMin (std::move (speedMin)), speedMax (std::move (speedMax)), scale (std::move (scale)),
 	offset (std::move (offset)), forward (std::move (forward)), timeScale (std::move (timeScale)),
-	phaseMin (std::move (phaseMin)), phaseMax (std::move (phaseMax)), right (std::move (right)) { }
+	phaseMin (std::move (phaseMin)), phaseMax (std::move (phaseMax)), right (std::move (right)),
+	audioProcessingMode (std::move (audioProcessingMode)),
+	audioProcessingBounds (std::move (audioProcessingBounds)),
+	audioProcessingExponent (std::move (audioProcessingExponent)),
+	audioProcessingFrequencyStart (std::move (audioProcessingFrequencyStart)),
+	audioProcessingFrequencyEnd (std::move (audioProcessingFrequencyEnd)),
+	speedMinDefault (speedMinDefault), speedMaxDefault (speedMaxDefault) { }
     UserSettingUniquePtr speedMin;
     UserSettingUniquePtr speedMax;
     UserSettingUniquePtr scale;
@@ -273,20 +361,33 @@ public:
     UserSettingUniquePtr phaseMin;
     UserSettingUniquePtr phaseMax;
     UserSettingUniquePtr right;
+    UserSettingUniquePtr audioProcessingMode;
+    UserSettingUniquePtr audioProcessingBounds;
+    UserSettingUniquePtr audioProcessingExponent;
+    UserSettingUniquePtr audioProcessingFrequencyStart;
+    UserSettingUniquePtr audioProcessingFrequencyEnd;
+    bool speedMinDefault;
+    bool speedMaxDefault;
 };
 
 class MapSequenceAroundControlPointInitializer : public ParticleInitializerBase {
 public:
     MapSequenceAroundControlPointInitializer (
-	UserSettingUniquePtr controlPoint, UserSettingUniquePtr count, UserSettingUniquePtr speedMin,
-	UserSettingUniquePtr speedMax
+        UserSettingUniquePtr controlPoint, UserSettingUniquePtr count, UserSettingUniquePtr speedMin,
+        UserSettingUniquePtr speedMax, glm::vec2 bounds, glm::vec3 axis,
+        std::string limitBehavior, uint32_t flags
     ) :
-	controlPoint (std::move (controlPoint)), count (std::move (count)), speedMin (std::move (speedMin)),
-	speedMax (std::move (speedMax)) { }
+        controlPoint (std::move (controlPoint)), count (std::move (count)), speedMin (std::move (speedMin)),
+        speedMax (std::move (speedMax)), bounds (bounds), axis (axis),
+        limitBehavior (std::move (limitBehavior)), flags (flags) { }
     UserSettingUniquePtr controlPoint;
     UserSettingUniquePtr count;
     UserSettingUniquePtr speedMin;
     UserSettingUniquePtr speedMax;
+    glm::vec2 bounds;
+    glm::vec3 axis;
+    std::string limitBehavior;
+    uint32_t flags;
 };
 
 using ParticleInitializerUniquePtr = std::unique_ptr<ParticleInitializerBase>;
@@ -296,6 +397,16 @@ using ParticleInitializerUniquePtr = std::unique_ptr<ParticleInitializerBase>;
  */
 class ParticleOperatorBase : public TypeCaster {
 public:
+    struct BlendEnvelope {
+	UserSettingUniquePtr inStart;
+	UserSettingUniquePtr inEnd;
+	UserSettingUniquePtr outStart;
+	UserSettingUniquePtr outEnd;
+    };
+
+    // Native 2.8.42 packs this common 16-float envelope into eligible
+    // operator records. An absent envelope selects the ordinary opcode.
+    std::optional<BlendEnvelope> blendEnvelope;
     virtual ~ParticleOperatorBase () = default;
 };
 
@@ -313,6 +424,97 @@ public:
 	drag (std::move (drag)), force (std::move (force)) { }
     UserSettingUniquePtr drag;
     UserSettingUniquePtr force;
+};
+
+class CapVelocityOperator : public ParticleOperatorBase {
+public:
+    CapVelocityOperator (UserSettingUniquePtr maxSpeed, bool useSceneDefault) :
+	maxSpeed (std::move (maxSpeed)), useSceneDefault (useSceneDefault) { }
+    UserSettingUniquePtr maxSpeed;
+    bool useSceneDefault;
+};
+
+// Native remapvalue opcode 0x13 has many selector/transform branches. This
+// typed record represents scalar lifetimefraction→size/opacity multiply;
+// vector selectors and transform functions still require separate paths.
+class ScalarRemapValueOperator : public ParticleOperatorBase {
+public:
+    enum class Input { LifetimeFraction, MaxLifetime, Size, Opacity, Speed,
+                       Rotation, AngularSpeed, DistanceToControlPoint,
+                       PositionBetweenTwoControlPoints,
+                       ControlPoint, DeltaToControlPoint, DirectionToControlPoint,
+                       Color, Position, Velocity };
+    enum class InputComponent { All, X, Y, Z, Sum, Average, Max, Min };
+    enum class Output { Size, Opacity, Speed };
+    enum class Operation { Set, Multiply, Add, Subtract };
+    enum class Transform { Identity, Sine, Square, Saw, Triangle, SimplexNoise, FBMNoise };
+    ScalarRemapValueOperator (Input input, InputComponent inputComponent,
+        Output output, Operation operation,
+        int flags, float inputMin,
+        float inputMax, float outputMin, float outputMax,
+        Transform transform = Transform::Identity, float transformScale = 2.0f,
+        int inputControlPoint0 = 0, int transformOctaves = 3,
+        int inputControlPoint1 = 1) :
+        input (input), inputComponent (inputComponent), output (output),
+        operation (operation), flags (flags),
+        inputMin (inputMin), inputMax (inputMax),
+        outputMin (outputMin), outputMax (outputMax),
+        transform (transform), transformScale (transformScale),
+        inputControlPoint0 (inputControlPoint0), transformOctaves (transformOctaves),
+        inputControlPoint1 (inputControlPoint1) { }
+    Input input;
+    InputComponent inputComponent;
+    Output output;
+    Operation operation;
+    int flags;
+    float inputMin;
+    float inputMax;
+    float outputMin;
+    float outputMax;
+    Transform transform;
+    float transformScale;
+    int inputControlPoint0;
+    int transformOctaves;
+    int inputControlPoint1;
+};
+
+class VectorRemapValueOperator : public ParticleOperatorBase {
+public:
+    using Input = ScalarRemapValueOperator::Input;
+    using InputComponent = ScalarRemapValueOperator::InputComponent;
+    using Operation = ScalarRemapValueOperator::Operation;
+    using Transform = ScalarRemapValueOperator::Transform;
+    enum class Output { Color, Position, Velocity };
+    enum class OutputComponent { All, X, Y, Z };
+
+    VectorRemapValueOperator (Input input, InputComponent inputComponent,
+        Output output, OutputComponent outputComponent, Operation operation,
+        int flags, glm::vec3 inputMin, glm::vec3 inputMax,
+        glm::vec3 outputMin, glm::vec3 outputMax,
+        Transform transform = Transform::Identity, float transformScale = 2.0f,
+        int inputControlPoint0 = 0, int transformOctaves = 3,
+        int inputControlPoint1 = 1) :
+        input (input), inputComponent (inputComponent), output (output),
+        outputComponent (outputComponent), operation (operation), flags (flags),
+        inputMin (inputMin), inputMax (inputMax), outputMin (outputMin),
+        outputMax (outputMax), transform (transform), transformScale (transformScale),
+        inputControlPoint0 (inputControlPoint0), transformOctaves (transformOctaves),
+        inputControlPoint1 (inputControlPoint1) { }
+    Input input;
+    InputComponent inputComponent;
+    Output output;
+    OutputComponent outputComponent;
+    Operation operation;
+    int flags;
+    glm::vec3 inputMin;
+    glm::vec3 inputMax;
+    glm::vec3 outputMin;
+    glm::vec3 outputMax;
+    Transform transform;
+    float transformScale;
+    int inputControlPoint0;
+    int transformOctaves;
+    int inputControlPoint1;
 };
 
 class AlphaFadeOperator : public ParticleOperatorBase {
@@ -397,20 +599,35 @@ public:
 
 class VortexOperator : public ParticleOperatorBase {
 public:
+    enum class Variant { Vortex, VortexV2 };
+    struct SceneDefaults {
+	bool distanceInner;
+	bool distanceOuter;
+	bool speedInner;
+    };
     VortexOperator (
-	int controlPoint, int flags, UserSettingUniquePtr axis, UserSettingUniquePtr offset,
+	Variant variant, SceneDefaults sceneDefaults, int controlPoint, int flags,
+	UserSettingUniquePtr axis, UserSettingUniquePtr offset,
 	UserSettingUniquePtr distanceInner, UserSettingUniquePtr distanceOuter, UserSettingUniquePtr speedInner,
 	UserSettingUniquePtr speedOuter, UserSettingUniquePtr centerForce, UserSettingUniquePtr ringRadius,
 	UserSettingUniquePtr ringWidth, UserSettingUniquePtr ringPullDistance, UserSettingUniquePtr ringPullForce,
-	UserSettingUniquePtr audioProcessingMode, UserSettingUniquePtr audioProcessingBounds
+	UserSettingUniquePtr audioProcessingMode, UserSettingUniquePtr audioProcessingBounds,
+	UserSettingUniquePtr audioProcessingExponent, UserSettingUniquePtr audioProcessingFrequencyStart,
+	UserSettingUniquePtr audioProcessingFrequencyEnd
     ) :
-	controlPoint (controlPoint), flags (flags), axis (std::move (axis)), offset (std::move (offset)),
+	variant (variant), sceneDefaults (sceneDefaults), controlPoint (controlPoint), flags (flags),
+	axis (std::move (axis)), offset (std::move (offset)),
 	distanceInner (std::move (distanceInner)), distanceOuter (std::move (distanceOuter)),
 	speedInner (std::move (speedInner)), speedOuter (std::move (speedOuter)), centerForce (std::move (centerForce)),
 	ringRadius (std::move (ringRadius)), ringWidth (std::move (ringWidth)),
 	ringPullDistance (std::move (ringPullDistance)), ringPullForce (std::move (ringPullForce)),
 	audioProcessingMode (std::move (audioProcessingMode)),
-	audioProcessingBounds (std::move (audioProcessingBounds)) { }
+	audioProcessingBounds (std::move (audioProcessingBounds)),
+	audioProcessingExponent (std::move (audioProcessingExponent)),
+	audioProcessingFrequencyStart (std::move (audioProcessingFrequencyStart)),
+	audioProcessingFrequencyEnd (std::move (audioProcessingFrequencyEnd)) { }
+    Variant variant;
+    SceneDefaults sceneDefaults;
     int controlPoint;
     int flags; // 1 = infinite axis, 2 = maintain distance to center, 4 = ring shape
     UserSettingUniquePtr axis;
@@ -426,19 +643,24 @@ public:
     UserSettingUniquePtr ringPullForce; // Ring mode: strength of ring attraction
     UserSettingUniquePtr audioProcessingMode;
     UserSettingUniquePtr audioProcessingBounds;
+    UserSettingUniquePtr audioProcessingExponent;
+    UserSettingUniquePtr audioProcessingFrequencyStart;
+    UserSettingUniquePtr audioProcessingFrequencyEnd;
 };
 
 class ControlPointAttractOperator : public ParticleOperatorBase {
 public:
     ControlPointAttractOperator (
-	int controlPoint, UserSettingUniquePtr origin, UserSettingUniquePtr scale, UserSettingUniquePtr threshold
+	int controlPoint, UserSettingUniquePtr origin, UserSettingUniquePtr scale, UserSettingUniquePtr threshold,
+	uint32_t flags
     ) :
 	controlPoint (controlPoint), origin (std::move (origin)), scale (std::move (scale)),
-	threshold (std::move (threshold)) { }
+	threshold (std::move (threshold)), flags (flags) { }
     int controlPoint;
     UserSettingUniquePtr origin;
     UserSettingUniquePtr scale;
     UserSettingUniquePtr threshold;
+    uint32_t flags;
 };
 
 class OscillateAlphaOperator : public ParticleOperatorBase {
@@ -501,6 +723,9 @@ using ParticleOperatorUniquePtr = std::unique_ptr<ParticleOperatorBase>;
  */
 struct ParticleRenderer {
     std::string name;
+    std::string orientation; // screen, upright, fixed
+    glm::vec3 axis; // authored axis; native renderer factory normalizes it
+    uint8_t flags;
     float length;
     float maxLength;
     float minLength;
@@ -519,6 +744,7 @@ struct ParticleRenderer {
 struct ParticleChild {
     std::string type;
     std::string name;
+    uint32_t flags;
     int maxCount;
     int controlPointStartIndex;
     float probability;
@@ -534,6 +760,7 @@ struct ParticleChild {
 struct ParticleInstanceOverride {
     UserSettingUniquePtr enabled;
     UserSettingUniquePtr alpha;
+    UserSettingUniquePtr brightness;
     UserSettingUniquePtr size;
     UserSettingUniquePtr lifetime;
     UserSettingUniquePtr rate;
@@ -541,6 +768,8 @@ struct ParticleInstanceOverride {
     UserSettingUniquePtr count;
     UserSettingUniquePtr color; // Replaces particle color
     UserSettingUniquePtr colorn; // Multiplies particle color
+    std::array<UserSettingUniquePtr, 8> controlPoints;
+    std::array<UserSettingUniquePtr, 8> controlPointAngles;
 };
 
 struct ParticleData {
@@ -559,8 +788,13 @@ struct ParticleData {
     std::string animationMode;
     float sequenceMultiplier;
     uint32_t maxCount;
-    uint32_t startTime;
+    /** Authored pre-simulation duration in seconds, including fractional values. */
+    float startTime;
     uint32_t flags;
+    /** Native preset color comparison/hascolor gate for shared instance RGB. */
+    glm::vec3 presetColorN { 1.0f };
+    bool presetHasColor { false };
+    bool presetTintCompiled { true };
 
     /** Material for rendering */
     ModelUniquePtr material;
@@ -596,6 +830,24 @@ struct TextData {
     std::string font;
     /** Font size in points, optionally bound to a user setting or script */
     UserSettingUniquePtr pointSize;
+    /** Additional glyph advance and row spacing in scene-text pixel units */
+    UserSettingUniquePtr spacing;
+    /** Native gate for maxRows; absent/false leaves row count unlimited */
+    UserSettingUniquePtr limitRows;
+    /** Maximum laid-out row count when limitRows is enabled; zero disables it */
+    UserSettingUniquePtr maxRows;
+    /** Native gate for maxWidth; absent/false leaves width unlimited */
+    UserSettingUniquePtr limitWidth;
+    /** Positive width for wrapping when limitWidth is enabled */
+    UserSettingUniquePtr maxWidth;
+    /** Append an ellipsis when maxRows discards later rows */
+    UserSettingUniquePtr limitUseEllipsis;
+    /** Draw the native text-background rectangle behind the glyphs */
+    UserSettingUniquePtr opaqueBackground;
+    /** Authored RGB for the opaque text background */
+    UserSettingUniquePtr backgroundColor;
+    /** Material effects applied to the text target before scene composition */
+    std::vector<ImageEffectUniquePtr> effects;
     /** Bounding box size */
     glm::vec2 size;
     /** Scale (x, y, z) */
@@ -606,13 +858,14 @@ struct TextData {
     UserSettingUniquePtr alpha;
     /** Whether the text is visible */
     UserSettingUniquePtr visible;
+    /** Authored per-axis camera parallax depth */
+    UserSettingUniquePtr parallaxDepth;
     /** Horizontal alignment: "left", "center", "right" */
     std::string alignment;
     /** Vertical alignment: "top", "center", "bottom" */
     std::string verticalalign;
-    /** Padding inside the bounding box */
-    int padding;
-    // TODO: PARSE LIMITS TOO!
+    /** Horizontal and vertical effect/background target padding */
+    UserSettingUniquePtr padding;
 };
 
 class Text : public Object, public TextData {

@@ -7,8 +7,9 @@
 using namespace WallpaperEngine::Data::Parsers;
 using namespace WallpaperEngine::Data::Builders;
 
-UserSettingUniquePtr UserSettingParser::parse (const json& data, const Properties& properties, bool expectColor) {
-    auto value = DynamicValueParser::parse (data, properties, expectColor);
+UserSettingUniquePtr UserSettingParser::parse (const json& data, const Properties& properties,
+                                              bool expectColor, bool expectString) {
+    auto value = DynamicValueParser::parse (data, properties, expectColor, expectString);
     PropertySharedPtr property;
     std::optional<ConditionInfo> condition = std::nullopt;
 

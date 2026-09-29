@@ -1,5 +1,6 @@
 #include <cmath>
 #include <cstring>
+#include <filesystem>
 
 #include <lz4.h>
 #include <nlohmann/json.hpp>
@@ -19,6 +20,8 @@ TextureUniquePtr TextureParser::parse (const BinaryReader& file) {
 
     for (uint32_t image = 0; image < result->imageCount; image++) {
 	const uint32_t mipmapCount = file.nextUInt32 ();
+	if (mipmapCount == 0)
+	    sLog.exception ("Texture image ", image, " has no mipmaps");
 	MipmapList mipmaps;
 
 	for (uint32_t mipmap = 0; mipmap < mipmapCount; mipmap++) {
@@ -55,6 +58,8 @@ MipmapSharedPtr TextureParser::parseMipmap (const BinaryReader& file, const Text
 
     result->width = file.nextUInt32 ();
     result->height = file.nextUInt32 ();
+    if (result->width == 0 || result->height == 0)
+	sLog.exception ("Texture mipmap has zero dimensions");
 
     if (header.containerVersion == ContainerVersion_TEXB0004 || header.containerVersion == ContainerVersion_TEXB0003
 	|| header.containerVersion == ContainerVersion_TEXB0002) {
@@ -63,6 +68,12 @@ MipmapSharedPtr TextureParser::parseMipmap (const BinaryReader& file, const Text
     }
 
     result->compressedSize = file.nextInt ();
+
+    if (result->compression != 0 && result->compression != 1)
+	sLog.exception ("Unsupported texture mipmap compression: ", result->compression);
+    if (result->compressedSize <= 0 ||
+	(result->compression == 1 && result->uncompressedSize <= 0))
+	sLog.exception ("Texture mipmap has invalid byte lengths");
 
     if (result->compression == 0) {
 	// this might be better named as mipmap_bytes_size instead of compressedSize
@@ -82,8 +93,9 @@ MipmapSharedPtr TextureParser::parseMipmap (const BinaryReader& file, const Text
 	    result->uncompressedSize
 	);
 
-	if (bytes < 0) {
-	    sLog.exception ("Cannot decompress texture data, LZ4_decompress_safe returned an error");
+	if (bytes != result->uncompressedSize) {
+	    sLog.exception ("Cannot decompress texture data to its declared size: got ", bytes,
+	                    ", expected ", result->uncompressedSize);
 	}
     } else {
 	file.next (result->uncompressedData.get (), result->uncompressedSize);
@@ -153,6 +165,53 @@ TextureMap TextureParser::parseTextureMap (const JSON& it) {
     return result;
 }
 
+UserTextureMap TextureParser::parseUserTextureMap (const JSON& it) {
+    if (!it.is_array ()) {
+	return {};
+    }
+
+    UserTextureMap result = {};
+    int textureIndex = -1;
+    for (const auto& cur : it) {
+	textureIndex++;
+	if (cur.is_null ()) {
+	    continue;
+	}
+
+	UserTextureSelector selector;
+	if (cur.is_string ()) {
+	    selector.name = cur.get<std::string> ();
+	} else if (cur.is_object ()) {
+	    const auto nameIt = cur.find ("name");
+	    if (nameIt == cur.end () || !nameIt->is_string ()) {
+		continue;
+	    }
+	    selector.name = nameIt->get<std::string> ();
+
+	    const auto typeIt = cur.find ("type");
+	    if (typeIt != cur.end () && typeIt->is_string ()) {
+		const auto type = typeIt->get<std::string> ();
+		if (type == "system") {
+		    selector.source = UserTextureSource::System;
+		} else if (type == "usershortcut") {
+		    selector.source = UserTextureSource::UserShortcut;
+		}
+	    }
+
+	    const auto keepAspectIt = cur.find ("keepaspect");
+	    if (keepAspectIt != cur.end () && keepAspectIt->is_boolean ()) {
+		selector.keepAspect = keepAspectIt->get<bool> ();
+	    }
+	} else {
+	    continue;
+	}
+
+	result.emplace (textureIndex, std::move (selector));
+    }
+
+    return result;
+}
+
 TextureFormat TextureParser::parseTextureFormat (uint32_t value) {
     switch (value) {
 	case TextureFormat_UNKNOWN:
@@ -209,6 +268,8 @@ void TextureParser::parseContainer (Texture& header, const BinaryReader& file) {
     file.next (magic, 9);
 
     header.imageCount = file.nextUInt32 ();
+    if (header.imageCount == 0)
+	sLog.exception ("Texture contains no images");
 
     if (strncmp (magic, "TEXB0004", 9) == 0) {
 	header.containerVersion = ContainerVersion_TEXB0004;
@@ -252,6 +313,8 @@ void TextureParser::parseAnimations (Texture& header, const BinaryReader& file) 
     }
 
     uint32_t frameCount = file.nextUInt32 ();
+    if (frameCount == 0)
+	sLog.exception ("Animated texture has no frames");
 
     if (header.animatedVersion == AnimatedVersion_TEXS0003) {
 	header.gifWidth = file.nextUInt32 ();
@@ -259,11 +322,16 @@ void TextureParser::parseAnimations (Texture& header, const BinaryReader& file) 
     }
 
     while (frameCount-- > 0) {
-	if (header.animatedVersion == AnimatedVersion_TEXS0001) {
-	    header.frames.push_back (parseFrameV1 (file));
-	} else {
-	    header.frames.push_back (parseFrame (file));
-	}
+	auto frame = header.animatedVersion == AnimatedVersion_TEXS0001
+	    ? parseFrameV1 (file) : parseFrame (file);
+	// Shipped particle atlases can carry zero per-frame durations and select
+	// their tiles by particle lifetime instead of a texture-wide timeline.
+	// Native TEXS loading retains these records; runtime timeline consumers
+	// separately decline a zero-duration sequence.
+	if (frame->frameNumber >= header.imageCount ||
+	    !std::isfinite (frame->frametime) || frame->frametime < 0.0f)
+	    sLog.exception ("Animated texture has invalid frame page or duration");
+	header.frames.push_back (std::move (frame));
     }
 
     // ensure gif width and height is right for TEXS0001, TEXS0002
@@ -375,9 +443,21 @@ TextureUniquePtr TextureParser::parse (
 void TextureParser::parseSpritesheetMetadata (
     Texture& header, const std::string& filename, std::function<std::string (const std::string&)> metadataLoader
 ) {
+    std::string texJsonContent;
     try {
-	std::string texJsonContent = metadataLoader (filename + ".tex-json");
-	nlohmann::json texJson = nlohmann::json::parse (texJsonContent);
+	texJsonContent = metadataLoader (filename + ".tex-json");
+    } catch (const std::filesystem::filesystem_error& e) {
+	if (e.code () != std::errc::no_such_file_or_directory) {
+	    sLog.error ("Cannot load spritesheet metadata ", filename, ".tex-json: ", e.what ());
+	}
+	return;
+    } catch (const std::exception& e) {
+	sLog.error ("Cannot load spritesheet metadata ", filename, ".tex-json: ", e.what ());
+	return;
+    }
+    try {
+	auto texJson = WallpaperEngine::Data::JSON::parseAuthoringJson (
+	    texJsonContent, filename + ".tex-json");
 
 	// Check for spritesheet sequences
 	if (texJson.contains ("spritesheetsequences") && texJson["spritesheetsequences"].is_array ()) {
@@ -398,7 +478,7 @@ void TextureParser::parseSpritesheetMetadata (
 		}
 	    }
 	}
-    } catch (const std::exception&) {
-	// .tex-json file is optional, only used for spritesheet data
+	} catch (const std::exception& e) {
+	sLog.error ("Cannot parse spritesheet metadata ", filename, ".tex-json: ", e.what ());
     }
 }

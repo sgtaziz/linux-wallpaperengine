@@ -5,10 +5,12 @@
 #include "WallpaperEngine/Logging/Log.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <optional>
 #include <sstream>
 #include <stdexcept>
@@ -493,6 +495,14 @@ void ApplicationContext::loadSettingsFromArgv () {
 	.default_value (30)
 	.store_into (this->settings.render.maximumFPS);
 
+    performanceGroup.add_argument ("--postprocessing")
+	.help ("Postprocessing quality: normal preserves the standard 8-bit path; ultra enables HDR when the scene authors both bloom and hdr")
+	.choices ("normal", "ultra")
+	.default_value (std::string ("normal"))
+	.action ([this] (const std::string& value) -> void {
+	    this->settings.render.postprocessing = value == "ultra" ? POSTPROCESSING_ULTRA : POSTPROCESSING_NORMAL;
+	});
+
     performanceGroup.add_argument ("--no-fullscreen-pause")
 	.help ("Prevents the background pausing when an app is fullscreen")
 	.flag ()
@@ -604,7 +614,7 @@ void ApplicationContext::loadSettingsFromArgv () {
     debuggingGroup.add_argument ("--render-debug")
 	.help (
 	    "Scene render debug mode: base-only, no-solid-final, pass-log, object=<id>, skip-object=<id>, or "
-	    "skip-effect=<id>. Can be repeated."
+	    "skip-effect=<id>, particle-seed=<uint32>, particle-step=<seconds>, or hdr-peek. Can be repeated."
 	)
 	.action ([this] (const std::string& value) -> void {
 	    const auto parseDebugId = [&value] (const std::string& prefix) -> std::optional<int> {
@@ -624,6 +634,30 @@ void ApplicationContext::loadSettingsFromArgv () {
 		this->settings.render.debug.noSolidFinal = true;
 	    } else if (value == "pass-log") {
 		this->settings.render.debug.passLog = true;
+	    } else if (value == "hdr-peek") {
+		this->settings.render.debug.hdrPeek = true;
+	    } else if (value.rfind ("particle-seed=", 0) == 0) {
+		try {
+		    const auto raw = value.substr (14);
+		    size_t used = 0;
+		    const auto seed = std::stoull (raw, &used, 10);
+		    if (used != raw.size () || seed > std::numeric_limits<uint32_t>::max ())
+			sLog.exception ("Invalid particle seed: ", value);
+		    this->settings.render.debug.particleSeed = static_cast<uint32_t> (seed);
+		} catch (const std::exception&) {
+		    sLog.exception ("Invalid particle seed: ", value);
+		}
+	    } else if (value.rfind ("particle-step=", 0) == 0) {
+		try {
+		    const auto raw = value.substr (14);
+		    size_t used = 0;
+		    const float step = std::stof (raw, &used);
+		    if (used != raw.size () || !std::isfinite (step) || step <= 0.0f || step > 0.25f)
+			sLog.exception ("Invalid particle step: ", value);
+		    this->settings.render.debug.particleStep = step;
+		} catch (const std::exception&) {
+		    sLog.exception ("Invalid particle step: ", value);
+		}
 	    } else if (value.rfind ("object=", 0) == 0) {
 		this->settings.render.debug.objectFilter = parseDebugId ("object=");
 	    } else if (value.rfind ("skip-object=", 0) == 0) {

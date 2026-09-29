@@ -1,6 +1,7 @@
 #pragma once
 
 #include "MediaSource.h"
+#include "MediaArtwork.h"
 #include <dbus/dbus.h>
 
 namespace WallpaperEngine::Media {
@@ -12,6 +13,9 @@ public:
     void parseMetadata (DBusMessageIter& variant);
     void parsePlaybackStatus (DBusMessageIter& variant, const char* sender);
     void parsePosition (DBusMessageIter& variant);
+    [[nodiscard]] bool acceptsSignalSender (const char* sender) const;
+    void noteNameOwnerChanged (DBusMessage* message);
+    void noteCandidateChanged ();
 
     void update () override;
 
@@ -26,6 +30,12 @@ protected:
     );
 
     std::optional<std::string> m_currentPlayer = std::nullopt;
+    std::optional<std::string> m_selectedOwner = std::nullopt;
+    bool m_discovering = false;
+    bool m_selectedOwnerChanged = false;
+    bool m_candidateChanged = false;
+    bool m_albumEventEmittedInPoll = false;
+    MediaArtworkProbeCache m_artworkCache;
 
     DBusConnection* m_connection;
 };

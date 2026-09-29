@@ -6,6 +6,9 @@
 #include "WallpaperEngine/FileSystem/Container.h"
 #include "WallpaperEngine/Logging/Log.h"
 
+#include <new>
+#include <stdexcept>
+
 using namespace WallpaperEngine::Data::Parsers;
 
 WallpaperUniquePtr WallpaperParser::parse (const JSON& file, Project& project) {
@@ -22,13 +25,38 @@ WallpaperUniquePtr WallpaperParser::parse (const JSON& file, Project& project) {
 }
 
 SceneUniquePtr WallpaperParser::parseScene (const JSON& file, Project& project) {
-    const auto scene = JSON::parse (project.assetLocator->readString (file));
+    const auto scene = WallpaperEngine::Data::JSON::parseAuthoringJson (
+        project.assetLocator->readString (file), file);
+    project.sceneVersion = scene.optional ("version", 0);
     const auto camera = scene.require ("camera", "Scenes must have a camera section");
     const auto general = scene.require ("general", "Scenes must have a general section");
-    const auto projection
-	= general.require ("orthogonalprojection", "General section must have orthogonal projection info");
+    const auto projection = general.optional ("orthogonalprojection");
+    const bool hasOrthogonalProjection = projection.has_value () && projection->is_object ();
+    const bool autoOrthogonalProjection = hasOrthogonalProjection && projection->optional ("auto", false);
+    const int orthogonalWidth = hasOrthogonalProjection ? projection->optional ("width", 0) : 0;
+    const int orthogonalHeight = hasOrthogonalProjection ? projection->optional ("height", 0) : 0;
+    // 140186c90 propagates the native orthographic context bit when both
+    // authored dimensions are nonzero, including signed dimensions.
+    const bool useOrthogonalProjection = autoOrthogonalProjection ||
+                                         (orthogonalWidth != 0 && orthogonalHeight != 0);
+    project.sceneOrthogonalProjection = useOrthogonalProjection;
     const auto objects = scene.require ("objects", "Scenes must have an objects section");
+    const auto lightConfig = scene.optional ("lightconfig");
+    int pointLightSlots = 0;
+    if (lightConfig.has_value ()) {
+	if (!lightConfig->is_object ()) throw std::invalid_argument ("Scene lightconfig must be an object");
+	pointLightSlots = lightConfig->optional ("point", 0);
+	if (pointLightSlots < 0 || pointLightSlots > 15)
+	    throw std::invalid_argument ("Scene point lightconfig exceeds its serialized four-bit count");
+    }
     const auto& properties = project.properties;
+
+    // Shipped scenes author these projection fields under general. Keep camera
+    // as a fallback for older definitions that placed them there.
+    const auto cameraSetting = [&] (const char* key, float fallback) {
+	const auto& section = general.contains (key) ? general : camera;
+	return section.user (key, properties, fallback);
+    };
 
     // TODO: FIND IF THESE DEFAULTS ARE SENSIBLE OR NOT AND PERFORM PROPER VALIDATION WHEN CAMERA PREVIEW AND CAMERA
     // PARALLAX ARE PRESENT
@@ -38,6 +66,7 @@ SceneUniquePtr WallpaperParser::parseScene (const JSON& file, Project& project) 
             .filename = "",
             .project = project
         }, SceneData {
+            .pointLightSlots = pointLightSlots,
             .colors = {
                 .ambient  = general.user ("ambientcolor", properties, glm::vec3 (0.0f)),
                 .skylight = general.user ("skylightcolor", properties, glm::vec3 (0.0f)),
@@ -45,11 +74,18 @@ SceneUniquePtr WallpaperParser::parseScene (const JSON& file, Project& project) 
             },
             .camera = {
                 .fade = general.user ("camerafade", properties, false),
+		.hdr = general.optional ("hdr", false),
                 .preview = general.optional ("camerapreview", false),
                 .bloom = {
                     .enabled = general.user ("bloom", properties, false),
                     .strength = general.user ("bloomstrength", properties, 0.0f),
                     .threshold = general.user ("bloomthreshold", properties, 0.0f),
+		    .hdrStrength = general.user ("bloomhdrstrength", properties, 2.0f),
+		    .hdrThreshold = general.user ("bloomhdrthreshold", properties, 1.0f),
+		    .hdrFeather = general.user ("bloomhdrfeather", properties, 0.1f),
+		    .hdrScatter = general.user ("bloomhdrscatter", properties, 1.619f),
+		    .hdrIterations = general.user ("bloomhdriterations", properties, 8),
+		    .tint = general.user ("bloomtint", properties, glm::vec3 (1.0f)),
                 },
                 .parallax = {
                     .enabled = general.user ("cameraparallax", properties, false),
@@ -69,12 +105,14 @@ SceneUniquePtr WallpaperParser::parseScene (const JSON& file, Project& project) 
                     .up = camera.require <glm::vec3> ("up", "Camera must have an up position"),
                 },
                 .projection = {
-                    .width  = projection.optional ("auto", false) ? 0 : projection.require <int> ("width",  "Projection must have a width"),
-                    .height = projection.optional ("auto", false) ? 0 : projection.require <int> ("height", "Projection must have a height"),
-                    .isAuto = projection.optional ("auto", false),
-                    .nearz = camera.user ("nearz", properties, 0.0f),
-                    .farz = camera.user ("farz", properties, 1000.0f),
-                    .fov = camera.user ("fov", properties, 50.0f)
+		    .width  = autoOrthogonalProjection ? 0 : orthogonalWidth,
+		    .height = autoOrthogonalProjection ? 0 : orthogonalHeight,
+		    .isAuto = autoOrthogonalProjection,
+		    .isOrthogonal = useOrthogonalProjection,
+		    .nearz = cameraSetting ("nearz", useOrthogonalProjection ? 0.0f : 0.1f),
+		    .farz = cameraSetting ("farz", useOrthogonalProjection ? 1000.0f : 10000.0f),
+	            .fov = cameraSetting ("fov", 50.0f),
+	            .perspectiveOverrideFov = general.user ("perspectiveoverridefov", properties, 95.0f)
                 }
             },
             .objects = parseObjects (objects, project),
@@ -94,10 +132,17 @@ WebUniquePtr WallpaperParser::parseWeb (const JSON& file, Project& project) {
 }
 
 ObjectList WallpaperParser::parseObjects (const JSON& objects, const Project& project) {
+    if (!objects.is_array ()) throw std::invalid_argument ("Scene objects must be an array");
     ObjectList result = {};
 
-    for (const auto& cur : objects) {
-	result.emplace_back (ObjectParser::parse (cur, project));
+    for (size_t index = 0; index < objects.size (); ++index) {
+	try {
+	    result.emplace_back (ObjectParser::parse (objects[index], project));
+	} catch (const std::bad_alloc&) {
+	    throw;
+	} catch (const std::exception& e) {
+	    sLog.error ("Skipping invalid scene object at objects[", index, "]: ", e.what ());
+	}
     }
 
     return result;

@@ -7,6 +7,7 @@
 #include "WallpaperEngine/Assets/AssetLoadException.h"
 #include "WallpaperEngine/Logging/Log.h"
 #include "WallpaperEngine/Media/MediaSource.h"
+#include "WallpaperEngine/Media/MediaArtwork.h"
 
 using namespace WallpaperEngine::FileSystem;
 using namespace WallpaperEngine::FileSystem::Adapters;
@@ -22,17 +23,14 @@ ReadStreamSharedPtr MediaCoverAdapter::open (const std::filesystem::path& path) 
 	throw std::filesystem::filesystem_error ("Media source does not have a valid URL", path, std::error_code ());
     }
 
-    std::string album = *source.getMediaInfo ().url;
-
-    if (album.starts_with ("file://")) {
-	album = album.substr (7);
-    } else {
+    const auto artworkPath = WallpaperEngine::Media::localArtworkPath (*source.getMediaInfo ().url);
+    if (!artworkPath) {
 	throw std::filesystem::filesystem_error (
-	    "Only file:// URLs are supported for media covers", album, std::error_code ()
+	    "Only local file:// URLs are supported for media covers", *source.getMediaInfo ().url,
+	    std::error_code ()
 	);
     }
-
-    std::filesystem::path file = std::filesystem::absolute (album);
+    const std::filesystem::path& file = *artworkPath;
 
     if (std::filesystem::exists (file) == false) {
 	throw std::filesystem::filesystem_error ("Media file does not exist", file, std::error_code ());
