@@ -529,6 +529,12 @@ std::string ShaderUnit::generateLightingV1 () const {
         : authored != m_combos.end () ? authored->second : 0;
     if (pointCount < 0 || pointCount > 15)
 	throw std::invalid_argument ("LightingV1 point-light count exceeds native four-bit lightconfig range");
+    const auto spotOverride = m_overrideCombos.find ("LIGHTS_SPOT");
+    const auto spotAuthored = m_combos.find ("LIGHTS_SPOT");
+    const int spotCount = spotOverride != m_overrideCombos.end () ? spotOverride->second
+        : spotAuthored != m_combos.end () ? spotAuthored->second : 0;
+    if (spotCount < 0 || spotCount > 15)
+        throw std::invalid_argument ("LightingV1 spot-light count exceeds native four-bit lightconfig range");
     // Native 140169140 generates this module from the light-count combo. Its
     // unshadowed point branch calls the shipped common_pbr_2.h helper with
     // the scene's premultiplied color/radius and world origin/exponent arrays.
@@ -536,6 +542,10 @@ std::string ShaderUnit::generateLightingV1 () const {
     if (pointCount > 0)
         result += "uniform vec4 g_LPoint_Color[" + std::to_string (pointCount) + "];\n"
                   "uniform vec4 g_LPoint_Origin[" + std::to_string (pointCount) + "];\n";
+    if (spotCount > 0)
+        for (const char* name : {"Color", "Origin", "Direction", "Exponent"})
+            result += std::string ("uniform vec4 g_LSpot_") + name
+                + "[" + std::to_string (spotCount) + "];\n";
     result += "vec3 PerformLighting_V1(vec3 worldPos, vec3 color, vec3 normal, vec3 viewVector,\n"
               "    vec3 specularTint, vec3 ambient, float roughness, float metallic)\n"
               "{\n    vec3 light = CAST3(0.0);\n";
@@ -544,6 +554,16 @@ std::string ShaderUnit::generateLightingV1 () const {
                   "      vec3 lightDelta = g_LPoint_Origin[i].xyz - worldPos;\n"
                   "      light += ComputePBRLightShadow(normal, lightDelta, viewVector, color, "
                   "g_LPoint_Color[i].rgb, g_LPoint_Color[i].w, g_LPoint_Origin[i].w, "
+                  "specularTint, ambient, roughness, metallic, 1.0); }\n";
+    }
+    // Native 140169140 plain unshadowed cone branch, separate from cookies.
+    for (int index = 0; index < spotCount; ++index) {
+        result += "    { const uint i = " + std::to_string (index) + "u;\n"
+                  "      vec3 lightDelta = g_LSpot_Origin[i].xyz - worldPos;\n"
+                  "      float spotCookie = -dot(normalize(lightDelta), g_LSpot_Direction[i].xyz);\n"
+                  "      spotCookie = smoothstep(g_LSpot_Direction[i].w, g_LSpot_Origin[i].w, spotCookie);\n"
+                  "      light += ComputePBRLightShadow(normal, lightDelta, viewVector, color, "
+                  "g_LSpot_Color[i].rgb * spotCookie, g_LSpot_Color[i].w, g_LSpot_Exponent[i].x, "
                   "specularTint, ambient, roughness, metallic, 1.0); }\n";
     }
     result += "    return light;\n}\n#else\n"
@@ -1213,6 +1233,9 @@ const std::string& ShaderUnit::compile () {
     }
 
     this->m_final = SHADER_HEADER (this->m_file);
+    // Native 2.8.42 initializes this compiler environment macro to 69 before
+    // folding shader conditionals (14016b0e0), separately from material VERSION.
+    this->m_final += "#define SHADERVERSION 69\n#define CASTU(x) (uint(x))\n";
 
     if (this->m_type == GLSLContext::UnitType_Fragment) {
 	this->m_final += FRAGMENT_SHADER_DEFINES;

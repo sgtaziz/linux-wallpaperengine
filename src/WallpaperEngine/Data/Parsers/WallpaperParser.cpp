@@ -41,11 +41,17 @@ SceneUniquePtr WallpaperParser::parseScene (const JSON& file, Project& project) 
                                          (orthogonalWidth != 0 && orthogonalHeight != 0);
     project.sceneOrthogonalProjection = useOrthogonalProjection;
     const auto objects = scene.require ("objects", "Scenes must have an objects section");
-    const auto lightConfig = scene.optional ("lightconfig");
+    // Native 140186c90 reads lightconfig from the retained general object,
+    // then packs its point count into the renderer lighting configuration.
+    const auto lightConfig = general.optional ("lightconfig");
     int pointLightSlots = 0;
+    int spotLightSlots = 0;
     if (lightConfig.has_value ()) {
 	if (!lightConfig->is_object ()) throw std::invalid_argument ("Scene lightconfig must be an object");
 	pointLightSlots = lightConfig->optional ("point", 0);
+        spotLightSlots = lightConfig->optional ("spot", 0);
+        if (spotLightSlots < 0 || spotLightSlots > 15)
+            throw std::invalid_argument ("Scene spot lightconfig exceeds its serialized four-bit count");
 	if (pointLightSlots < 0 || pointLightSlots > 15)
 	    throw std::invalid_argument ("Scene point lightconfig exceeds its serialized four-bit count");
     }
@@ -67,6 +73,7 @@ SceneUniquePtr WallpaperParser::parseScene (const JSON& file, Project& project) 
             .project = project
         }, SceneData {
             .pointLightSlots = pointLightSlots,
+            .spotLightSlots = spotLightSlots,
             .colors = {
                 .ambient  = general.user ("ambientcolor", properties, glm::vec3 (0.0f)),
                 .skylight = general.user ("skylightcolor", properties, glm::vec3 (0.0f)),

@@ -2,6 +2,7 @@
 
 #include "CRenderable.h"
 #include "ImageDeviceColor.h"
+#include "ModelNormalMatrix.h"
 #include "PuppetMeshParser.h"
 
 #include <algorithm>
@@ -409,6 +410,7 @@ CImage::~CImage () {
 
     // free any gl resources
     glDeleteBuffers (1, &this->m_sceneSpacePosition);
+    if (m_lightingLocalPosition != GL_NONE) glDeleteBuffers (1, &m_lightingLocalPosition);
     glDeleteBuffers (1, &this->m_copySpacePosition);
     glDeleteBuffers (1, &this->m_passSpacePosition);
     glDeleteBuffers (1, &this->m_texcoordCopy);
@@ -1133,6 +1135,16 @@ void CImage::setup () {
 
     CRenderable::setup ();
 
+    for (auto* pass : m_passes) {
+        const auto& combos = pass->getShader ()->getCombos ();
+        const auto enabled = [&] (const char* name) {
+            const auto entry = combos.find (name);
+            return entry != combos.end () && entry->second != 0;
+        };
+        if (enabled ("LIGHTING") || enabled ("REFLECTION"))
+            pass->addUniform ("g_EyePosition", &m_lightingEye);
+    }
+
     this->m_initialized = true;
 }
 
@@ -1182,6 +1194,7 @@ void CImage::setupPasses (const std::function<void (std::shared_ptr<const CFBO>)
 	first = false;
 
 	pass->setModelMatrix (&this->m_modelMatrix);
+	pass->setNormalModelMatrix (nullptr);
 	pass->setViewProjectionMatrix (&this->m_viewProjectionMatrix);
 
 	writesToTarget = this->configurePassTarget (pass, drawTo, asInput, effectInput, inTargetEffectSequence);
@@ -1214,6 +1227,27 @@ void CImage::setupPasses (const std::function<void (std::shared_ptr<const CFBO>)
 	    spacePosition = this->m_puppetSceneSpacePosition;
 	}
 
+        const auto& combos = pass->getShader ()->getCombos ();
+        const auto enabled = [&] (const char* name) {
+            const auto entry = combos.find (name);
+            return entry != combos.end () && entry->second != 0;
+        };
+        if (projection == &m_modelViewProjectionScreen && !m_hasPuppetMesh
+            && !getImage ().model->fullscreen && !getImage ().model->passthrough
+            && (enabled ("LIGHTING") || enabled ("REFLECTION"))) {
+            // Native 1401e8aa0 pushes the authored node model before final
+            // image draw 140208670; 1401ede30 supplies centered local vertices.
+            // Lighting consumes model and VP separately, so a local-FBO ortho
+            // matrix cannot stand in for the scene model or be applied to
+            // already transformed scene-space vertices.
+            spacePosition = m_lightingLocalPosition;
+            pass->setModelMatrix (&m_lightingWorld);
+            pass->setNormalModelMatrix (&m_lightingNormal);
+            pass->setViewProjectionMatrix (&m_lightingViewProjection);
+            projection = &m_lightingMvp;
+            inverseProjection = &m_lightingMvpInverse;
+        }
+
 	pass->setDestination (drawTo);
 	pass->setInput (asInput);
 	pass->setTexture0Override (
@@ -1226,7 +1260,7 @@ void CImage::setupPasses (const std::function<void (std::shared_ptr<const CFBO>)
 	// native final perspective composite samples the child target with top-left
 	// V=0. Reverse V only when presenting an intermediate on the root target.
 	if (!isFirstPass
-	    && (projection == &m_modelViewProjectionScreen
+	    && (projection == &m_modelViewProjectionScreen || projection == &m_lightingMvp
 	        || (getImage ().model->fullscreen && getImage ().model->passthrough))
 	    && drawTo == this->getScene ().getActiveRenderTarget ()
 	    && !this->getScene ().getCamera ().isOrthogonal ()
@@ -1437,9 +1471,7 @@ void CImage::renderWithChildren (const std::function<void (std::shared_ptr<const
     if (this->m_image.model->passthrough && !this->m_image.effects.empty ()
 	&& m_passes.size () <= m_basePassCount) return;
 
-    if (!this->resolveTransform (this->getImage ()).visible) {
-	return;
-    }
+    if (!this->resolveTransform (this->getImage ()).visible) return;
 
     if (!refreshSizeDependentTargets ()) return;
 
@@ -1511,6 +1543,9 @@ void CImage::updateScenePosition (
     if (m_alignment.find ("left") != std::string::npos) alignment.x = size.x * 0.5f;
     else if (m_alignment.find ("right") != std::string::npos) alignment.x = -size.x * 0.5f;
 
+    m_lightingWorld = glm::translate (transform.authoredMatrix, glm::vec3 (alignment, 0.0f));
+    m_lightingNormal = modelNormalMatrix (m_lightingWorld).value_or (glm::mat3 (1.0f));
+
     const glm::vec2 half = size * 0.5f;
     const glm::vec2 corners[4] = {
         alignment + glm::vec2 (-half.x, -half.y),
@@ -1540,6 +1575,14 @@ void CImage::updateScenePosition (
 }
 
 void CImage::uploadGeometryBuffers (const glm::vec2& size) {
+    const glm::vec2 half = size * 0.5f;
+    const GLfloat localPosition[] {
+        -half.x, -half.y, 0, -half.x, half.y, 0, half.x, -half.y, 0,
+        half.x, -half.y, 0, -half.x, half.y, 0, half.x, half.y, 0,
+    };
+    if (m_lightingLocalPosition == GL_NONE) glGenBuffers (1, &m_lightingLocalPosition);
+    glBindBuffer (GL_ARRAY_BUFFER, m_lightingLocalPosition);
+    glBufferData (GL_ARRAY_BUFFER, sizeof (localPosition), localPosition, GL_DYNAMIC_DRAW);
     GLfloat sceneSpacePosition[] = {
         m_sceneQuad[0].x, m_sceneQuad[0].y, m_sceneQuad[0].z,
         m_sceneQuad[1].x, m_sceneQuad[1].y, m_sceneQuad[1].z,
@@ -1651,6 +1694,25 @@ void CImage::updateScreenSpacePosition () {
 
     this->m_modelViewProjectionScreen = mvp;
     this->m_modelViewProjectionScreenInverse = glm::inverse (mvp);
+    const auto& camera = getScene ().getCamera ();
+    glm::mat4 authoredToCamera (1.0f);
+    if (camera.isOrthogonal ()) {
+        authoredToCamera = glm::translate (authoredToCamera,
+            glm::vec3 (-getScene ().getWidth () * 0.5f, getScene ().getHeight () * 0.5f, 0));
+        authoredToCamera = glm::scale (authoredToCamera, glm::vec3 (1, -1, 1));
+        // Native 1401891a0 retains the authored camera eye and adds the
+        // canvas center, with a fixed orthographic eye distance of 2000.
+        m_lightingEye = camera.getEye ()
+            + glm::vec3 (getScene ().getWidth () * 0.5f, getScene ().getHeight () * 0.5f, 0);
+        m_lightingEye.z = 2000.0f;
+    } else {
+        m_lightingEye = camera.getEye ();
+    }
+    m_lightingViewProjection = mvp * authoredToCamera;
+    m_lightingMvp = m_lightingViewProjection * m_lightingWorld;
+    const float determinant = glm::determinant (m_lightingMvp);
+    m_lightingMvpInverse = determinant != 0.0f && std::isfinite (determinant)
+        ? glm::inverse (m_lightingMvp) : glm::mat4 (1.0f);
     if (this->getImage ().model->passthrough) {
 	// A root fullscreen passthrough samples the already cropped output
 	// framebuffer. Its copy quad is clip space; applying the authored crop

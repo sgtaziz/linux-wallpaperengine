@@ -67,6 +67,11 @@ public:
     [[nodiscard]] int getPointLightCount () const;
     [[nodiscard]] const glm::vec4* getPointLightColors () const;
     [[nodiscard]] const glm::vec4* getPointLightOrigins () const;
+    [[nodiscard]] int getSpotLightCount () const;
+    [[nodiscard]] const glm::vec4* getSpotLightColors () const;
+    [[nodiscard]] const glm::vec4* getSpotLightOrigins () const;
+    [[nodiscard]] const glm::vec4* getSpotLightDirections () const;
+    [[nodiscard]] const glm::vec4* getSpotLightExponents () const;
     [[nodiscard]] const glm::vec3* getLegacyLightPositions () const;
     [[nodiscard]] const glm::vec4* getLegacyLightColors () const;
     [[nodiscard]] std::optional<glm::mat4> getPuppetAttachmentTransform (
@@ -99,6 +104,7 @@ private:
     [[nodiscard]] const Object* findObjectData (int id) const;
     void flushDestroyedScriptLayers ();
     void refreshPointLights ();
+    void refreshSpotLights ();
     void assignLegacyLightSlot (const ScenePointLight* light);
     Render::CObject* dispatchObjectType (const Object& object);
     void addObjectToRenderOrder (const Object& object);
@@ -124,6 +130,11 @@ private:
     double m_particleSceneTimeAccumulator { 0.0 };
     float m_particleSceneTime { 0.0f };
     std::vector<const ScenePointLight*> m_pointLightObjects = {};
+    std::vector<const SceneSpotLight*> m_spotLightObjects = {};
+    std::vector<glm::vec4> m_spotLightColors = {};
+    std::vector<glm::vec4> m_spotLightOrigins = {};
+    std::vector<glm::vec4> m_spotLightDirections = {};
+    std::vector<glm::vec4> m_spotLightExponents = {};
     std::map<const ScenePointLight*, size_t> m_legacyLightSlots = {};
     std::vector<glm::vec4> m_pointLightColors = {};
     std::vector<glm::vec4> m_pointLightOrigins = {};

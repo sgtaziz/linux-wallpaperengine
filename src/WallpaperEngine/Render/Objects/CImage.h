@@ -163,6 +163,13 @@ private:
 
     glm::mat4 m_modelMatrix = {};
     glm::mat4 m_viewProjectionMatrix = {};
+    GLuint m_lightingLocalPosition = GL_NONE;
+    glm::mat4 m_lightingWorld {1.0f};
+    glm::mat3 m_lightingNormal {1.0f};
+    glm::mat4 m_lightingViewProjection {1.0f};
+    glm::mat4 m_lightingMvp {1.0f};
+    glm::mat4 m_lightingMvpInverse {1.0f};
+    glm::vec3 m_lightingEye {0.0f};
 
     std::shared_ptr<CFBO> m_mainFBO = nullptr;
     std::shared_ptr<CFBO> m_subFBO = nullptr;

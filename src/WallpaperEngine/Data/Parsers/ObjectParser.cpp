@@ -179,6 +179,20 @@ ObjectUniquePtr ObjectParser::parse (const JSON& it, const Project& project) {
 	    .zoom = it.user ("zoom", project.properties, 1.0f),
 	});
     } else if (lightIt != it.end ()) {
+        if (lightIt->is_string () && lightIt->get<std::string> () == "lspot") {
+            // 14018ff60 constructor / 14025da80 descriptors: cones are degrees.
+            return std::make_unique<SceneSpotLight> (std::move (basedata), SceneSpotLightData {
+                .color = it.user ("color", project.properties, glm::vec3 (0.0f)),
+                .intensity = it.user ("intensity", project.properties, 0.0f),
+                .radius = it.user ("radius", project.properties, 1.0f),
+                .exponent = it.user ("exponent", project.properties, 2.0f),
+                .innerCone = it.user ("innercone", project.properties, 20.0f),
+                .outerCone = it.user ("outercone", project.properties, 30.0f),
+                .controlPoint = it.user ("controlpoint", project.properties, glm::vec3 (0.0f, 2.0f, 0.0f)),
+                .castShadow = it.optional ("castshadow", false),
+                .useCookie = it.optional ("usecookie", false),
+            });
+        }
 	if (!lightIt->is_string () || (lightIt->get<std::string> () != "point"
 	                              && lightIt->get<std::string> () != "lpoint")) {
 	    sLog.error ("Scene light type is not supported yet: ", lightIt->dump ());
