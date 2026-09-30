@@ -405,3 +405,53 @@ TEST_CASE ("Scene light slots come from general rather than a root lookalike", "
     CHECK (parse (JSON {{"lightconfig", {{"spot", 1}}}}) == 0);
     CHECK (parse (JSON {{"lightconfig", {{"point", 15}}}}) == 15);
 }
+
+TEST_CASE ("Orthographic root camera pose resets only without parsed paths", "[scene][camera][parallax]") {
+    using WallpaperEngine::Render::Camera;
+    WallpaperEngine::Data::Model::SceneData::Camera data {};
+    data.configuration.eye = {-47.67039f, 204.18417f, 8};
+    data.configuration.center = {17, -23, -1};
+    data.configuration.up = {1, 0, 0};
+    data.projection.isOrthogonal = true;
+    const auto reset = Camera::poseForRootCamera (data);
+    REQUIRE (reset.eye == glm::vec3 (0));
+    REQUIRE (reset.center == glm::vec3 (0, 0, -1));
+    REQUIRE (reset.up == glm::vec3 (0, 1, 0));
+    data.configuration.hasPaths = true;
+    REQUIRE (Camera::poseForRootCamera (data).eye == data.configuration.eye);
+    data.configuration.hasPaths = false;
+    data.projection.isOrthogonal = false;
+    REQUIRE (Camera::poseForRootCamera (data).eye == data.configuration.eye);
+}
+
+TEST_CASE ("Root camera path presence follows parsed resource segments", "[scene][camera][parser]") {
+    using WallpaperEngine::Assets::AssetLocator;
+    using WallpaperEngine::Data::JSON::JSON;
+    using WallpaperEngine::Data::Model::Project;
+    using WallpaperEngine::Data::Model::Scene;
+    using WallpaperEngine::Data::Parsers::WallpaperParser;
+    using WallpaperEngine::FileSystem::Container;
+    const auto parse = [] (const JSON& paths, const JSON& segments) {
+        auto files = std::make_unique<Container> ();
+        const JSON scene {{"camera", {{"center", "0 0 -1"}, {"eye", "17 -23 0"},
+                                      {"up", "0 1 0"}, {"paths", paths}}},
+                          {"general", {{"orthogonalprojection", {{"width", 512}, {"height", 256}}}}},
+                          {"objects", JSON::array ()}};
+        files->getVFS ().add ("scene.json", scene.dump ());
+        files->getVFS ().add ("cameras/pose.json", JSON {{"paths", segments}}.dump ());
+        Project project {};
+        project.type = Project::Type_Scene;
+        project.assetLocator = std::make_unique<AssetLocator> (std::move (files));
+        const auto wallpaper = WallpaperParser::parse (JSON ("scene.json"), project);
+        return wallpaper->as<Scene> ()->camera.configuration.hasPaths;
+    };
+    const JSON transforms = JSON::array ({JSON {{"disabled", true}, {"eye", "17 -23 0"}}});
+    const JSON segment {{"transforms", transforms}};
+    REQUIRE (parse (JSON::array ({"cameras/pose.json"}), JSON::array ({segment})));
+    REQUIRE_FALSE (parse (JSON::array ({"cameras/pose.json", 7}), JSON::array ({segment})));
+    REQUIRE_FALSE (parse (JSON::array ({"cameras/pose.json"}),
+                         JSON::array ({JSON {{"disabled", true}, {"transforms", transforms}}})));
+    REQUIRE_FALSE (parse (JSON::array ({"cameras/pose.json"}),
+                         JSON::array ({JSON {{"transforms", JSON::array ()}}, segment})));
+    REQUIRE_FALSE (parse (JSON::array (), JSON::array ({segment})));
+}

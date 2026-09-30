@@ -11,6 +11,33 @@
 
 using namespace WallpaperEngine::Data::Parsers;
 
+namespace {
+bool hasRootCameraPaths (const JSON& camera, const Project& project) {
+    const auto files = camera.optional ("paths");
+    if (!files || !files->is_array () || files->empty () || !files->back ().is_string ()) return false;
+    // Native 140186c90 clears the path list before each file, so the final
+    // filename controls whether its orthographic root pose is retained.
+    try {
+        const auto data = WallpaperEngine::Data::JSON::parseAuthoringJson (
+            project.assetLocator->readString (files->back ().get<std::string> ()), "camera path");
+        const auto paths = data.optional ("paths");
+        if (!paths || !paths->is_array ()) return false;
+        // 140198e20 appends enabled segments with a nonempty transforms array.
+        // This only preserves the root-pose contract; path animation is separate.
+        for (const auto& path : *paths) {
+            if (!path.is_object ()) break;
+            const auto transforms = path.optional ("transforms");
+            if (!transforms || !transforms->is_array () || transforms->empty ()) break;
+            const auto disabled = path.optional ("disabled");
+            if (!disabled || !disabled->is_boolean () || !disabled->get<bool> ()) return true;
+        }
+    } catch (const std::exception& error) {
+        sLog.error ("Cannot inspect root camera paths: ", error.what ());
+    }
+    return false;
+}
+} // namespace
+
 WallpaperUniquePtr WallpaperParser::parse (const JSON& file, Project& project) {
     switch (project.type) {
 	case Project::Type_Scene:
@@ -110,6 +137,7 @@ SceneUniquePtr WallpaperParser::parseScene (const JSON& file, Project& project) 
                     .center = camera.require <glm::vec3> ("center", "Camera must have a center position"),
                     .eye = camera.require <glm::vec3> ("eye", "Camera must have an eye position"),
                     .up = camera.require <glm::vec3> ("up", "Camera must have an up position"),
+                    .hasPaths = hasRootCameraPaths (camera, project),
                 },
                 .projection = {
 		    .width  = autoOrthogonalProjection ? 0 : orthogonalWidth,

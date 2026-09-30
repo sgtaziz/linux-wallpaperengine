@@ -12,13 +12,21 @@ using namespace WallpaperEngine::Render;
 Camera::Camera (Wallpapers::CScene& scene, const SceneData::Camera& camera,
                 const SceneCamera* activeObject) :
     m_width (0), m_height (0),
-    m_pose {camera.configuration.eye, camera.configuration.center, camera.configuration.up},
+    m_pose (poseForRootCamera (camera)),
     m_camera (camera), m_activeObject (activeObject), m_scene (scene) {
     if (m_activeObject) m_pose = poseForSceneCamera (*m_activeObject);
     m_lookat = glm::lookAt (m_pose.eye, m_pose.center, m_pose.up);
 }
 
 Camera::~Camera () = default;
+
+Camera::Pose Camera::poseForRootCamera (const SceneData::Camera& camera) {
+    // Native 140186c90 LAB_140188648 resets orthographic root cameras when
+    // their parsed path list is empty. Active camera objects override below.
+    if (camera.projection.isOrthogonal && !camera.configuration.hasPaths)
+        return {{0, 0, 0}, {0, 0, -1}, {0, 1, 0}};
+    return {camera.configuration.eye, camera.configuration.center, camera.configuration.up};
+}
 
 const SceneCamera* Camera::selectActiveSceneCamera (const ObjectList& objects) {
     // Native selects the last active camera object before consulting scene
