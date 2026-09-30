@@ -99,6 +99,25 @@ inline std::optional<glm::mat4> inverseFiniteTransform (const glm::mat4& matrix)
     return inverse;
 }
 
+// Native CP matrices use the authored canvas, whereas orthographic Linux
+// node stacks use centered GL world coordinates. Preserve the native CP0
+// world/world exception before converting absolute world points.
+inline glm::mat4 particleControlPointMatrix (
+    const glm::mat4& authoredSimulation, const glm::mat4& simulationModel,
+    const std::optional<glm::mat4>& simulationInverse,
+    bool presetWorld, bool pointWorld, bool pointZero,
+    bool orthographic, glm::vec2 canvasSize
+) {
+    if (presetWorld && (!pointWorld || pointZero))
+        return simulationModel * authoredSimulation;
+    if (!pointWorld) return authoredSimulation;
+    const glm::mat4 world = orthographic
+        ? glm::translate (glm::mat4 (1.0f), glm::vec3 (
+            -canvasSize.x / 2.0f, canvasSize.y / 2.0f, 0.0f)) * authoredSimulation
+        : authoredSimulation;
+    return !presetWorld && simulationInverse ? *simulationInverse * world : world;
+}
+
 // A singular authored transform cannot map a world control point into
 // simulation-local coordinates. Retain the last finite local value until the
 // transform becomes invertible again, then reproject on the next tick.
