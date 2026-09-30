@@ -1,5 +1,4 @@
 #include "CPass.h"
-#include "PositionUniform.h"
 #include "UniformArrayUpload.h"
 #include <sstream>
 #include <utility>
@@ -447,13 +446,9 @@ void CPass::setupRenderUniforms () {
 		glUniform3fv (value->id, value->count, glm::value_ptr (*static_cast<const glm::vec3*> (value->value)));
 		break;
 	    case Vector2:
-		if (value->authoredPosition && value->count == 1) {
-		    const auto converted = positionUniformForPass (
-		        *static_cast<const glm::vec2*> (value->value), m_texcoordTopV, m_texcoordBottomV);
-		    glUniform2fv (value->id, 1, glm::value_ptr (converted));
-		} else {
-		    glUniform2fv (value->id, value->count, glm::value_ptr (*static_cast<const glm::vec2*> (value->value)));
-		}
+                // Native position metadata is an editor annotation. Runtime
+                // uniform coordinates remain authored, independent of pass UVs.
+                glUniform2fv (value->id, value->count, glm::value_ptr (*static_cast<const glm::vec2*> (value->value)));
 		break;
 	    case Matrix4:
 		uploadMat4Array (value->id, static_cast<const glm::mat4*> (value->value), value->count);
@@ -1166,10 +1161,7 @@ void CPass::addUniform (const ShaderVariable* value, const DynamicValue* setting
     } else {
 	sLog.error ("Cannot convert setting dynamic value  to ", value->getName (), ". Using default value");
     }
-    if (value->is<ShaderVariableVector2> ()) {
-        if (const auto it = m_uniforms.find (value->getName ()); it != m_uniforms.end ())
-            it->second->authoredPosition = value->isPosition ();
-    }
+
 }
 
 void CPass::addUniform (const std::string& name, int value) { this->addUniform (name, UniformType::Integer, value); }
