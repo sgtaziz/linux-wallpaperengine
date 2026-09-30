@@ -3697,11 +3697,14 @@ void CParticle::updateOrdinaryControlPoints () {
             ParticleCore::instanceControlPointPosition (cp.offset, overridePosition, cp.flags), 1.0f);
         // 14022a070/22bd40: choose the current stack, its inverse, or the
         // authored CP matrix. CP0 has a native world/world special case.
-        glm::mat4 mapped = authored;
-        if (presetWorld && (!cp.worldSpace || index == 0))
-            mapped = m_simulationModelMatrix * authored;
-        else if (!presetWorld && cp.worldSpace && m_controlPointTransformInvertible)
-            mapped = m_controlPointInverse * authored;
+        const glm::mat4 mapped = Wallpapers::particleControlPointMatrix (
+            authored, m_simulationModelMatrix,
+            m_controlPointTransformInvertible ? std::optional<glm::mat4> (m_controlPointInverse)
+                                             : std::nullopt,
+            presetWorld, cp.worldSpace, index == 0,
+            getScene ().getCamera ().isOrthogonal (), glm::vec2 (
+                static_cast<float> (getScene ().getWidth ()),
+                static_cast<float> (getScene ().getHeight ())));
         cp.position = glm::vec3 (mapped[3]);
         cp.basis = glm::mat3 (mapped);
     }

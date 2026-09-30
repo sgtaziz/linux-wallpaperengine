@@ -3,6 +3,7 @@
 
 #include "WallpaperEngine/Data/Builders/UserSettingBuilder.h"
 #include "WallpaperEngine/Render/Wallpapers/SceneTransform.h"
+#include "WallpaperEngine/Render/Objects/ParticleBirthGeometry.h"
 
 #include <glm/gtc/constants.hpp>
 #include <glm/gtc/matrix_transform.hpp>
@@ -297,4 +298,55 @@ TEST_CASE ("Parented control-point conversion retains world position through liv
     const glm::vec3 roundTrip = glm::vec3 (movedModel * glm::vec4 (updatedLocal, 1));
     REQUIRE (roundTrip.x == Catch::Approx (fixedWorld.x).margin (1e-4f));
     REQUIRE (roundTrip.y == Catch::Approx (fixedWorld.y).margin (1e-4f));
+}
+
+TEST_CASE ("Absolute particle control points keep native canvas endpoints through sequence rendering",
+           "[scene][particle][controlpoint][sequence]") {
+    using WallpaperEngine::Render::Wallpapers::particleControlPointMatrix;
+    using WallpaperEngine::Render::Wallpapers::scenePointForCamera;
+    using namespace WallpaperEngine::Render::Objects::ParticleCore;
+    const glm::vec2 canvas {1920.0f, 1080.0f};
+    const glm::mat4 center = glm::translate (glm::mat4 (1.0f), {-960.0f, 540.0f, 0.0f});
+    const glm::mat4 reflect = glm::scale (glm::mat4 (1.0f), {1.0f, -1.0f, 1.0f});
+    // Installed native discharge layer 508 authors this origin and an
+    // absolute world CP1. Rotated/mirrored nodes must reach that same canvas
+    // endpoint, independently of their emitter-local transformation.
+    const glm::vec3 origin {154.130f, 644.440f, 0.0f};
+    const glm::vec3 endpoint {947.560f, 1081.670f, 0.0f};
+    for (const auto& [scale, angle] : {
+             std::pair {glm::vec3 (0.101f, 0.243f, 0.635f), 0.0f},
+             std::pair {glm::vec3 (-1.5f, 0.7f, 1.0f), 1.2f}}) {
+        const glm::mat4 node = center * reflect
+            * glm::translate (glm::mat4 (1.0f), origin)
+            * glm::rotate (glm::mat4 (1.0f), angle, {0.0f, 0.0f, 1.0f})
+            * glm::scale (glm::mat4 (1.0f), scale) * reflect;
+        const auto inverse = inverseFiniteTransform (node);
+        REQUIRE (inverse.has_value ());
+        const glm::mat4 cp0 = particleControlPointMatrix (
+            glm::mat4 (1.0f), node, inverse, false, false, true, true, canvas);
+        const glm::mat4 cp1 = particleControlPointMatrix (
+            glm::translate (glm::mat4 (1.0f), glm::vec3 (endpoint.x, -endpoint.y, endpoint.z)),
+            node, inverse, false, true, false, true, canvas);
+        for (float phase : {0.0f, 0.5f, 1.0f}) {
+            BetweenControlPointsState state {phase, 0.0f};
+            const auto birth = betweenControlPointsBirth (
+                glm::vec3 (cp0[3]), {}, 1.0f, glm::vec3 (cp0[3]), glm::vec3 (cp1[3]),
+                state, {0.0f, 1.0f}, false, 0u, 0.0f, {}, 0.0f, false);
+            const glm::vec3 rendered = glm::vec3 (node * glm::vec4 (birth.position, 1.0f));
+            const glm::vec3 expected = scenePointForCamera (
+                glm::mix (origin, endpoint, phase), canvas.x, canvas.y, true);
+            for (int axis = 0; axis < 3; ++axis)
+                REQUIRE (rendered[axis] == Catch::Approx (expected[axis]).margin (0.001f));
+        }
+        const glm::mat4 authored = glm::translate (glm::mat4 (1.0f), glm::vec3 (endpoint.x, -endpoint.y, endpoint.z));
+        const auto directWorld = particleControlPointMatrix (
+            authored, node, inverse, true, true, false, true, canvas);
+        REQUIRE (glm::distance (glm::vec3 (directWorld[3]),
+                 scenePointForCamera (endpoint, canvas.x, canvas.y, true)) < 0.001f);
+        // Native CP0 remains stack-mapped even when both world flags are set.
+        REQUIRE (particleControlPointMatrix (authored, node, inverse,
+                 true, true, true, true, canvas) == node * authored);
+        REQUIRE (particleControlPointMatrix (authored, node, inverse,
+                 false, false, false, true, canvas) == authored);
+    }
 }
