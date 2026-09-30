@@ -102,6 +102,7 @@ struct SceneData {
 	    glm::vec3 center;
 	    glm::vec3 eye;
 	    glm::vec3 up;
+            bool hasPaths = false;
 	} configuration;
 
 	/**
