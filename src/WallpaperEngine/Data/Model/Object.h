@@ -198,6 +198,26 @@ public:
     ~ScenePointLight () override = default;
 };
 
+/** Native unshadowed modern spot light (cookie/shadow fields remain represented). */
+struct SceneSpotLightData {
+    UserSettingUniquePtr color;
+    UserSettingUniquePtr intensity;
+    UserSettingUniquePtr radius;
+    UserSettingUniquePtr exponent;
+    UserSettingUniquePtr innerCone;
+    UserSettingUniquePtr outerCone;
+    UserSettingUniquePtr controlPoint;
+    bool castShadow = false;
+    bool useCookie = false;
+};
+
+class SceneSpotLight : public Object, public SceneSpotLightData {
+public:
+    explicit SceneSpotLight (ObjectData data, SceneSpotLightData lightData) noexcept :
+        Object (std::move (data)), SceneSpotLightData (std::move (lightData)) { }
+    ~SceneSpotLight () override = default;
+};
+
 struct SoundData {
     /** Native modes are pool, random, single; loop is a legacy Linux alias. */
     std::optional<std::string> playbackmode;

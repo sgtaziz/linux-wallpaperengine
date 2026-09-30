@@ -730,6 +730,7 @@ void CPass::setupShaders () {
 
     ComboMap sceneCombos = m_override.combos;
     sceneCombos.insert_or_assign ("LIGHTS_POINT", m_renderable.getScene ().getPointLightCount ());
+    sceneCombos.insert_or_assign ("LIGHTS_SPOT", m_renderable.getScene ().getSpotLightCount ());
     this->m_shader = new Render::Shaders::Shader (
 	this->m_renderable.getAssetLocator (), shaderName, this->m_combos, sceneCombos, passTextures,
 	overrideTextures, this->m_override.constants, &this->m_pass.constants
@@ -991,6 +992,12 @@ void CPass::setupUniforms () {
     if (scene.getPointLightCount () > 0) {
 	this->addUniform ("g_LPoint_Color", scene.getPointLightColors (), scene.getPointLightCount ());
 	this->addUniform ("g_LPoint_Origin", scene.getPointLightOrigins (), scene.getPointLightCount ());
+    }
+    if (scene.getSpotLightCount () > 0) {
+        this->addUniform ("g_LSpot_Color", scene.getSpotLightColors (), scene.getSpotLightCount ());
+        this->addUniform ("g_LSpot_Origin", scene.getSpotLightOrigins (), scene.getSpotLightCount ());
+        this->addUniform ("g_LSpot_Direction", scene.getSpotLightDirections (), scene.getSpotLightCount ());
+        this->addUniform ("g_LSpot_Exponent", scene.getSpotLightExponents (), scene.getSpotLightCount ());
     }
     this->addUniform ("g_LightsPosition", scene.getLegacyLightPositions (), 4);
     this->addUniform ("g_LightsColorRadius", scene.getLegacyLightColors (), 4);
