@@ -6,6 +6,7 @@
 #include "PuppetMeshParser.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <iterator>
 #include <limits>
@@ -906,6 +907,8 @@ void CImage::setup () {
     if (this->m_initialized) {
 	return;
     }
+    m_hasCompositeConsumerAtSetup = hasCompositeConsumer ();
+    m_compositePresentationPass = nullptr;
     m_effectVisibilityAtSetup.clear ();
     m_effectVisibilityAtSetup.reserve (m_image.effects.size ());
     for (const auto& effect : m_image.effects)
@@ -926,7 +929,7 @@ void CImage::setup () {
 		this->getScene ().getScene ().objects, [id = this->getId ()] (const auto& object) {
 		    return std::ranges::find (object->dependencies, id) != object->dependencies.end ();
 		});
-	    if (!hasDependent) return;
+	    if (!hasDependent && !m_hasCompositeConsumerAtSetup) return;
 	}
 
 	// Some have attempted to declare effects with visible set to false.
@@ -938,7 +941,7 @@ void CImage::setup () {
 	    }
 	}
 
-	if (!this->m_image.effects.empty () && allEffectsInvisible) {
+	if (!this->m_image.effects.empty () && allEffectsInvisible && !m_hasCompositeConsumerAtSetup) {
 	    return;
 	}
     }
@@ -1086,6 +1089,35 @@ void CImage::setup () {
 	    std::nullopt, std::nullopt, std::nullopt));
     }
 
+    // Native 1401e8aa0 runs every effect step offscreen for required images
+    // (flag 0x10), then presents the completed texture with device color unity.
+    // The plain passthrough shader preserves straight RGBA and applies neither
+    // the image color nor alpha a second time. Lit and puppet prepasses need
+    // their separate native geometry/matrix contracts and retain their route.
+    const bool unlit = std::ranges::none_of (m_passes, [] (const CPass* pass) {
+        const auto& combos = pass->getShader ()->getCombos ();
+        return std::ranges::any_of (std::array {"LIGHTING", "REFLECTION"}, [&] (const char* name) {
+            const auto value = combos.find (name);
+            return value != combos.end () && value->second != 0;
+        });
+    });
+    if (m_hasCompositeConsumerAtSetup && !m_hasPuppetMesh && unlit && !m_passes.empty ()
+        && !m_passes.back ()->getTarget ().has_value ()) {
+        auto material = std::make_unique<MaterialPass> (MaterialPass {
+            .blending = BlendingMode_Normal,
+            .cullmode = CullingMode_Disable,
+            .depthtest = DepthtestMode_Disabled,
+            .depthwrite = DepthwriteMode_Disabled,
+            .shader = "passthrough",
+            .textures = {}, .combos = {{"TRANSFORM", 1}}, .constants = {},
+        });
+        const auto& retained = *m_virtualPassess.emplace_back (std::move (material));
+        m_compositePresentationPass = new CPass (
+            *this, std::make_shared<FBOProvider> (this), retained,
+            std::nullopt, std::nullopt, std::nullopt);
+        m_passes.push_back (m_compositePresentationPass);
+    }
+
     // if there's more than one pass the blendmode has to be moved from the beginning to the end
     if (this->m_passes.size () > 1) {
 	const auto first = this->m_passes.begin ();
@@ -1152,6 +1184,15 @@ void CImage::setupPasses (const std::function<void (std::shared_ptr<const CFBO>)
     // do a pass on everything and setup proper inputs and values
     this->m_currentMainFBO = this->m_mainFBO;
     this->m_currentSubFBO = this->m_subFBO;
+    if (m_compositePresentationPass) {
+        // Native 1401e8aa0 starts on the parity-selected scratch target so
+        // the full offscreen chain always finishes in public composite A.
+        const auto count = std::ranges::count_if (m_passes, [this] (const CPass* pass) {
+            return pass != m_compositePresentationPass && !pass->getTarget ().has_value ();
+        });
+        if (count % 2 == 0)
+            std::swap (m_currentMainFBO, m_currentSubFBO);
+    }
     std::shared_ptr<const CFBO> drawTo = this->m_currentMainFBO;
     std::shared_ptr<const TextureProvider> asInput = this->getImage ().model->passthrough
         ? this->getScene ().getActiveRenderTarget ()
@@ -1181,6 +1222,7 @@ void CImage::setupPasses (const std::function<void (std::shared_ptr<const CFBO>)
 	// TODO: THIS REQUIRES ON-THE-FLY EVALUATION OF EFFECTS VISIBILITY TO FIGURE OUT
 	// TODO: WHICH ONE IS THE LAST + A FEW OTHER THINGS
 	Effects::CPass* pass = *cur;
+	if (pass == m_compositePresentationPass && !shouldRenderFinalPass (true)) continue;
 	if (this->m_hasPuppetMesh)
 	    pass->setGeometryCallback ({}, {}, {});
 	std::shared_ptr<const CFBO> prevDrawTo = drawTo;
@@ -1417,8 +1459,18 @@ bool CImage::refreshSizeDependentTargets () {
     return true;
 }
 
+bool CImage::hasCompositeConsumer () const {
+    return std::ranges::any_of (
+        getScene ().getObjectsByRenderOrder (), [id = getId ()] (const CObject* consumer) {
+            return consumer->getId () != id
+                && std::ranges::find (consumer->getObject ().dependencies, id)
+                    != consumer->getObject ().dependencies.end ();
+        });
+}
+
 void CImage::refreshEffectVisibility () {
-    bool changed = m_effectVisibilityAtSetup.size () != m_image.effects.size ();
+    bool changed = m_hasCompositeConsumerAtSetup != hasCompositeConsumer ()
+        || m_effectVisibilityAtSetup.size () != m_image.effects.size ();
     if (!changed) {
 	for (size_t index = 0; index < m_image.effects.size (); ++index) {
 	    if (m_effectVisibilityAtSetup[index] != m_image.effects[index]->visible->value->getBool ()) {
@@ -1434,6 +1486,7 @@ void CImage::refreshEffectVisibility () {
     // DynamicValues; the script modules and source objects remain alive.
     for (auto* pass : m_passes) delete pass;
     m_passes.clear ();
+    m_compositePresentationPass = nullptr;
     delete m_puppetChannelBasePass;
     delete m_puppetChannelPass;
     m_puppetChannelBasePass = nullptr;
