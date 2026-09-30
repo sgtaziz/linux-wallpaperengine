@@ -124,9 +124,9 @@ public:
 	// this resolving the include loop
 	return this->user (key, properties);
     }
-    [[nodiscard]] UserSettingUniquePtr color (const std::string& key, const Properties& properties) const;
+    [[nodiscard]] UserSettingUniquePtr color (const std::string& key, const Properties& properties, bool floatColor = false) const;
     [[nodiscard]] UserSettingUniquePtr
-    color (const std::string& key, const Properties& properties, Color defaultValue) const {
+    color (const std::string& key, const Properties& properties, Color defaultValue, bool floatColor = false) const {
 	const auto value = this->optional (key);
 
 	if (!value.has_value ()) {
@@ -135,7 +135,7 @@ public:
 
 	// performs a second lookup, but handles the actual call to UserSettingParser outside of this header
 	// this resolving the include loop
-	return this->color (key, properties);
+	return this->color (key, properties, floatColor);
     }
 
     template <int length, typename type, glm::qualifier qualifier> operator glm::vec<length, type, qualifier> () const {

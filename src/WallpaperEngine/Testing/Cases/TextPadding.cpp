@@ -135,7 +135,7 @@ TEST_CASE ("Text opaque background retains its gate and RGB independently of pad
     const auto& text = dynamic_cast<const Text&> (*opaque);
     REQUIRE (text.opaqueBackground->value->getBool ());
     REQUIRE (text.padding->value->getVec2 () == glm::vec2 (12.0f));
-    REQUIRE (text.backgroundColor->value->getVec4 ().r == 1.0f);
+    REQUIRE (text.backgroundColor->value->getVec4 ().r == 255.0f);
     REQUIRE (text.backgroundColor->value->getVec4 ().g == 0.0f);
     auto plain = ObjectParser::parse (JSON::parse (
         R"({"id":90,"name":"plain","text":"A"})"), project);

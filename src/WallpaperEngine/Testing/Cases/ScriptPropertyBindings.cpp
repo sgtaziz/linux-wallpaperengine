@@ -2,6 +2,9 @@
 
 #include "WallpaperEngine/Data/Builders/UserSettingBuilder.h"
 #include "WallpaperEngine/Scripting/ScriptPropertyBindings.h"
+#include "WallpaperEngine/Render/Wallpapers/SceneTransform.h"
+#include <catch2/catch_approx.hpp>
+#include <glm/gtc/constants.hpp>
 
 #include <algorithm>
 #include <set>
@@ -148,4 +151,37 @@ TEST_CASE ("Particle and text bindings retain prior names with typed authority",
     REQUIRE (text.padding->value->getVec2 () == glm::vec2 (8.0f, 16.0f));
     binding (textBindings, "text")->update (std::string ("updated"), DynamicValue::Script);
     REQUIRE (text.text->value->getString () == "updated");
+}
+
+TEST_CASE ("Transform-only parent bindings drive the child render matrix", "[script][binding][scene]") {
+    using WallpaperEngine::Data::Model::Object;
+    using WallpaperEngine::Render::Wallpapers::resolveSceneTransform;
+    auto parentData = baseObject ();
+    parentData.groupScale = UserSettingBuilder::fromValue (glm::vec3 (1.0f));
+    parentData.groupAngles = UserSettingBuilder::fromValue (glm::vec3 (0.0f));
+    parentData.groupVisible = UserSettingBuilder::fromValue (true);
+    Object parent (std::move (parentData));
+    auto childData = baseObject ();
+    childData.id = 43;
+    childData.parent = parent.id;
+    childData.origin = UserSettingBuilder::fromValue (glm::vec3 (50.0f, 0.0f, 0.0f));
+    childData.groupScale = UserSettingBuilder::fromValue (glm::vec3 (1.0f));
+    childData.groupAngles = UserSettingBuilder::fromValue (glm::vec3 (0.0f));
+    childData.groupVisible = UserSettingBuilder::fromValue (true);
+    Object child (std::move (childData));
+    const auto bindings = scriptPropertyBindings (parent);
+    const auto resolve = [&] {
+        return resolveSceneTransform (child, [&] (int id) -> const Object* {
+            return id == parent.id ? &parent : nullptr;
+        });
+    };
+    REQUIRE (resolve ().origin.x == 50.0f);
+    binding (bindings, "angles")->update (glm::vec3 (0.0f, 0.0f, glm::half_pi<float> ()), DynamicValue::Script);
+    const auto rotated = resolve ();
+    REQUIRE (rotated.origin.x == Catch::Approx (0.0f).margin (0.00001f));
+    REQUIRE (rotated.origin.y == Catch::Approx (50.0f));
+    binding (bindings, "origin")->update (glm::vec3 (100.0f, 200.0f, 0.0f), DynamicValue::Script);
+    REQUIRE (resolve ().origin.y == Catch::Approx (250.0f));
+    binding (bindings, "visible")->update (false, DynamicValue::Script);
+    REQUIRE_FALSE (resolve ().visible);
 }

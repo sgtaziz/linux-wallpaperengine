@@ -90,7 +90,17 @@ JSModuleDef* scriptengine_module_loader (JSContext* ctx, const char* module, voi
     return it->second->getDefinition ();
 }
 
-JSValue ScriptEngine::dynamicToJs (DynamicValue& value, bool detached) const {
+JSValue ScriptEngine::dynamicToJs (DynamicValue& value, bool detached, bool angleProperty, bool rgbColorProperty) const {
+    // Native angles metadata flag 4 exposes degrees to SceneScript while
+    // JSON and renderer matrices retain radians (1401e0530/1401dd630).
+    if (angleProperty && value.getType () == DynamicValue::Vec3) {
+        DynamicValue degrees (glm::degrees (value.getVec3 ()));
+        return this->m_adapters.vec3->instantiate (degrees, true);
+    }
+    if (rgbColorProperty && value.getType () == DynamicValue::Vec4) {
+        DynamicValue rgb (glm::vec3 (value.getVec4 ()));
+        return this->m_adapters.vec3->instantiate (rgb, true);
+    }
     switch (value.getType ()) {
 	case DynamicValue::Null:
 	    return JS_NULL;
@@ -117,7 +127,7 @@ JSValue ScriptEngine::dynamicToJs (DynamicValue& value, bool detached) const {
 }
 
 static void jsToDynamicValue (JSContext* ctx, JSValue val, DynamicValue& source,
-                              const std::string& key, bool rgbColorResult = false) {
+                              const std::string& key, bool rgbColorResult = false, bool angleProperty = false) {
     if (JS_IsException (val)) {
 	return;
     }
@@ -201,7 +211,9 @@ static void jsToDynamicValue (JSContext* ctx, JSValue val, DynamicValue& source,
 	}
 	if (count == 2) source.update (glm::vec2 (components[0], components[1]), DynamicValue::Script);
 	else if (count == 3)
-	    source.update (glm::vec3 (components[0], components[1], components[2]), DynamicValue::Script);
+	    source.update (angleProperty
+                ? glm::radians (glm::vec3 (components[0], components[1], components[2]))
+                : glm::vec3 (components[0], components[1], components[2]), DynamicValue::Script);
 	else source.update (glm::vec4 (components[0], components[1], components[2], components[3]), DynamicValue::Script);
     }
 }
@@ -791,7 +803,9 @@ void ScriptEngine::queueScript (const std::string& key, DynamicValue& currentVal
     JS_SetPropertyStr (this->m_context, this->m_globalThis, "thisObject",
                        JS_DupValue (this->m_context, thisObject));
     LoadedModule candidate {.value = currentValue, .object = object, .module = JS_UNDEFINED,
-                            .layer = layer, .thisObject = thisObject};
+                            .layer = layer, .thisObject = thisObject,
+                            .angleProperty = object.isAngleProperty (currentValue),
+                            .rgbColorProperty = object.isRgbColorProperty (currentValue)};
     auto* previousModule = this->m_runningModule;
     this->m_runningModule = &candidate;
     ScopeGuard runningGuard ([this, previousModule] { this->m_runningModule = previousModule; });
@@ -849,6 +863,8 @@ void ScriptEngine::queueScript (const std::string& key, DynamicValue& currentVal
 	    .layer = layer,
 	    .thisObject = thisObject,
 	    .queueOrder = m_nextScriptQueueOrder,
+            .angleProperty = object.isAngleProperty (currentValue),
+            .rgbColorProperty = object.isRgbColorProperty (currentValue),
 	}
     );
 
@@ -930,12 +946,12 @@ void ScriptEngine::tick () {
 	this->activateLayer (module);
 	if (!module.initialized) {
 	    module.initialized = true;
-	    JSValue initArgs[] = {this->dynamicToJs (module.value, true)};
+	    JSValue initArgs[] = {this->dynamicToJs (module.value, true, module.angleProperty, module.rgbColorProperty)};
 	    JSValue initResult = this->call (module.module, 1, initArgs, "init");
 	    if (JS_IsException (initResult))
 	        logJSException (this->m_context, ("tick.init:" + key).c_str ());
 	    else jsToDynamicValue (this->m_context, initResult, module.value, key,
-	                           acceptsRgbColorResult (key));
+	                           module.rgbColorProperty || acceptsRgbColorResult (key), module.angleProperty);
 	    JS_FreeValue (this->m_context, initResult);
 	    JS_FreeValue (this->m_context, initArgs[0]);
 	    // Native sends all current project settings once when the wallpaper
@@ -974,7 +990,7 @@ void ScriptEngine::tick () {
 	this->m_runningModule = &module;
 	this->activateLayer (module);
 
-	JSValue args[] = { this->dynamicToJs (module.value, true) };
+	JSValue args[] = { this->dynamicToJs (module.value, true, module.angleProperty, module.rgbColorProperty) };
 	JSValue result = this->call (module.module, 1, args, "update");
 	ScopeGuard guard ([result, args, this] () {
 	    JS_FreeValue (this->m_context, result);
@@ -987,7 +1003,7 @@ void ScriptEngine::tick () {
 	}
 
 	jsToDynamicValue (this->m_context, result, module.value, key,
-	                  acceptsRgbColorResult (key));
+	                  module.rgbColorProperty || acceptsRgbColorResult (key), module.angleProperty);
     }
     if (m_mediaSource.getMediaInfo ().available) {
         const bool pending = std::ranges::any_of (m_scriptModules, [] (const auto& item) {

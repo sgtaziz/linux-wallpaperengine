@@ -57,6 +57,8 @@ public:
 	bool initialized = false;
 	bool mediaDelivered = false;
         size_t queueOrder = 0;
+        bool angleProperty = false;
+        bool rgbColorProperty = false;
     };
     struct JSObjectAdapters {
 	std::unique_ptr<Adapters::VectorAdapter<4>> vec4;
@@ -83,7 +85,8 @@ public:
     [[nodiscard]] EngineObject* getEngineObject () const { return m_engineObject.get (); }
     [[nodiscard]] SceneObject* getSceneObject () const { return m_sceneObject.get (); }
     [[nodiscard]] bool isEvaluatingModuleTopLevel () const { return m_evaluatingModuleTopLevel; }
-    JSValue dynamicToJs (DynamicValue& value, bool detached = false) const;
+    JSValue dynamicToJs (DynamicValue& value, bool detached = false, bool angleProperty = false,
+                         bool rgbColorProperty = false) const;
 
     /**
      * Evaluate a WallpaperEngine script's update() function.

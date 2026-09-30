@@ -16,6 +16,15 @@ struct ScriptPropertyBinding {
     DynamicValue& value;
 };
 
+// Transform-only scene nodes participate in the same script lifecycle as
+// visible layers; child renderers resolve these live parent values.
+inline auto scriptPropertyBindings (const WallpaperEngine::Data::Model::Object& object) {
+    return std::array<ScriptPropertyBinding, 4> {{
+        {"origin", *object.origin->value}, {"scale", *object.groupScale->value},
+        {"angles", *object.groupAngles->value}, {"visible", *object.groupVisible->value},
+    }};
+}
+
 // Bind concrete renderer values when present. Text has no typed angles field,
 // so its previously exposed group angle remains an explicit fallback.
 inline auto scriptPropertyBindings (const Image& image) {
