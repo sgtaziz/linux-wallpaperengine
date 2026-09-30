@@ -666,9 +666,15 @@ ParticleUniquePtr ObjectParser::parseParticle (const JSON& it, const Project& pr
 	std::vector<ParticleControlPoint> controlPoints;
 	const auto controlPointsIt = particleJson.find ("controlpoint");
 	if (controlPointsIt != particleJson.end () && controlPointsIt->is_array ()) {
-	    for (const auto& cp : *controlPointsIt) {
-		controlPoints.push_back (parseParticleControlPoint (cp));
-	    }
+            // Native 1401c5490 reads slots 0..7 by array index. The editor's
+            // id annotation does not select a runtime slot; skipped records
+            // retain their original array position.
+            const size_t count = std::min<size_t> (8, controlPointsIt->size ());
+            for (size_t index = 0; index < count; ++index) {
+                const auto& cp = (*controlPointsIt)[index];
+                if (cp.is_object ())
+                    controlPoints.push_back (parseParticleControlPoint (cp, static_cast<int> (index)));
+            }
 	}
 
 	// Parse children
@@ -1443,7 +1449,7 @@ ParticleRenderer ObjectParser::parseParticleRenderer (const JSON& it) {
     };
 }
 
-ParticleControlPoint ObjectParser::parseParticleControlPoint (const JSON& it) {
+ParticleControlPoint ObjectParser::parseParticleControlPoint (const JSON& it, int index) {
     auto parseVec3 = [&it] (const char* fieldName) {
         glm::vec3 value (0.0f);
         const auto field = it.find (fieldName);
@@ -1459,7 +1465,7 @@ ParticleControlPoint ObjectParser::parseParticleControlPoint (const JSON& it) {
     };
 
     return ParticleControlPoint {
-	.id = it.optional ("id", -1),
+	.id = index,
 	.flags = it.optional ("flags", 0u),
 	.parentControlPoint = it.optional ("parentcontrolpoint", 0),
 	.offset = parseVec3 ("offset"),

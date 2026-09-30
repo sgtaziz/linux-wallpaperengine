@@ -41,7 +41,7 @@ private:
     static ParticleOperatorUniquePtr parseParticleOperator (
         const JSON& it, const Properties& properties, bool birth = false, bool orthogonalScene = false);
     static ParticleRenderer parseParticleRenderer (const JSON& it);
-    static ParticleControlPoint parseParticleControlPoint (const JSON& it);
+    static ParticleControlPoint parseParticleControlPoint (const JSON& it, int index);
     static ParticleChild parseParticleChild (const JSON& it, const Project& project);
     static ParticleInstanceOverride parseParticleInstanceOverride (const JSON& it, const Properties& properties);
 };

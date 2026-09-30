@@ -12,6 +12,57 @@ using namespace WallpaperEngine::Data::Model;
 using WallpaperEngine::Data::JSON::JSON;
 using WallpaperEngine::Data::Parsers::ObjectParser;
 
+TEST_CASE ("Preset control point slots follow array order rather than editor IDs",
+           "[particle][controlpoint][parser]") {
+    // Native 1401c5490 at 1401d0530 reads array[index] and writes the
+    // descriptor at index*0x20. A sparse {id:6},{id:7} fixture therefore
+    // populates CP0/CP1, independently of scene instance override slots.
+    Project project {};
+    const auto object = ObjectParser::parse (JSON::parse (R"({"id":947,
+      "instanceoverride":{"controlpoint1":"99 100 101"},
+      "particle":{"controlpoint":[
+        {"id":6,"offset":"17 18 19","flags":4,"parentcontrolpoint":5},
+        {"id":7,"offset":"80 81 82","angles":"0.1 0.2 0.3"},
+        {"id":"editor-only","offset":"7 8 9"},
+        {"offset":"10 11 12"}
+      ]}})"), project);
+    REQUIRE (object != nullptr);
+    REQUIRE (object->id == 947);
+    const auto* particle = object->as<Particle> ();
+    REQUIRE (particle->controlPoints.size () == 4);
+    for (int index = 0; index < 4; ++index)
+        REQUIRE (particle->controlPoints[index].id == index);
+    REQUIRE (particle->controlPoints[0].offset == glm::vec3 (17, 18, 19));
+    REQUIRE (particle->controlPoints[0].flags == 4);
+    REQUIRE (particle->controlPoints[0].parentControlPoint == 5);
+    REQUIRE (particle->controlPoints[1].offset == glm::vec3 (80, 81, 82));
+    REQUIRE (particle->controlPoints[1].angles == glm::vec3 (0.1f, 0.2f, 0.3f));
+    REQUIRE (particle->controlPoints[2].offset == glm::vec3 (7, 8, 9));
+    REQUIRE (particle->controlPoints[3].offset == glm::vec3 (10, 11, 12));
+    REQUIRE (particle->instanceOverride.controlPoints[0] == nullptr);
+    REQUIRE (particle->instanceOverride.controlPoints[1]->value->getVec3 () == glm::vec3 (99, 100, 101));
+    REQUIRE (particle->instanceOverride.controlPoints[2] == nullptr);
+}
+
+TEST_CASE ("Preset control point holes preserve slots and records beyond eight are ignored",
+           "[particle][controlpoint][parser]") {
+    Project project {};
+    const auto object = ObjectParser::parse (JSON::parse (R"({"id":1,"particle":{
+      "controlpoint":[null,42,"unused",[],false,
+        {"id":0,"offset":"5 6 7"},null,
+        {"id":-100,"offset":"70 71 72","flags":2},
+        {"id":0,"offset":"900 901 902","flags":"must not be parsed"}
+      ]}})"), project);
+    REQUIRE (object != nullptr);
+    const auto* particle = object->as<Particle> ();
+    REQUIRE (particle->controlPoints.size () == 2);
+    REQUIRE (particle->controlPoints[0].id == 5);
+    REQUIRE (particle->controlPoints[0].offset == glm::vec3 (5, 6, 7));
+    REQUIRE (particle->controlPoints[1].id == 7);
+    REQUIRE (particle->controlPoints[1].offset == glm::vec3 (70, 71, 72));
+    REQUIRE (particle->controlPoints[1].flags == 2);
+}
+
 TEST_CASE ("Control point component parser preserves projection defaults and authored zeroes", "[particle][controlpoint][parser]") {
     for (bool orthogonal : {false, true}) {
         Project project {};
