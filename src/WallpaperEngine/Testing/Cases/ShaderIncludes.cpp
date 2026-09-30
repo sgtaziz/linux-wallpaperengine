@@ -6,7 +6,6 @@
 #include "WallpaperEngine/Render/Shaders/ShaderUnit.h"
 #include "WallpaperEngine/Render/Shaders/Shader.h"
 #include "WallpaperEngine/Render/Shaders/ExactSourceCache.h"
-#include "WallpaperEngine/Render/Objects/Effects/PositionUniform.h"
 
 using WallpaperEngine::Assets::AssetLocator;
 using WallpaperEngine::FileSystem::Container;
@@ -17,7 +16,6 @@ using WallpaperEngine::Data::Model::ShaderConstantMap;
 using WallpaperEngine::Data::Model::TextureMap;
 using WallpaperEngine::Data::Model::ComboMap;
 using WallpaperEngine::Data::Builders::UserSettingBuilder;
-using WallpaperEngine::Render::Objects::Effects::positionUniformForPass;
 
 static const ShaderConstantMap emptyConstants;
 static const TextureMap emptyTextures;
@@ -62,7 +60,7 @@ TEST_CASE ("Sprite-trail shader restores native texture corner handedness after 
     REQUIRE (glm::length (corrected - reflection * nativeRight) < 1e-6f);
 }
 
-TEST_CASE ("Position-role shader parameters follow the pass UV origin without mutating authored values",
+TEST_CASE ("Position metadata retains authored coordinates as an editor annotation",
            "[shader][position]") {
     auto files = std::make_unique<Container> ();
     AssetLocator assets (std::move (files));
@@ -80,15 +78,9 @@ TEST_CASE ("Position-role shader parameters follow the pass UV origin without mu
     REQUIRE (center->isPosition ());
     REQUIRE_FALSE (offset->isPosition ());
     REQUIRE (center->getVec2 () == glm::vec2 (0.25f, 0.2f));
-    REQUIRE (positionUniformForPass (center->getVec2 (), 1.0f, 0.0f) == glm::vec2 (0.25f, 0.8f));
-    REQUIRE (positionUniformForPass (center->getVec2 (), 0.0f, 1.0f) == center->getVec2 ());
-    REQUIRE (positionUniformForPass (center->getVec2 (), 0.75f, 0.25f) == glm::vec2 (0.25f, 0.65f));
+    // Native position/plain intermediate probes both upload the raw center.
+    // UV orientation belongs to image geometry, not to metadata-driven values.
     REQUIRE (center->getVec2 () == glm::vec2 (0.25f, 0.2f));
-
-    // A script/user setting may change the referenced value between draws.
-    const glm::vec2 updated (0.75f, 1.0f);
-    REQUIRE (positionUniformForPass (updated, 1.0f, 0.0f) == glm::vec2 (0.75f, 0.0f));
-    REQUIRE (positionUniformForPass (updated, 0.0f, 1.0f) == updated);
 
     ShaderConstantMap overrideConstants;
     overrideConstants.emplace ("center", UserSettingBuilder::fromValue (glm::vec2 (0.1f, 0.9f)));
