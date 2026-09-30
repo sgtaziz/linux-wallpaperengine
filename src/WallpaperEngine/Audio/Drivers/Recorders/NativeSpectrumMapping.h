@@ -27,6 +27,16 @@ inline unsigned nativeSpectrumFftLength (unsigned sampleRate, float durationFact
     return static_cast<unsigned> (rateFactor * 64.0f * durationFactor);
 }
 
+// The producer fills only this prefix of the
+// allocated transform input. The remaining complex cells retain the silence
+// value installed. Preserve the three float32
+// operations before truncation rather than simplifying to an integer ratio.
+inline unsigned nativeSpectrumCaptureLength (unsigned fftLength) {
+    const float fraction = 10.0f / 30.0f;
+    const float omitted = fraction * static_cast<float> (fftLength);
+    return static_cast<unsigned> (static_cast<float> (fftLength) - omitted);
+}
+
 // native. The ratio-one
 // endpoint maps to zero, although the native loop excludes that endpoint.
 inline unsigned nativeSpectrumMappedBand (unsigned bin, unsigned binCount,
