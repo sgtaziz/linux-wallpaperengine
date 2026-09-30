@@ -4,6 +4,7 @@
 #include "WallpaperEngine/Data/Builders/UserSettingBuilder.h"
 #include "WallpaperEngine/FileSystem/Container.h"
 #include "WallpaperEngine/Render/Shaders/ShaderUnit.h"
+#include "WallpaperEngine/Render/Shaders/ShaderMetadata.h"
 #include "WallpaperEngine/Render/Shaders/Shader.h"
 #include "WallpaperEngine/Render/Shaders/ExactSourceCache.h"
 
@@ -754,4 +755,41 @@ TEST_CASE ("Compiler version selects native radius-scaled PBR independently of m
     REQUIRE (environment != std::string::npos);
     REQUIRE (environment < compiled.find ("#if SHADERVERSION < 62"));
     REQUIRE (compiled.find ("#define VERSION 2\n") != std::string::npos);
+}
+
+TEST_CASE ("Shader metadata preserves native numeric defaults with decimal leading zeroes",
+           "[shader][metadata]") {
+    using WallpaperEngine::Render::Shaders::parseShaderMetadata;
+    const auto data = parseShaderMetadata (
+        R"({"default":0.75,"range":[0,01,-001.25,000e2],"label":"001"})", "metadata.frag");
+    REQUIRE (data.at ("default").get<float> () == 0.75f);
+    REQUIRE (data.at ("range").at (1).get<int> () == 1);
+    REQUIRE (data.at ("range").at (2).get<float> () == -1.25f);
+    REQUIRE (data.at ("range").at (3).get<float> () == 0.0f);
+    REQUIRE (data.at ("label").get<std::string> () == "001");
+    REQUIRE_THROWS (parseShaderMetadata (R"({"default":0.75,"options":{Bad":0}})", "metadata.frag"));
+    REQUIRE_THROWS (WallpaperEngine::Data::JSON::parseAuthoringJson (R"({"range":[0,01]})", "scene.json"));
+    auto files = std::make_unique<Container> ();
+    AssetLocator assets (std::move (files));
+    ShaderUnit shader (GLSLContext::UnitType_Fragment, "metadata.frag",
+        "uniform float g_Value; // {\"material\":\"Value\",\"default\":0.75,\"range\":[0,01]}\n"
+        "void main() { gl_FragColor = vec4(g_Value); }\n",
+        assets, emptyConstants, emptyTextures, emptyTextures, emptyCombos, emptyCombos);
+    REQUIRE (shader.getParameters ().size () == 1);
+    REQUIRE (shader.getParameters ()[0]->getFloat () == 0.75f);
+}
+
+TEST_CASE ("Valid scalar material metadata without a default registers zero", "[shader][metadata]") {
+    auto files = std::make_unique<Container> ();
+    AssetLocator assets (std::move (files));
+    ShaderUnit shader (GLSLContext::UnitType_Fragment, "defaults.frag",
+        "uniform float g_Registered; // {\"material\":\"Registered\"}\n"
+        "uniform float g_Zero = 0.0;\n"
+        "uniform float g_Quarter = 0.25;\n"
+        "// uniform float g_Unbound = 3.0;\n"
+        "uniform float g_Unbound;\n"
+        "void main() { gl_FragColor = vec4(g_Registered + g_Zero + g_Quarter + g_Unbound); }\n",
+        assets, emptyConstants, emptyTextures, emptyTextures, emptyCombos, emptyCombos);
+    REQUIRE (shader.getParameters ().size () == 1);
+    REQUIRE (shader.getParameters ()[0]->getFloat () == 0.0f);
 }
