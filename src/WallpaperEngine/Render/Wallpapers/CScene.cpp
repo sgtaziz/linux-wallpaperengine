@@ -432,6 +432,7 @@ const Audio::Drivers::Recorders::StereoSpectrum::Bands& CScene::getAudioSpectrum
 }
 
 void CScene::renderFrame (const glm::ivec4& viewport) {
+    m_particleFrameDurations.publish (getDeltaTime (), getContext ().getDriver ().getFrameCounter ());
     // Native scene resize (14017f1b0) updates the perspective projection and
     // its render targets together. Otherwise a resized preview samples a
     // stretched old root image through newly sized fullscreen effect targets.

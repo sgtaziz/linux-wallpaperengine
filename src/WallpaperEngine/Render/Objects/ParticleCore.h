@@ -886,6 +886,15 @@ inline float remapScalarMultiply (float currentValue, float inputValue,
                              RemapOperation::Multiply, envelope, range);
 }
 
+// Birth output bit 2 is allocated by angularvelocityrandom or angularmovement;
+// rotationrandom alone allocates only bit 1 (native 1401c5490).
+inline float remapBirthAngularSpeed (float current, float input, RemapOperation operation,
+                                    ScalarRemapRange range, bool angularVelocityRandom,
+                                    bool angularMovement) {
+    if (!(angularVelocityRandom || angularMovement)) return current;
+    return remapScalarValue (current, input, 0.0f, operation, std::nullopt, range);
+}
+
 inline glm::vec3 remapSpeedOutput (glm::vec3 velocity, float mappedSpeed) {
     const float currentSpeed = glm::length (velocity);
     return currentSpeed > 0.0f && std::isfinite (currentSpeed)

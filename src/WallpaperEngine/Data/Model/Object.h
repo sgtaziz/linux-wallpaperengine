@@ -273,12 +273,66 @@ public:
     virtual ~ParticleInitializerBase () = default;
 };
 
+class InheritControlPointVelocityInitializer : public ParticleInitializerBase {
+public:
+    UserSettingUniquePtr controlPoint;
+    UserSettingUniquePtr min;
+    UserSettingUniquePtr max;
+};
+
+class InheritInitialValueFromEventInitializer : public ParticleInitializerBase {
+public:
+    uint32_t mode { 0 };
+};
+
 class ColorRandomInitializer : public ParticleInitializerBase {
 public:
     ColorRandomInitializer (UserSettingUniquePtr min, UserSettingUniquePtr max) :
 	min (std::move (min)), max (std::move (max)) { }
     UserSettingUniquePtr min;
     UserSettingUniquePtr max;
+};
+
+class HsvColorRandomInitializer : public ParticleInitializerBase {
+public:
+    UserSettingUniquePtr hueMin;
+    UserSettingUniquePtr hueMax;
+    UserSettingUniquePtr hueSteps;
+    UserSettingUniquePtr saturationMin;
+    UserSettingUniquePtr saturationMax;
+    UserSettingUniquePtr valueMin;
+    UserSettingUniquePtr valueMax;
+};
+
+class ColorListInitializer : public ParticleInitializerBase {
+public:
+    std::vector<UserSettingUniquePtr> colors;
+    UserSettingUniquePtr hueNoise;
+    UserSettingUniquePtr saturationNoise;
+    UserSettingUniquePtr valueNoise;
+};
+
+class PositionOffsetRandomInitializer : public ParticleInitializerBase {
+public:
+    UserSettingUniquePtr scale;
+    UserSettingUniquePtr distance;
+    UserSettingUniquePtr timeScale;
+    glm::vec3 directions { 1.0f };
+    glm::vec3 sign { 0.0f };
+    int octaves { 6 };
+};
+
+class MapSequenceBetweenControlPointsInitializer : public ParticleInitializerBase {
+public:
+    UserSettingUniquePtr controlPointStart;
+    UserSettingUniquePtr controlPointEnd;
+    UserSettingUniquePtr count;
+    glm::vec2 bounds { 0.0f, 1.0f };
+    std::string limitBehavior { "repeat" };
+    uint32_t flags { 0 };
+    float arcAmount { 0.3f };
+    glm::vec3 arcDirection { 0.0f, 1.0f, 0.0f };
+    float sizeReduction { 0.9f };
 };
 
 class SizeRandomInitializer : public ParticleInitializerBase {
@@ -410,6 +464,33 @@ public:
     virtual ~ParticleOperatorBase () = default;
 };
 
+class InheritValueFromEventOperator : public ParticleOperatorBase {
+public:
+    uint32_t mode { 4 };
+};
+
+class MaintainDistanceToControlPointOperator : public ParticleOperatorBase {
+public:
+    UserSettingUniquePtr controlPoint;
+    UserSettingUniquePtr distance;
+    UserSettingUniquePtr variableStrength;
+};
+
+class MaintainDistanceBetweenControlPointsOperator : public ParticleOperatorBase {
+public:
+    UserSettingUniquePtr controlPointStart;
+    UserSettingUniquePtr controlPointEnd;
+};
+
+class ReduceMovementNearControlPointOperator : public ParticleOperatorBase {
+public:
+    UserSettingUniquePtr controlPoint;
+    UserSettingUniquePtr distanceInner;
+    UserSettingUniquePtr distanceOuter;
+    UserSettingUniquePtr reductionInner;
+    UserSettingUniquePtr reductionOuter;
+};
+
 class MovementOperator : public ParticleOperatorBase {
 public:
     MovementOperator (UserSettingUniquePtr drag, UserSettingUniquePtr gravity) :
@@ -445,7 +526,7 @@ public:
                        ControlPoint, DeltaToControlPoint, DirectionToControlPoint,
                        Color, Position, Velocity };
     enum class InputComponent { All, X, Y, Z, Sum, Average, Max, Min };
-    enum class Output { Size, Opacity, Speed };
+    enum class Output { Size, Opacity, Speed, MaxLifetime, Rotation, AngularSpeed };
     enum class Operation { Set, Multiply, Add, Subtract };
     enum class Transform { Identity, Sine, Square, Saw, Triangle, SimplexNoise, FBMNoise };
     ScalarRemapValueOperator (Input input, InputComponent inputComponent,
@@ -515,6 +596,15 @@ public:
     int inputControlPoint0;
     int transformOctaves;
     int inputControlPoint1;
+};
+
+// Birth opcode 0x0f shares the remap record/selectors with operator 0x13,
+// but executes once without the operator's age envelope.
+class RemapInitialValueInitializer : public ParticleInitializerBase {
+public:
+    explicit RemapInitialValueInitializer (std::unique_ptr<ParticleOperatorBase> remap) :
+        remap (std::move (remap)) { }
+    std::unique_ptr<ParticleOperatorBase> remap;
 };
 
 class AlphaFadeOperator : public ParticleOperatorBase {

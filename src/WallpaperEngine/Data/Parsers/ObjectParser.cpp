@@ -10,6 +10,7 @@
 #include "WallpaperEngine/Data/Model/Object.h"
 #include "WallpaperEngine/Data/Model/Project.h"
 #include "WallpaperEngine/Logging/Log.h"
+#include "WallpaperEngine/Render/Objects/ParticleInitialColor.h"
 
 #include <glm/gtc/constants.hpp>
 #include <algorithm>
@@ -571,7 +572,8 @@ ParticleUniquePtr ObjectParser::parseParticle (const JSON& it, const Project& pr
 	    for (size_t index = 0; index < initializersIt->size (); ++index) {
 		const auto& initializer = (*initializersIt)[index];
 		auto init = parseParticleInitializer (
-                    initializer, project.properties, project.sceneOrthogonalProjection);
+                    initializer, project.properties, project.sceneOrthogonalProjection,
+                    particleJson.optional<uint32_t> ("flags", 0));
 		if (init) {
 		    initializers.push_back (std::move (init));
 		} else {
@@ -586,7 +588,7 @@ ParticleUniquePtr ObjectParser::parseParticle (const JSON& it, const Project& pr
 	if (operatorsIt != particleJson.end () && operatorsIt->is_array ()) {
 	    for (size_t index = 0; index < operatorsIt->size (); ++index) {
 	const auto& op = (*operatorsIt)[index];
-		auto oper = parseParticleOperator (op, project.properties);
+		auto oper = parseParticleOperator (op, project.properties, false, project.sceneOrthogonalProjection);
 		if (oper) {
 		    const bool hasBlend = op.find ("blendinstart") != op.end ()
 		        || op.find ("blendinend") != op.end ()
@@ -727,17 +729,39 @@ ParticleUniquePtr ObjectParser::parseParticle (const JSON& it, const Project& pr
 	// uses the midpoint; color-change's start color takes precedence afterward.
 	glm::vec3 presetColorN (1.0f);
 	bool presetHasColor = false;
+	const bool extendedBirthColors = std::any_of (initializers.begin (), initializers.end (), [] (const auto& initializer) {
+	    return initializer->template is<HsvColorRandomInitializer> ()
+	        || initializer->template is<ColorListInitializer> ();
+	});
 	for (const auto& initializer : initializers) {
 	    if (initializer->is<ColorRandomInitializer> ()) {
 		const auto* random = initializer->as<ColorRandomInitializer> ();
 		presetColorN = (random->min->value->getVec3 ()
 		    + random->max->value->getVec3 ()) * 0.5f;
 		presetHasColor = true;
-		break;
+		if (!extendedBirthColors) break;
+	    } else if (initializer->is<HsvColorRandomInitializer> ()) {
+	        const auto* hsv = initializer->as<HsvColorRandomInitializer> ();
+	        const glm::vec3 midpoint (
+	            (hsv->hueMin->value->getFloat () + hsv->hueMax->value->getFloat ()) * 0.5f,
+	            (hsv->saturationMin->value->getFloat () + hsv->saturationMax->value->getFloat ()) * 0.5f,
+	            (hsv->valueMin->value->getFloat () + hsv->valueMax->value->getFloat ()) * 0.5f);
+	        presetColorN = WallpaperEngine::Render::Objects::ParticleCore::nativeInitialHsvToRgb (
+	            glm::clamp (midpoint, glm::vec3 (0.0f), glm::vec3 (1.0f)));
+	        presetHasColor = true;
+	    } else if (initializer->is<ColorListInitializer> ()) {
+	        const auto* colors = initializer->as<ColorListInitializer> ();
+	        if (!colors->colors.empty ()) {
+	            presetColorN = colors->colors[0]->value->getVec3 ();
+	            presetHasColor = true;
+	        }
 	    }
 	}
+	// New color families follow native last-initializer/fallback precedence.
+	// The accepted legacy-only path retains its prior colorchange behavior;
+	// changing that path requires a separate native/user regression batch.
 	for (const auto& op : operators) {
-	    if (op->is<ColorChangeOperator> ()) {
+	    if (op->is<ColorChangeOperator> () && (!extendedBirthColors || !presetHasColor)) {
 		const auto* change = op->as<ColorChangeOperator> ();
 		presetColorN = change->startValue->value->getVec3 ();
 		presetHasColor = true;
@@ -919,11 +943,92 @@ ParticleEmitter ObjectParser::parseParticleEmitter (const JSON& it) {
     }
 }
 
+namespace {
+uint32_t eventInheritanceMode (const JSON& it, const char* fallback) {
+    const auto input = it.optional<std::string> ("input", fallback);
+    static constexpr const char* modes[] = {"setcolor", "multiplycolor", "setopacity", "multiplyopacity",
+        "setcoloropacity", "multiplycoloropacity", "setvelocity", "addvelocity", "setsize", "multiplysize",
+        "setrotation", "addrotation", "setangularvelocity", "addangularvelocity"};
+    for (uint32_t i = 0; i < 14; ++i) if (input == modes[i]) return i;
+    return 14; // Native unknown selector is a no-op, never another channel.
+}
+}
+
 ParticleInitializerUniquePtr ObjectParser::parseParticleInitializer (
-    const JSON& it, const Properties& properties, bool orthogonalScene) {
+    const JSON& it, const Properties& properties, bool orthogonalScene, uint32_t nodeFlags) {
     std::string name = it.optional<std::string> ("name", "");
 
-    if (name == "colorrandom") {
+    if (name == "inheritcontrolpointvelocity") {
+        auto result = std::make_unique<InheritControlPointVelocityInitializer> ();
+        result->controlPoint = it.user ("controlpoint", properties, 0);
+        result->min = it.user ("min", properties, 0.1f);
+        result->max = it.user ("max", properties, 0.2f);
+        return result;
+    } else if (name == "inheritinitialvaluefromevent") {
+        auto result = std::make_unique<InheritInitialValueFromEventInitializer> ();
+        result->mode = eventInheritanceMode (it, "setcolor");
+        return result;
+    } else if (name == "remapinitialvalue") {
+        JSON normalized = it;
+        normalized["name"] = "remapvalue";
+        if (!it.contains ("input") || it.at ("input").is_null ()) normalized["input"] = "maxlifetime";
+        auto remap = parseParticleOperator (normalized, properties, true);
+        if (!remap) return nullptr;
+        return std::make_unique<RemapInitialValueInitializer> (std::move (remap));
+    } else if (name == "hsvcolorrandom") {
+        auto result = std::make_unique<HsvColorRandomInitializer> ();
+        result->hueMin = it.user ("huemin", properties, 0.0f);
+        result->hueMax = it.user ("huemax", properties, 1.0f);
+        result->hueSteps = it.user ("huesteps", properties, 6);
+        result->saturationMin = it.user ("saturationmin", properties, 0.5f);
+        result->saturationMax = it.user ("saturationmax", properties, 1.0f);
+        result->valueMin = it.user ("valuemin", properties, 0.5f);
+        result->valueMax = it.user ("valuemax", properties, 1.0f);
+        return result;
+    } else if (name == "colorlist") {
+        auto result = std::make_unique<ColorListInitializer> ();
+        const auto colors = it.optional ("colors", JSON::array ({"1 1 1"}));
+        if (!colors.is_array ()) throw std::invalid_argument ("Particle colorlist colors must be an array");
+        for (const auto& color : colors) {
+            // Native list entries are normalized RGB vectors, including integer
+            // strings such as "1 1 1"; ColorBuilder's byte-color heuristic is
+            // inappropriate here.
+            if (!color.is_string ()) continue;
+            JSON entry = {{"color", color}};
+            result->colors.push_back (entry.user ("color", properties, glm::vec3 (1.0f)));
+        }
+        result->hueNoise = it.user ("huenoise", properties, 0.0f);
+        result->saturationNoise = it.user ("saturationnoise", properties, 0.0f);
+        result->valueNoise = it.user ("valuenoise", properties, 0.0f);
+        return result;
+    } else if (name == "positionoffsetrandom") {
+        auto result = std::make_unique<PositionOffsetRandomInitializer> ();
+        result->scale = it.user ("scale", properties, orthogonalScene ? 0.001f : 1.0f);
+        result->distance = it.user ("distance", properties, orthogonalScene ? 100.0f : 0.1f);
+        result->timeScale = it.user ("timescale", properties, 1.0f);
+        result->directions = it.optional ("directions", orthogonalScene
+            ? glm::vec3 (1.0f, 1.0f, 0.0f) : glm::vec3 (1.0f));
+        result->sign = it.optional ("sign", glm::vec3 (0.0f));
+        result->octaves = it.optional<int> ("octaves", 6);
+        return result;
+    } else if (name == "mapsequencebetweencontrolpoints") {
+        auto result = std::make_unique<MapSequenceBetweenControlPointsInitializer> ();
+        result->controlPointStart = it.user ("controlpointstart", properties, 0);
+        result->controlPointEnd = it.user ("controlpointend", properties, 1);
+        result->count = it.user ("count", properties, 32);
+        result->bounds = it.optional ("bounds", glm::vec2 (0.0f, 1.0f));
+        result->limitBehavior = it.optional<std::string> ("limitbehavior", "repeat");
+        result->flags = it.optional<uint32_t> ("flags", 0);
+        if ((result->flags & 16u) != 0 && (nodeFlags & 0x20u) == 0) {
+            sLog.error ("Unsupported mapsequencebetweencontrolpoints count patch: initializer flags=16",
+                " requires native instance dirty-write timing; node flags=0x20 suppresses this patch");
+            return nullptr;
+        }
+        result->arcAmount = it.optional<float> ("arcamount", 0.3f);
+        result->arcDirection = it.optional ("arcdirection", glm::vec3 (0.0f, 1.0f, 0.0f));
+        result->sizeReduction = it.optional<float> ("sizereductionamount", 0.9f);
+        return result;
+    } else if (name == "colorrandom") {
 	return std::make_unique<ColorRandomInitializer> (
 	    it.color ("min", properties, Builders::ColorBuilder::Black),
 	    it.color ("max", properties, Builders::ColorBuilder::White)
@@ -988,10 +1093,34 @@ ParticleInitializerUniquePtr ObjectParser::parseParticleInitializer (
     return nullptr;
 }
 
-ParticleOperatorUniquePtr ObjectParser::parseParticleOperator (const JSON& it, const Properties& properties) {
+ParticleOperatorUniquePtr ObjectParser::parseParticleOperator (
+    const JSON& it, const Properties& properties, bool birth, bool orthogonalScene) {
     std::string name = it.optional<std::string> ("name", "");
 
-    if (name == "movement") {
+    if (name == "inheritvaluefromevent") {
+        auto result = std::make_unique<InheritValueFromEventOperator> ();
+        result->mode = eventInheritanceMode (it, "setcoloropacity");
+        return result;
+    } else if (name == "maintaindistancetocontrolpoint") {
+        auto result = std::make_unique<MaintainDistanceToControlPointOperator> ();
+        result->controlPoint = it.user ("controlpoint", properties, 0);
+        result->distance = it.user ("distance", properties, orthogonalScene ? 200.0f : 1.0f);
+        result->variableStrength = it.user ("variablestrength", properties, 0.0f);
+        return result;
+    } else if (name == "maintaindistancebetweencontrolpoints") {
+        auto result = std::make_unique<MaintainDistanceBetweenControlPointsOperator> ();
+        result->controlPointStart = it.user ("controlpointstart", properties, 0);
+        result->controlPointEnd = it.user ("controlpointend", properties, 1);
+        return result;
+    } else if (name == "reducemovementnearcontrolpoint") {
+        auto result = std::make_unique<ReduceMovementNearControlPointOperator> ();
+        result->controlPoint = it.user ("controlpoint", properties, 0);
+        result->distanceInner = it.user ("distanceinner", properties, orthogonalScene ? 100.0f : 0.5f);
+        result->distanceOuter = it.user ("distanceouter", properties, orthogonalScene ? 350.0f : 1.0f);
+        result->reductionInner = it.user ("reductioninner", properties, 100.0f);
+        result->reductionOuter = it.user ("reductionouter", properties, 0.0f);
+        return result;
+    } else if (name == "movement") {
 	return std::make_unique<MovementOperator> (
 	    it.user ("drag", properties, 0.0f), it.user ("gravity", properties, glm::vec3 (0.0f))
 	);
@@ -1053,7 +1182,9 @@ ParticleOperatorUniquePtr ObjectParser::parseParticleOperator (const JSON& it, c
 	const bool vectorOutput = output == "color" || output == "position" || output == "velocity";
 	if (it.contains ("flags") && !it.at ("flags").is_number_integer ()) return nullptr;
 	const int flags = it.optional<int> ("flags", 1);
-	if (output != "size" && output != "opacity" && output != "speed"
+	const bool birthScalarOutput = birth && (output == "maxlifetime"
+            || output == "rotation" || output == "angularspeed");
+	if (output != "size" && output != "opacity" && output != "speed" && !birthScalarOutput
 	    && !vectorOutput) return nullptr;
 	if (vectorOutput) {
 	    if (outputComponent != "all" && outputComponent != "x"
@@ -1166,6 +1297,9 @@ ParticleOperatorUniquePtr ObjectParser::parseParticleOperator (const JSON& it, c
 	                               : ScalarRemapValueOperator::InputComponent::All,
 	    output == "size" ? ScalarRemapValueOperator::Output::Size
 	    : output == "speed" ? ScalarRemapValueOperator::Output::Speed
+	    : output == "maxlifetime" ? ScalarRemapValueOperator::Output::MaxLifetime
+	    : output == "rotation" ? ScalarRemapValueOperator::Output::Rotation
+	    : output == "angularspeed" ? ScalarRemapValueOperator::Output::AngularSpeed
 	                         : ScalarRemapValueOperator::Output::Opacity,
 	    operation == "remap" ? ScalarRemapValueOperator::Operation::Set
 	    : operation == "multiply" ? ScalarRemapValueOperator::Operation::Multiply

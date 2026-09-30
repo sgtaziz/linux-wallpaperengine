@@ -1,5 +1,8 @@
 #include "CParticle.h"
 #include "ParticleCore.h"
+#include "ParticleBirthGeometry.h"
+#include "ParticleInitialColor.h"
+#include "ParticleControlPointConstraints.h"
 #include "ParticleImageEmitterReadback.h"
 #include "CImage.h"
 
@@ -19,6 +22,7 @@
 #include <GL/glew.h>
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <filesystem>
@@ -669,6 +673,8 @@ void CParticle::setup () {
 
     updateOrdinaryControlPoints ();
 
+    for (auto& cp : m_controlPoints) cp.previousPosition = cp.position;
+
     m_initialized = true;
     if (m_pendingEmitCount != 0) {
         const uint32_t pending = std::exchange (m_pendingEmitCount, 0u);
@@ -906,6 +912,7 @@ void CParticle::stop () {
     m_ropeBirthSlots.clear ();
     m_ropeExpiredCount = 0;
     m_nativeSlots = ParticleCore::NativeSlotAllocation {};
+    m_eventSlotValues.clear ();
     for (size_t index = 0; index < m_childNodes.size ();) {
         auto& node = m_childNodes[index];
         if (m_particle.children[node.descriptor].type == "static") {
@@ -942,6 +949,8 @@ bool CParticle::isPlaying () const {
 
 void CParticle::update (ParticleCore::TickClock clock) {
     if (clock.operatorPasses == 0) return;
+    // Native retains one previous CP matrix throughout both low-FPS passes.
+    for (auto& cp : m_controlPoints) cp.previousPosition = cp.position;
     float screenWidth = static_cast<float> (getScene ().getWidth ());
     float screenHeight = static_cast<float> (getScene ().getHeight ());
     // Live scripted origins and moving parents change the inverse even when
@@ -1049,6 +1058,12 @@ void CParticle::update (ParticleCore::TickClock clock) {
 		        ++m_ropeExpiredCount;
 		    }
 		}
+        if (!m_childNodes.empty () || !m_particle.children.empty ()) {
+            const auto slot = m_particles[readIdx].poolSlot;
+            if (m_eventSlotValues.size () <= slot) m_eventSlotValues.resize (slot + 1);
+            m_eventSlotValues[slot] = eventValues (m_particles[readIdx]);
+            m_eventSlotValues[slot].alive = false;
+        }
 		m_nativeSlots.release (m_particles[readIdx].poolSlot);
 		if (!m_particle.children.empty ()) expiredParticles.push_back (m_particles[readIdx]);
 	    }
@@ -1155,6 +1170,7 @@ void CParticle::update (ParticleCore::TickClock clock) {
 		node.follow = false;
 		node.detached = true;
 		node.runtime->disableStaticEmittersRecursively ();
+        node.runtime->m_eventParentSlot.reset ();
 		node.runtime->setChildAnchor (m_simulationModelMatrix,
 		    node.runtime->m_childParentPosition, false);
 	    }
@@ -1257,6 +1273,12 @@ void CParticle::spawnChild (size_t descriptor, const ParticleInstance* parent, b
         node.model = std::move (model);
         node.runtime = std::make_unique<CParticle> (
             getScene (), *node.model, m_childDepth + 1, m_childAncestry, this);
+        if (parent) {
+            if (m_eventSlotValues.size () <= parent->poolSlot)
+                m_eventSlotValues.resize (parent->poolSlot + 1);
+            m_eventSlotValues[parent->poolSlot] = eventValues (*parent);
+            node.runtime->m_eventParentSlot = parent->poolSlot;
+        }
         node.runtime->m_hasChildParentMatrix = true;
         // One-shot spawn/death children keep their birth-space anchor. Static
         // children and live follow children inherit the changing parent basis.
@@ -1291,6 +1313,8 @@ void CParticle::processChildEvents (const std::vector<ParticleInstance>& expired
                 node.follow = false;
                 node.detached = true;
                 node.runtime->disableStaticEmittersRecursively ();
+                // Native event-follow invalidates +0x478 at parent expiry.
+                node.runtime->m_eventParentSlot.reset ();
                 node.runtime->setChildAnchor (m_simulationModelMatrix, particle.position, false);
                 if (traceParticleChildren (*this))
                     sLog.out ("CHILD_TRACE detach object=", m_particle.id,
@@ -1942,8 +1966,23 @@ void CParticle::setupInitializers () {
 
 	InitializerFunc func;
 
-	if (initializer->is<ColorRandomInitializer> ()) {
+	if (initializer->is<InheritInitialValueFromEventInitializer> ()) {
+            func = createInheritInitialValueFromEventInitializer (*initializer->as<InheritInitialValueFromEventInitializer> ());
+        } else if (initializer->is<InheritControlPointVelocityInitializer> ()) {
+            func = createInheritControlPointVelocityInitializer (*initializer->as<InheritControlPointVelocityInitializer> ());
+        } else if (initializer->is<ColorRandomInitializer> ()) {
 	    func = createColorRandomInitializer (*initializer->as<ColorRandomInitializer> ());
+	} else if (initializer->is<HsvColorRandomInitializer> ()) {
+	    func = createHsvColorRandomInitializer (*initializer->as<HsvColorRandomInitializer> ());
+	} else if (initializer->is<ColorListInitializer> ()) {
+	    func = createColorListInitializer (*initializer->as<ColorListInitializer> ());
+	} else if (initializer->is<PositionOffsetRandomInitializer> ()) {
+	    func = createPositionOffsetRandomInitializer (*initializer->as<PositionOffsetRandomInitializer> ());
+	} else if (initializer->is<MapSequenceBetweenControlPointsInitializer> ()) {
+	    func = createMapSequenceBetweenControlPointsInitializer (
+	        *initializer->as<MapSequenceBetweenControlPointsInitializer> ());
+	} else if (initializer->is<RemapInitialValueInitializer> ()) {
+	    func = createRemapInitialValueInitializer (*initializer->as<RemapInitialValueInitializer> ());
 	} else if (initializer->is<SizeRandomInitializer> ()) {
 	    func = createSizeRandomInitializer (*initializer->as<SizeRandomInitializer> ());
 	} else if (initializer->is<AlphaRandomInitializer> ()) {
@@ -1971,6 +2010,178 @@ void CParticle::setupInitializers () {
 	    m_initializers.push_back (std::move (func));
 	}
     }
+}
+
+ParticleCore::EventParticleValues CParticle::eventValues (const ParticleInstance& p) const {
+    const bool randomRotation = std::any_of (m_particle.initializers.begin (), m_particle.initializers.end (),
+        [] (const auto& init) { return init && init->template is<RotationRandomInitializer> (); });
+    const bool angularMovement = std::any_of (m_particle.operators.begin (), m_particle.operators.end (),
+        [] (const auto& op) { return op && op->template is<AngularMovementOperator> (); });
+    const bool randomAngularVelocity = std::any_of (m_particle.initializers.begin (), m_particle.initializers.end (),
+        [] (const auto& init) { return init && init->template is<AngularVelocityRandomInitializer> (); });
+    return {p.color, p.alpha, p.size, p.velocity, p.rotation, p.angularVelocity,
+            randomRotation || angularMovement, randomAngularVelocity || angularMovement, true, p.alive && p.lifetime > 0.0f && p.age <= p.lifetime};
+}
+
+ParticleCore::EventParticleValues CParticle::parentEventValues () const {
+    if (!m_eventParentSlot || !m_parentParticleRuntime) return {};
+    const auto& parent = *m_parentParticleRuntime;
+    // A compact vector is an implementation detail: match the native pool
+    // slot, not the spatial event-follow birth ID or a generation guard.
+    for (uint32_t i = 0; i < parent.m_particleCount; ++i)
+        if (parent.m_particles[i].poolSlot == *m_eventParentSlot)
+            return parent.eventValues (parent.m_particles[i]);
+    return *m_eventParentSlot < parent.m_eventSlotValues.size ()
+        ? parent.m_eventSlotValues[*m_eventParentSlot] : ParticleCore::EventParticleValues {};
+}
+
+void CParticle::applyEventValues (ParticleInstance& p, const ParticleCore::EventParticleValues& values, bool birth) {
+    p.color = values.color; p.alpha = values.alpha; p.size = values.size;
+    p.velocity = values.velocity; p.rotation = values.rotation; p.angularVelocity = values.angularVelocity;
+    if (birth) { p.initial.color = p.color; p.initial.alpha = p.alpha; p.initial.size = p.size; }
+}
+
+InitializerFunc CParticle::createInheritControlPointVelocityInitializer (const InheritControlPointVelocityInitializer& init) {
+    return [this, &init] (ParticleInstance& p) {
+        const float rawIndex = init.controlPoint->value->getFloat ();
+        const size_t index = !std::isfinite (rawIndex) || rawIndex < 0.0f || rawIndex >= 8.0f
+            ? 7 : static_cast<size_t> (rawIndex);
+        if (index >= m_controlPoints.size ()) return;
+        const auto& cp = m_controlPoints[index];
+        const float speed = (m_particle.flags & 0x10u) != 0 ? 1.0f : speedOverrideValue ()->getFloat ();
+        // root+0x150 is the previous OUTER scene duration (14017fa70:215),
+        // independent of this node's rate and any half-duration operator pass.
+        // Preserve the native single MT draw on zero-time startup as well;
+        // avoid poisoning the finite simulation when native 0/0 is undefined.
+        const float previousSceneDuration = getScene ().getPreviousParticleSceneDuration ();
+        const bool validDuration = std::isfinite (previousSceneDuration) && previousSceneDuration > 0.0f;
+        const float elapsed = validDuration ? previousSceneDuration : 1.0f;
+        const auto previous = validDuration ? cp.previousPosition : cp.position;
+        p.velocity += ParticleCore::inheritedControlPointVelocity (
+            m_rng, cp.position, previous, elapsed, init.min->value->getFloat () * speed,
+            init.max->value->getFloat () * speed, m_birthInitializerBasis,
+            glm::mat3 (m_controlPointInverse), (m_particle.flags & 1u) != 0, cp.worldSpace);
+    };
+}
+
+InitializerFunc CParticle::createInheritInitialValueFromEventInitializer (const InheritInitialValueFromEventInitializer& init) {
+    return [this, &init] (ParticleInstance& p) {
+        auto values = eventValues (p);
+        if (ParticleCore::applyEventInheritance (values, parentEventValues (),
+                static_cast<ParticleCore::EventInheritanceMode> (init.mode)))
+            applyEventValues (p, values, true);
+    };
+}
+
+InitializerFunc CParticle::createHsvColorRandomInitializer (const HsvColorRandomInitializer& init) {
+    return [this, &init] (ParticleInstance& p) {
+        const CParticle* root = instanceOverrideOwner ();
+        const glm::vec3 tint = sharedInstanceOverrideValue (&ParticleInstanceOverride::colorn)->getVec3 ();
+        const bool tintValid = ParticleCore::particleInstanceTintValid (tint,
+            root->m_particle.presetColorN, m_particle.presetColorN,
+            root->m_particle.flags, m_particle.flags, root == this);
+        // The Windows CRT stream is thread-local and performance-time seeded;
+        // it must not consume or reseed the scene's shared particle MT stream.
+        thread_local uint32_t crtState = static_cast<uint32_t> (
+            std::chrono::steady_clock::now ().time_since_epoch ().count ());
+        const float rawSteps = init.hueSteps->value->getFloat ();
+        const int steps = std::isfinite (rawSteps) && rawSteps >= 0.0f && rawSteps < 2147483648.0f
+            ? static_cast<int> (rawSteps) : 0;
+        const ParticleCore::HsvRandomRange range {
+            init.hueMin->value->getFloat (), init.hueMax->value->getFloat (), steps,
+            init.saturationMin->value->getFloat (), init.saturationMax->value->getFloat (),
+            init.valueMin->value->getFloat (), init.valueMax->value->getFloat () };
+        p.color *= ParticleCore::nativeHsvRandomSample (
+            m_rng, ParticleCore::nativeCrtRandomWord (crtState), range, tint, tintValid);
+        p.initial.color = p.color;
+    };
+}
+
+InitializerFunc CParticle::createColorListInitializer (const ColorListInitializer& init) {
+    return [this, &init] (ParticleInstance& p) {
+        ParticleCore::ColorListRandomRange range;
+        range.colorsRgb.clear ();
+        for (const auto& color : init.colors) range.colorsRgb.push_back (color->value->getVec3 ());
+        range.noise = { init.hueNoise->value->getFloat (), init.saturationNoise->value->getFloat (),
+                        init.valueNoise->value->getFloat () };
+        const CParticle* root = instanceOverrideOwner ();
+        const glm::vec3 tint = sharedInstanceOverrideValue (&ParticleInstanceOverride::colorn)->getVec3 ();
+        const bool tintValid = ParticleCore::particleInstanceTintValid (tint,
+            root->m_particle.presetColorN, m_particle.presetColorN,
+            root->m_particle.flags, m_particle.flags, root == this);
+        p.color *= ParticleCore::nativeColorListSample (m_rng, range, tint, tintValid);
+        p.initial.color = p.color;
+    };
+}
+
+InitializerFunc CParticle::createPositionOffsetRandomInitializer (const PositionOffsetRandomInitializer& init) {
+    auto* scale = init.scale->value.get ();
+    auto* distance = init.distance->value.get ();
+    auto* timeScale = init.timeScale->value.get ();
+    return [this, scale, distance, timeScale, directions = init.directions,
+            sign = init.sign, octaves = init.octaves] (ParticleInstance& p) {
+        const auto position = ParticleCore::positionOffsetBirth (
+            ParticleCore::toAuthoredVector (p.position), getScene ().getParticleSceneTime (),
+            scale->getFloat (), distance->getFloat (), timeScale->getFloat (),
+            octaves, directions, sign);
+        if (position) p.position = ParticleCore::toSimulationVector (*position);
+        else sLog.error ("Particle position offset outside bounded noise domain: ", m_particle.name);
+    };
+}
+
+InitializerFunc CParticle::createMapSequenceBetweenControlPointsInitializer (
+    const MapSequenceBetweenControlPointsInitializer& init) {
+    auto* start = init.controlPointStart->value.get ();
+    auto* end = init.controlPointEnd->value.get ();
+    auto counter = std::make_shared<SequenceCounter> ();
+    counter->count = init.count->value.get ();
+    counter->step = ParticleCore::betweenControlPointsStep (counter->count->getFloat ());
+    // Native sequence 14 periodic reset uses authored bit 0x20; its bit 2
+    // tapers birth velocity and is unrelated to circular sequence reset.
+    counter->flags = (init.flags & 0x20u) != 0 ? 2u : 0u;
+    m_sequenceCounters.push_back (counter);
+    return [this, start, end, counter, bounds = init.bounds,
+            mirror = init.limitBehavior == "mirror", flags = init.flags,
+            arcAmount = init.arcAmount, arcDirection = ParticleCore::toSimulationVector (init.arcDirection),
+            sizeReduction = init.sizeReduction] (ParticleInstance& p) {
+        const auto cpPosition = [this] (DynamicValue* value) {
+            const float raw = value->getFloat ();
+            // Native factory casts to unsigned and bounds CP indices at 7.
+            const size_t index = std::isfinite (raw) && raw >= 0.0f && raw < 8.0f
+                ? static_cast<size_t> (raw) : 7u;
+            return index < m_controlPoints.size () ? m_controlPoints[index].position : glm::vec3 (0.0f);
+        };
+        ParticleCore::BetweenControlPointsState state { counter->phase, counter->step };
+        const auto result = ParticleCore::betweenControlPointsBirth (
+            p.position, p.velocity, p.size, cpPosition (start), cpPosition (end),
+            state, bounds, mirror, flags, arcAmount, arcDirection, sizeReduction,
+            (m_particle.flags & 1u) != 0);
+        counter->phase = state.phase;
+        counter->step = state.step;
+        p.position = result.position;
+        p.velocity = result.velocity;
+        p.size = result.size;
+        p.initial.size = p.size;
+    };
+}
+
+InitializerFunc CParticle::createRemapInitialValueInitializer (const RemapInitialValueInitializer& init) {
+    OperatorFunc remap;
+    if (init.remap->is<ScalarRemapValueOperator> ())
+        remap = createScalarRemapValueOperator (*init.remap->as<ScalarRemapValueOperator> (), true);
+    else if (init.remap->is<VectorRemapValueOperator> ())
+        remap = createVectorRemapValueOperator (*init.remap->as<VectorRemapValueOperator> (), true);
+    if (!remap) return {};
+    return [this, remap = std::move (remap), one = std::vector<ParticleInstance> (1)]
+           (ParticleInstance& p) mutable {
+        one[0] = p;
+        remap (one, 1, m_controlPoints, 0.0f, ParticleCore::MovementTime { 0.0f, 0.0f });
+        p = one[0];
+        p.initial.color = p.color;
+        p.initial.alpha = p.alpha;
+        p.initial.size = p.size;
+        p.initial.lifetime = p.lifetime;
+    };
 }
 
 InitializerFunc CParticle::createColorRandomInitializer (const ColorRandomInitializer& init) {
@@ -2227,7 +2438,18 @@ void CParticle::setupOperators () {
 
 	OperatorFunc func;
 
-	if (op->is<MovementOperator> ()) {
+	if (op->is<InheritValueFromEventOperator> ()) {
+            const auto& event = *op->as<InheritValueFromEventOperator> ();
+            if (event.mode <= 1 || event.mode == 4 || event.mode == 5) m_resetColorEachPass = true;
+            if (event.mode >= 2 && event.mode <= 5) m_resetAlphaEachPass = true;
+            func = createInheritValueFromEventOperator (event);
+        } else if (op->is<MaintainDistanceToControlPointOperator> ()) {
+            func = createMaintainDistanceToControlPointOperator (*op->as<MaintainDistanceToControlPointOperator> ());
+        } else if (op->is<MaintainDistanceBetweenControlPointsOperator> ()) {
+            func = createMaintainDistanceBetweenControlPointsOperator (*op->as<MaintainDistanceBetweenControlPointsOperator> ());
+        } else if (op->is<ReduceMovementNearControlPointOperator> ()) {
+            func = createReduceMovementNearControlPointOperator (*op->as<ReduceMovementNearControlPointOperator> ());
+        } else if (op->is<MovementOperator> ()) {
 	    func = createMovementOperator (*op->as<MovementOperator> ());
 	} else if (op->is<AngularMovementOperator> ()) {
 	    func = createAngularMovementOperator (*op->as<AngularMovementOperator> ());
@@ -2275,6 +2497,83 @@ void CParticle::setupOperators () {
 	    m_operators.push_back (std::move (func));
 	}
     }
+}
+
+namespace {
+size_t constraintControlPointIndex (const UserSettingUniquePtr& setting) {
+    const float value = setting->value->getFloat ();
+    if (!std::isfinite (value) || value < 0.0f || value >= 8.0f) return 7;
+    return static_cast<size_t> (value);
+}
+ParticleCore::ConstraintControlPoint constraintPoint (const ControlPointData& cp) {
+    return {cp.position, cp.previousPosition, cp.basis};
+}
+float constraintEnvelope (const ParticleOperatorBase& op, const ParticleInstance& p) {
+    const auto envelope = operatorEnvelope (op.blendEnvelope ? &*op.blendEnvelope : nullptr);
+    return envelope && ParticleCore::usesBlendOpcode (*envelope)
+        ? ParticleCore::blendWeight (p.getLifetimePos (), *envelope) : 1.0f;
+}
+}
+
+OperatorFunc CParticle::createMaintainDistanceToControlPointOperator (const MaintainDistanceToControlPointOperator& op) {
+    return [&op] (std::vector<ParticleInstance>& particles, uint32_t count,
+                  const std::vector<ControlPointData>& cps, float, ParticleCore::MovementTime time) {
+        const auto index = constraintControlPointIndex (op.controlPoint);
+        if (index >= cps.size ()) return;
+        const auto cp = constraintPoint (cps[index]);
+        for (uint32_t i = 0; i < count; ++i) {
+            auto& p = particles[i];
+            if (const auto result = ParticleCore::maintainControlPointDistance (
+                    p.position, cp, op.distance->value->getFloat (),
+                    op.variableStrength->value->getFloat (), time.integration, constraintEnvelope (op, p)))
+                p.position = *result;
+        }
+    };
+}
+
+OperatorFunc CParticle::createMaintainDistanceBetweenControlPointsOperator (const MaintainDistanceBetweenControlPointsOperator& op) {
+    return [&op] (std::vector<ParticleInstance>& particles, uint32_t count,
+                  const std::vector<ControlPointData>& cps, float, ParticleCore::MovementTime) {
+        const auto start = constraintControlPointIndex (op.controlPointStart);
+        const auto end = constraintControlPointIndex (op.controlPointEnd);
+        if (start >= cps.size () || end >= cps.size ()) return;
+        for (uint32_t i = 0; i < count; ++i) {
+            auto& p = particles[i];
+            p.position = ParticleCore::maintainBetweenControlPoints (
+                p.position, constraintPoint (cps[start]), constraintPoint (cps[end]), constraintEnvelope (op, p));
+        }
+    };
+}
+
+OperatorFunc CParticle::createReduceMovementNearControlPointOperator (const ReduceMovementNearControlPointOperator& op) {
+    return [&op] (std::vector<ParticleInstance>& particles, uint32_t count,
+                  const std::vector<ControlPointData>& cps, float, ParticleCore::MovementTime time) {
+        const auto index = constraintControlPointIndex (op.controlPoint);
+        if (index >= cps.size ()) return;
+        for (uint32_t i = 0; i < count; ++i) {
+            auto& p = particles[i];
+            p.velocity *= ParticleCore::movementNearControlPointMultiplier (
+                p.position, cps[index].position, op.distanceInner->value->getFloat (),
+                op.distanceOuter->value->getFloat (), op.reductionInner->value->getFloat (),
+                op.reductionOuter->value->getFloat (), time.integration, constraintEnvelope (op, p));
+        }
+    };
+}
+
+OperatorFunc CParticle::createInheritValueFromEventOperator (const InheritValueFromEventOperator& op) {
+    return [this, &op] (std::vector<ParticleInstance>& particles, uint32_t count,
+                       const std::vector<ControlPointData>&, float, ParticleCore::MovementTime) {
+        const auto parent = parentEventValues ();
+        const auto envelope = operatorEnvelope (op.blendEnvelope ? &*op.blendEnvelope : nullptr);
+        const bool envelopeActive = envelope && ParticleCore::usesBlendOpcode (*envelope);
+        for (uint32_t i = 0; i < count; ++i) {
+            auto& p = particles[i];
+            auto values = eventValues (p);
+            if (ParticleCore::applyEventInheritance (values, parent,
+                    static_cast<ParticleCore::EventInheritanceMode> (op.mode), constraintEnvelope (op, p), true, envelopeActive))
+                applyEventValues (p, values, false);
+        }
+    };
 }
 
 OperatorFunc CParticle::createMovementOperator (const MovementOperator& op) {
@@ -2355,7 +2654,7 @@ OperatorFunc CParticle::createCapVelocityOperator (const CapVelocityOperator& op
     };
 }
 
-OperatorFunc CParticle::createScalarRemapValueOperator (const ScalarRemapValueOperator& op) {
+OperatorFunc CParticle::createScalarRemapValueOperator (const ScalarRemapValueOperator& op, bool birth) {
     const auto input = op.input;
     const auto output = op.output;
     const int inputControlPoint = op.inputControlPoint0;
@@ -2389,6 +2688,11 @@ OperatorFunc CParticle::createScalarRemapValueOperator (const ScalarRemapValueOp
 	[] (const auto& particleOperator) {
 	    return particleOperator && particleOperator->template is<AngularMovementOperator> ();
 	});
+    const bool hasAngularVelocityRandom = std::any_of (
+        m_particle.initializers.begin (), m_particle.initializers.end (),
+        [] (const auto& initializer) {
+            return initializer && initializer->template is<AngularVelocityRandomInitializer> ();
+        });
     ParticleCore::RemapOperation operation = ParticleCore::RemapOperation::Multiply;
     switch (op.operation) {
     case ScalarRemapValueOperator::Operation::Set:
@@ -2421,15 +2725,15 @@ OperatorFunc CParticle::createScalarRemapValueOperator (const ScalarRemapValueOp
     noiseRange.noiseOctaves = op.transformOctaves;
     const auto* blend = op.blendEnvelope ? &*op.blendEnvelope : nullptr;
 	    return [input, output, inputControlPoint, inputControlPoint1, operation, vectorComponent, noiseRange, blend,
-	    hasRotationRandom, hasAngularMovement] (
+	    hasRotationRandom, hasAngularMovement, hasAngularVelocityRandom, birth] (
 	std::vector<ParticleInstance>& particles, uint32_t count,
 	const std::vector<ControlPointData>& controlPoints, float, ParticleCore::MovementTime) {
 	const auto envelope = operatorEnvelope (blend);
 	for (uint32_t i = 0; i < count; ++i) {
 	    auto& p = particles[i];
 	    if (!p.alive) continue;
-	    if (!std::isfinite (p.lifetime) || p.lifetime <= 0.0f) continue;
-	    const float lifetimeFraction = p.age / p.lifetime;
+	    if (!birth && (!std::isfinite (p.lifetime) || p.lifetime <= 0.0f)) continue;
+	    const float lifetimeFraction = birth ? 0.0f : p.age / p.lifetime;
 	    float inputValue = lifetimeFraction;
 	    switch (input) {
 	    case ScalarRemapValueOperator::Input::LifetimeFraction: break;
@@ -2440,7 +2744,7 @@ OperatorFunc CParticle::createScalarRemapValueOperator (const ScalarRemapValueOp
 	    case ScalarRemapValueOperator::Input::Rotation: inputValue = p.rotation.z; break;
 	    case ScalarRemapValueOperator::Input::AngularSpeed:
 		inputValue = ParticleCore::gatedAngularSpeed (
-		    p.angularVelocity.z, hasRotationRandom, hasAngularMovement);
+		    p.angularVelocity.z, birth ? hasAngularVelocityRandom : hasRotationRandom, hasAngularMovement);
 		break;
 	case ScalarRemapValueOperator::Input::DistanceToControlPoint:
 		inputValue = inputControlPoint >= 0
@@ -2490,6 +2794,17 @@ OperatorFunc CParticle::createScalarRemapValueOperator (const ScalarRemapValueOp
 	    else if (output == ScalarRemapValueOperator::Output::Opacity)
 		p.alpha = ParticleCore::remapScalarValue (
 		    p.alpha, inputValue, lifetimeFraction, operation, envelope, particleRange);
+	    else if (output == ScalarRemapValueOperator::Output::MaxLifetime)
+	        p.lifetime = ParticleCore::remapScalarValue (
+	            p.lifetime, inputValue, lifetimeFraction, operation, envelope, particleRange);
+	    else if (output == ScalarRemapValueOperator::Output::Rotation)
+	        p.rotation.z = ParticleCore::remapScalarValue (
+	            p.rotation.z, inputValue, lifetimeFraction, operation, envelope, particleRange);
+	    else if (output == ScalarRemapValueOperator::Output::AngularSpeed) {
+	        p.angularVelocity.z = ParticleCore::remapBirthAngularSpeed (
+                p.angularVelocity.z, inputValue, operation, particleRange,
+                hasAngularVelocityRandom, hasAngularMovement);
+	    }
 	    else {
 		const float currentSpeed = glm::length (p.velocity);
 		const float mappedSpeed = ParticleCore::remapScalarValue (
@@ -2500,7 +2815,7 @@ OperatorFunc CParticle::createScalarRemapValueOperator (const ScalarRemapValueOp
     };
 }
 
-OperatorFunc CParticle::createVectorRemapValueOperator (const VectorRemapValueOperator& op) {
+OperatorFunc CParticle::createVectorRemapValueOperator (const VectorRemapValueOperator& op, bool birth) {
     const auto input = op.input;
     const auto output = op.output;
     const int inputControlPoint = op.inputControlPoint0;
@@ -2562,17 +2877,20 @@ OperatorFunc CParticle::createVectorRemapValueOperator (const VectorRemapValueOp
     const bool hasAngularMovement = std::any_of (
         m_particle.operators.begin (), m_particle.operators.end (),
         [] (const auto& item) { return item && item->template is<AngularMovementOperator> (); });
+    const bool hasAngularVelocityRandom = std::any_of (
+        m_particle.initializers.begin (), m_particle.initializers.end (),
+        [] (const auto& init) { return init && init->template is<AngularVelocityRandomInitializer> (); });
     return [input, output, inputControlPoint, inputControlPoint1, outputComponent, component, inputMin, inputMax,
             outputMin, outputMax, flags, transform, transformScale, transformOctaves,
             blend, operation,
-            hasRotationRandom, hasAngularMovement] (
+            hasRotationRandom, hasAngularMovement, hasAngularVelocityRandom, birth] (
         std::vector<ParticleInstance>& particles, uint32_t count,
         const std::vector<ControlPointData>& controlPoints, float, ParticleCore::MovementTime) {
         const auto envelope = operatorEnvelope (blend);
         for (uint32_t i = 0; i < count; ++i) {
             auto& p = particles[i];
-            if (!p.alive || !std::isfinite (p.lifetime) || p.lifetime <= 0.0f) continue;
-            const float age = p.age / p.lifetime;
+            if (!p.alive || (!birth && (!std::isfinite (p.lifetime) || p.lifetime <= 0.0f))) continue;
+            const float age = birth ? 0.0f : p.age / p.lifetime;
             glm::vec3 source (age);
             bool vectorInput = false;
             switch (input) {
@@ -2584,7 +2902,7 @@ OperatorFunc CParticle::createVectorRemapValueOperator (const VectorRemapValueOp
             case VectorRemapValueOperator::Input::Rotation: source = glm::vec3 (p.rotation.z); break;
             case VectorRemapValueOperator::Input::AngularSpeed:
                 source = glm::vec3 (ParticleCore::gatedAngularSpeed (
-                    p.angularVelocity.z, hasRotationRandom, hasAngularMovement));
+                    p.angularVelocity.z, birth ? hasAngularVelocityRandom : hasRotationRandom, hasAngularMovement));
                 break;
             case VectorRemapValueOperator::Input::DistanceToControlPoint:
                 source = glm::vec3 (inputControlPoint >= 0
