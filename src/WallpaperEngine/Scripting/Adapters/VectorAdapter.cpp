@@ -704,7 +704,7 @@ template <int components> JSValue vector_divide (JSContext* ctx, JSValueConst th
     VEC_MAGIC_CHECK_EXCEPTION (newContainer, components);
 
     newContainer->value.update (
-	*argument / vector_get<components> (container->value),
+	vector_get<components> (container->value) / *argument,
 	DynamicValue::UpdateSource::Initialization
     );
 

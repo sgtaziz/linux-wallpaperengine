@@ -32,6 +32,23 @@ const std::map<std::string, ScriptableObject::PropertyEntry>& ScriptableObject::
     return this->m_properties;
 }
 
+bool ScriptableObject::isAngleProperty (const DynamicValue& value) const {
+    const auto entry = m_properties.find ("angles");
+    return entry != m_properties.end () && &entry->second.value == &value;
+}
+
+bool ScriptableObject::isRgbColorProperty (const DynamicValue& value) const {
+    const auto& object = getObject ();
+    if (object.is<Data::Model::Image> ())
+        return object.as<Data::Model::Image> ()->color->value.get () == &value;
+    if (object.is<Data::Model::Text> ()) {
+        const auto* text = object.as<Data::Model::Text> ();
+        return text->color->value.get () == &value
+            || (text->backgroundColor && text->backgroundColor->value.get () == &value);
+    }
+    return false;
+}
+
 void ScriptableObject::registerProperty (const std::string& name, DynamicValue& value) {
     const auto existing = this->m_properties.find (name);
     if (existing != this->m_properties.end ()) {

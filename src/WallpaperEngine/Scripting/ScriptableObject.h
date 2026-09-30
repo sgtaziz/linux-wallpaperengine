@@ -25,6 +25,8 @@ public:
     DynamicValue& getProperty (const std::string& name);
 
     const std::map<std::string, PropertyEntry>& getProperties () const;
+    bool isAngleProperty (const DynamicValue& value) const;
+    bool isRgbColorProperty (const DynamicValue& value) const;
     std::shared_ptr<Lifetime> getLifetime () const { return m_lifetime; }
 
 protected:

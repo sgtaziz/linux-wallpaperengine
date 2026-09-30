@@ -7,6 +7,9 @@
 #include "WallpaperEngine/Data/Parsers/DynamicValueParser.h"
 #include <quickjs.h>
 #include "WallpaperEngine/Data/Parsers/UserSettingParser.h"
+#include "WallpaperEngine/Data/Parsers/ObjectParser.h"
+#include "WallpaperEngine/Data/Model/Project.h"
+#include "WallpaperEngine/Data/Model/Wallpaper.h"
 
 using WallpaperEngine::Data::JSON::JSON;
 using WallpaperEngine::Data::Model::DynamicValue;
@@ -48,7 +51,7 @@ TEST_CASE ("Project color properties use normalized channels even without decima
     auto live = parse ("0 0 0");
     live->update (std::string ("1 0 0"), DynamicValue::UpdateSource::User);
     CHECK (live->getVec4 () == glm::vec4 (1.0f, 0.0f, 0.0f, 1.0f));
-    // Scene-authored byte color strings retain their separate interpretation.
+    // Byte-oriented color consumers retain their separate interpretation.
     CHECK (WallpaperEngine::Data::Builders::ColorBuilder::parse ("255 0 0").r == 1.0f);
     CHECK (WallpaperEngine::Data::Builders::ColorBuilder::parse ("1 0 0").r == 1.0f / 255.0f);
 }
@@ -114,4 +117,29 @@ TEST_CASE ("String combo options retain their JavaScript type") {
     JS_FreeValue (context, result);
     JS_FreeContext (context);
     JS_FreeRuntime (runtime);
+}
+
+TEST_CASE ("Scene RGB strings retain floating channels and live property updates", "[scene][color][parser]") {
+    const auto color = [] (const std::string& value) {
+        const JSON data {{"color", {{"value", value}, {"script", "export function init(v) { return v; }"}}}};
+        return data.color ("color", {}, true);
+    };
+    CHECK (color ("1 1 1")->value->getVec4 () == glm::vec4 (1.0f));
+    CHECK (color ("1.0 1.0 1.0")->value->getVec4 () == glm::vec4 (1.0f));
+    CHECK (color ("255 128 64")->value->getVec4 () == glm::vec4 (255.0f, 128.0f, 64.0f, 1.0f));
+    CHECK (color ("0.5 0.25 0.125")->value->getVec4 () == glm::vec4 (0.5f, 0.25f, 0.125f, 1.0f));
+    REQUIRE (color ("1 1 1")->value->getScriptSource ().has_value ());
+    WallpaperEngine::Data::Model::Project project {};
+    const auto text = WallpaperEngine::Data::Parsers::ObjectParser::parse (
+        JSON::parse (R"({"id":12,"name":"RGB text","text":"A","color":"255 128 64"})"), project);
+    REQUIRE (text->is<WallpaperEngine::Data::Model::Text> ());
+    CHECK (text->as<WallpaperEngine::Data::Model::Text> ()->color->value->getVec4 ()
+           == glm::vec4 (255.0f, 128.0f, 64.0f, 1.0f));
+    auto property = PropertyParser::parse (JSON {{"type", "color"}, {"value", "1 1 1"}}, "tint");
+    WallpaperEngine::Data::Model::Properties properties {{"tint", property}};
+    const JSON data {{"color", {{"value", "255 128 64"}, {"user", "tint"}}}};
+    auto setting = data.color ("color", properties, true);
+    CHECK (setting->value->getVec4 () == glm::vec4 (1.0f));
+    property->update (std::string ("0.25 0.5 1"), DynamicValue::UpdateSource::User);
+    CHECK (setting->value->getVec4 () == glm::vec4 (0.25f, 0.5f, 1.0f, 1.0f));
 }
