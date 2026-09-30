@@ -181,6 +181,9 @@ private:
     glm::vec4 m_effectiveColor4 = {};
 
     std::vector<Effects::CPass*> m_passes = {};
+    Effects::CPass* m_compositePresentationPass = nullptr;
+    bool m_hasCompositeConsumerAtSetup = false;
+    [[nodiscard]] bool hasCompositeConsumer () const;
     size_t m_basePassCount = 0;
     struct ResourceSwap {
         size_t beforePass;
