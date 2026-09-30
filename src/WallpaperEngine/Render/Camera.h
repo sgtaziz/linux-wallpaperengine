@@ -28,6 +28,7 @@ public:
 
     [[nodiscard]] static const SceneCamera* selectActiveSceneCamera (const ObjectList& objects);
     [[nodiscard]] static Pose poseForSceneCamera (const SceneCamera& camera);
+    [[nodiscard]] static Pose poseForRootCamera (const SceneData::Camera& camera);
 
     void setOrthogonalProjection (const float width, const float height);
     void setPerspectiveProjection (float width, float height);
