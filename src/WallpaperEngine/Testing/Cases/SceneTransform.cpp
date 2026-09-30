@@ -9,6 +9,7 @@
 #include <glm/gtc/constants.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <cmath>
+#include <limits>
 #include <map>
 #include <memory>
 #include <vector>
@@ -408,4 +409,207 @@ TEST_CASE ("Absolute particle control points keep native canvas endpoints throug
         REQUIRE (particleControlPointMatrix (authored, node, inverse,
                  false, false, false, true, canvas) == authored);
     }
+}
+
+TEST_CASE ("Mouse control points replace offsets and reach native local and world sequence markers",
+           "[scene][particle][controlpoint][mouse]") {
+    using namespace WallpaperEngine::Render::Wallpapers;
+    using namespace WallpaperEngine::Render::Objects::ParticleCore;
+    const auto projection = glm::ortho (-160.0f, 160.0f, -120.0f, 120.0f, 0.0f, 10000.0f);
+    const auto reflect = glm::scale (glm::mat4 (1), glm::vec3 (1, -1, 1));
+    const auto node = glm::translate (glm::mat4 (1), glm::vec3 (-160, 120, 0)) * reflect
+        * glm::translate (glm::mat4 (1), glm::vec3 (60, 55, 0))
+        * glm::rotate (glm::mat4 (1), 0.35f, glm::vec3 (0, 0, 1))
+        * glm::scale (glm::mat4 (1), glm::vec3 (-0.7f, 0.8f, 1)) * reflect;
+    const auto inverse = inverseFiniteTransform (node);
+    REQUIRE (inverse);
+    // Native complete offset/zero-offset fixtures both end at these cursor
+    // positions, irrespective of authored CP offset(32,17) and node mirror.
+    for (const auto uv : {glm::vec2 (0.5f), glm::vec2 (0.75f)}) {
+        const auto world = particleMouseWorldPosition (
+            uv, particleMouseProjection (projection, true), glm::mat4 (1));
+        REQUIRE (world);
+        const glm::vec2 end = uv.x == 0.5f ? glm::vec2 (640, 480) : glm::vec2 (960, 240);
+        for (bool presetWorld : {false, true}) {
+            const glm::vec3 cp0 = presetWorld ? glm::vec3 (node[3]) : glm::vec3 (0);
+            const glm::vec3 cp1 = particleMouseControlPoint (*world, presetWorld, *inverse, true, {});
+            for (float phase : {0.0f, 0.25f, 0.5f, 0.75f, 1.0f}) {
+                BetweenControlPointsState state {phase, 0};
+                const auto birth = betweenControlPointsBirth (
+                    cp0, {}, 1, cp0, cp1, state, {0, 1}, false, 0u, 0, {}, 0, presetWorld);
+                const glm::vec4 clip = projection * (presetWorld ? glm::mat4 (1) : node)
+                    * glm::vec4 (birth.position, 1);
+                const glm::vec2 screen = (glm::vec2 (clip) / clip.w * 0.5f + 0.5f)
+                    * glm::vec2 (1280, 960);
+                const auto expected = glm::mix (glm::vec2 (240, 740), end, phase);
+                REQUIRE (screen.x == Catch::Approx (expected.x).margin (0.001f));
+                REQUIRE (screen.y == Catch::Approx (expected.y).margin (0.001f));
+            }
+        }
+    }
+}
+
+TEST_CASE ("Mouse unprojection consumes the authored fit fill crop once",
+           "[scene][particle][controlpoint][mouse][presentation]") {
+    using namespace WallpaperEngine::Render::Wallpapers;
+    using WallpaperEngine::Render::WallpaperState;
+    using Mode = WallpaperState::TextureUVsScaling;
+    const auto projection = glm::ortho (-160.0f, 160.0f, -120.0f, 120.0f, 0.0f, 10000.0f);
+    for (const auto output : {glm::ivec2 (1280, 720), glm::ivec2 (720, 960)}) {
+        for (const auto mode : {Mode::ZoomFitUVs, Mode::ZoomFillUVs, Mode::StretchUVs}) {
+            for (bool vflip : {false, true}) {
+                WallpaperState state (mode, 0);
+                state.updateState ({0, 0, output.x, output.y}, vflip, 320, 240);
+                const auto uv = state.getTextureUVs ();
+                const auto crop = scenePresentationClipTransform ({uv.ustart, uv.uend, uv.vstart, uv.vend});
+                for (const auto normalized : {glm::vec2 (0.5f), glm::vec2 (0.65f, 0.6f)}) {
+                    const glm::vec2 authoredUv {
+                        glm::mix (uv.ustart, uv.uend, normalized.x),
+                        glm::mix (uv.vstart, uv.vend, normalized.y)};
+                    const auto world = particleMouseWorldPosition (
+                        authoredUv, particleMouseProjection (projection, true), glm::mat4 (1));
+                    REQUIRE (world);
+                    const glm::vec4 clip = crop * projection * glm::vec4 (*world, 1);
+                    // CWallpaper's fixed reflected quad samples ascending V for
+                    // GLFW/Wayland and descending V for X11. Model that final
+                    // presentation, retaining the same physical cursor target.
+                    const glm::vec2 outputClip (clip.x / clip.w, (vflip ? clip.y : -clip.y) / clip.w);
+                    const glm::vec2 screen = (outputClip * 0.5f + 0.5f) * glm::vec2 (output);
+                    REQUIRE (screen.x == Catch::Approx (normalized.x * output.x).margin (0.001f));
+                    REQUIRE (screen.y == Catch::Approx ((1 - normalized.y) * output.y).margin (0.001f));
+                }
+            }
+        }
+    }
+}
+
+TEST_CASE ("Perspective mouse uses native reversed far depth and preserves both draw anchors",
+           "[scene][particle][controlpoint][mouse][perspective]") {
+    using namespace WallpaperEngine::Render::Wallpapers;
+    const auto reflect = glm::scale (glm::mat4 (1), glm::vec3 (1, -1, 1));
+    const auto projection = reflect * glm::perspective (glm::radians (50.0f), 4.0f / 3.0f, 100.0f, 1000.0f);
+    const auto view = glm::lookAt (glm::vec3 (0, 0, 500), glm::vec3 (0), glm::vec3 (0, 1, 0));
+    const auto node = glm::translate (glm::mat4 (1), glm::vec3 (-60, -40, 0))
+        * glm::rotate (glm::mat4 (1), 0.35f, glm::vec3 (0, 0, 1))
+        * glm::scale (glm::mat4 (1), glm::vec3 (-0.7f, 0.8f, 1)) * reflect;
+    const auto inverse = inverseFiniteTransform (node);
+    REQUIRE (inverse);
+    for (const auto uv : {glm::vec2 (0.5f), glm::vec2 (0.5625f, 0.5f), glm::vec2 (0.5f, 7.0f / 12.0f)}) {
+        const auto world = particleMouseWorldPosition (
+            uv, particleMouseProjection (projection, false), view);
+        REQUIRE (world);
+        const glm::vec2 expectedWorld {
+            (uv.x * 2 - 1) * std::tan (glm::radians (25.0f)) * (4.0f / 3.0f) * 1000.0f,
+            (uv.y * 2 - 1) * std::tan (glm::radians (25.0f)) * 1000.0f};
+        REQUIRE (world->x == Catch::Approx (expectedWorld.x).margin (0.001f));
+        REQUIRE (world->y == Catch::Approx (expectedWorld.y).margin (0.001f));
+        REQUIRE (world->z == 0);
+        for (bool presetWorld : {false, true}) {
+            const auto vp = particlePerspectiveViewProjection (projection, view, presetWorld);
+            const auto draw = presetWorld ? reflect : node;
+            const auto endpoint = particleMouseControlPoint (*world, presetWorld, *inverse, true, {});
+            const auto start = presetWorld ? glm::vec3 (node[3]) : glm::vec3 (0);
+            for (float phase : {0.0f, 0.25f, 0.5f, 0.75f, 1.0f}) {
+                const glm::vec4 clip = vp * draw * glm::vec4 (glm::mix (start, endpoint, phase), 1);
+                const auto screen = (glm::vec2 (clip) / clip.w * 0.5f + 0.5f) * glm::vec2 (1280, 960);
+                const glm::vec2 expectedStart {516.475f, 562.350f};
+                const glm::vec2 expectedEnd {640 + (uv.x - 0.5f) * 2560, 480 - (uv.y - 0.5f) * 1920};
+                const auto expected = glm::mix (expectedStart, expectedEnd, phase);
+                REQUIRE (screen.x == Catch::Approx (expected.x).margin (0.01f));
+                REQUIRE (screen.y == Catch::Approx (expected.y).margin (0.01f));
+            }
+        }
+    }
+}
+
+TEST_CASE ("Mouse depth is native before tilted view and local inverse; singular local points stay finite",
+           "[scene][particle][controlpoint][mouse][perspective]") {
+    using namespace WallpaperEngine::Render::Wallpapers;
+    const auto reflect = glm::scale (glm::mat4 (1), glm::vec3 (1, -1, 1));
+    const auto glProjection = glm::perspective (glm::radians (50.0f), 4.0f / 3.0f, 100.0f, 1000.0f);
+    const auto view = glm::lookAt (glm::vec3 (30, 40, 500), glm::vec3 (0), glm::vec3 (0.1f, 1, 0));
+    // Literal coefficients recovered from native14009a360, independent of
+    // the OpenGL-to-native depth adapter; native mouse uses this NDCz0.
+    glm::mat4 nativeProjection (0);
+    nativeProjection[0][0] = 1 / (std::tan (glm::radians (25.0f)) * (4.0f / 3.0f));
+    nativeProjection[1][1] = 1 / std::tan (glm::radians (25.0f));
+    nativeProjection[2][2] = 100.0f / 900.0f;
+    nativeProjection[2][3] = -1;
+    nativeProjection[3][2] = 100000.0f / 900.0f;
+    const glm::vec2 uv {0.62f, 0.68f};
+    const auto raw = glm::inverse (nativeProjection * view) * glm::vec4 (uv * 2.0f - 1.0f, 0, 1);
+    const glm::vec3 expectedWorld (raw.x / raw.w, raw.y / raw.w, 0);
+    const auto world = particleMouseWorldPosition (uv, particleMouseProjection (reflect * glProjection, false), view);
+    REQUIRE (world);
+    REQUIRE (glm::distance (*world, expectedWorld) < 0.001f);
+    const auto node = glm::translate (glm::mat4 (1), glm::vec3 (15, 20, 30))
+        * glm::rotate (glm::mat4 (1), 0.4f, glm::vec3 (1, 0, 0))
+        * glm::scale (glm::mat4 (1), glm::vec3 (-0.7f, 0.8f, 1)) * reflect;
+    const auto inverse = inverseFiniteTransform (node);
+    REQUIRE (inverse);
+    const auto local = particleMouseControlPoint (*world, false, *inverse, true, {});
+    REQUIRE (glm::distance (glm::vec3 (node * glm::vec4 (local, 1)), expectedWorld) < 0.001f);
+    REQUIRE (std::abs (local.z) > 1); // worldz0 is applied BEFORE the full local inverse.
+    const glm::vec3 previous {7, 8, 9};
+    REQUIRE (particleMouseControlPoint (*world, false, glm::mat4 (0), false, previous) == previous);
+    REQUIRE (glm::distance (particleMouseControlPoint (
+        *world, true, glm::mat4 (0), false, previous), expectedWorld) < 0.001f);
+    REQUIRE_FALSE (particleMouseWorldPosition (uv, glm::mat4 (0), view));
+    REQUIRE_FALSE (particleMouseWorldPosition (
+        {std::numeric_limits<float>::quiet_NaN (), 0.5f}, nativeProjection, view));
+
+    // Native root orthographic depth is fixed to +/-2000 rather than the
+    // renderer's authored far10000. A tilted view couples that depth into XY.
+    glm::mat4 nativeOrtho (1);
+    nativeOrtho[0][0] = 1.0f / 160.0f;
+    nativeOrtho[1][1] = 1.0f / 120.0f;
+    nativeOrtho[2][2] = 1.0f / 4000.0f;
+    nativeOrtho[3][2] = 0.5f;
+    const auto expectedRaw = glm::inverse (nativeOrtho * view)
+        * glm::vec4 (uv.x * 2 - 1, 1 - uv.y * 2, 0, 1);
+    const auto orthoWorld = particleMouseWorldPosition (
+        uv, particleMouseProjection (
+            glm::ortho (-160.0f, 160.0f, -120.0f, 120.0f, 0.0f, 10000.0f), true), view);
+    REQUIRE (orthoWorld);
+    REQUIRE (glm::distance (*orthoWorld,
+        glm::vec3 (expectedRaw.x / expectedRaw.w, expectedRaw.y / expectedRaw.w, 0)) < 0.001f);
+}
+
+TEST_CASE ("Perspective particle presentation preserves culling facing and authored mirrors",
+           "[scene][particle][perspective][culling]") {
+    using namespace WallpaperEngine::Render::Wallpapers;
+    const auto flip = glm::scale (glm::mat4 (1), glm::vec3 (1, -1, 1));
+    const auto projection = glm::perspective (glm::radians (50.0f), 4.0f / 3.0f, 100.0f, 1000.0f);
+    const auto view = glm::lookAt (glm::vec3 (30, 40, 500), glm::vec3 (0), glm::vec3 (0.1f, 1, 0));
+    const auto signedArea = [] (const glm::mat4& matrix) {
+        glm::vec2 points[3];
+        const glm::vec3 vertices[] {{0, 0, 0}, {10, 0, 0}, {0, 10, 0}};
+        for (int i = 0; i < 3; ++i) {
+            const auto clip = matrix * glm::vec4 (vertices[i], 1);
+            points[i] = glm::vec2 (clip) / clip.w;
+        }
+        const auto a = points[1] - points[0], b = points[2] - points[0];
+        return a.x * b.y - a.y * b.x;
+    };
+    for (bool world : {false, true}) {
+        for (float authoredScaleX : {-0.7f, 0.7f}) {
+            const auto node = glm::translate (glm::mat4 (1), glm::vec3 (-60, -40, 0))
+                * glm::scale (glm::mat4 (1), glm::vec3 (authoredScaleX, 0.8f, 1)) * flip;
+            const auto draw = world ? flip : node;
+            const float oldArea = signedArea (projection * view * draw);
+            const float correctedArea = signedArea (
+                particlePerspectiveViewProjection (flip * projection, view, world) * draw);
+            const bool reversed = particlePresentationReversesWinding (false, world, false, false);
+            // Change only the presentation-facing convention. Mirrored nodes
+            // retain their authored opposite facing instead of being repaired.
+            REQUIRE (oldArea * correctedArea * (reversed ? -1.0f : 1.0f) > 0);
+        }
+    }
+    REQUIRE_FALSE (particlePresentationReversesWinding (true, false, false, false));
+    REQUIRE_FALSE (particlePresentationReversesWinding (true, true, false, false));
+    REQUIRE_FALSE (particlePresentationReversesWinding (false, false, true, false));
+    REQUIRE_FALSE (particlePresentationReversesWinding (false, true, true, false));
+    REQUIRE (particlePresentationReversesWinding (false, false, true, true));
+    REQUIRE_FALSE (particlePresentationReversesWinding (false, true, true, true));
+    REQUIRE_FALSE (particlePresentationReversesWinding (true, false, true, true));
 }

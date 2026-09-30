@@ -1298,12 +1298,13 @@ void CImage::setupPasses (const std::function<void (std::shared_ptr<const CFBO>)
 	        : std::shared_ptr<const TextureProvider> {});
 	pass->setPreviousInput (inTargetEffectSequence ? effectInput : nullptr);
 	pass->setPosition (spacePosition);
-	// Intermediate targets are OpenGL FBOs (V=0 at the bottom), whereas the
-	// native final perspective composite samples the child target with top-left
-	// V=0. Reverse V only when presenting an intermediate on the root target.
+	// Scene-space perspective finals need the intermediate texture's basis
+	// converted alongside the camera presentation reflection. Fullscreen copy
+	// and effect quads use an identity clip-space projection: native 1401e8aa0
+	// and 1402066a0 preserve framebuffer orientation there, so reversing V
+	// would mirror the already projected scene a second time.
 	if (!isFirstPass
-	    && (projection == &m_modelViewProjectionScreen || projection == &m_lightingMvp
-	        || (getImage ().model->fullscreen && getImage ().model->passthrough))
+	    && (projection == &m_modelViewProjectionScreen || projection == &m_lightingMvp)
 	    && drawTo == this->getScene ().getActiveRenderTarget ()
 	    && !this->getScene ().getCamera ().isOrthogonal ()
 	    && !this->getScene ().isChildCompositionScope ())

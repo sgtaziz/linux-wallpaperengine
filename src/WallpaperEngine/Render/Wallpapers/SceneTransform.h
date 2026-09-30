@@ -153,6 +153,71 @@ inline glm::vec3 projectWorldControlPoint (
     return glm::vec3 (local);
 }
 
+// Native 14009a360/09a630 use reversed Direct3D depth; 14022e3e0
+// unprojects NDC Z=0 before replacing world Z with zero. Keep this mouse
+// projection separate from the renderer's OpenGL depth convention.
+inline glm::mat4 particleMouseProjection (const glm::mat4& cameraProjection, bool orthographic) {
+    if (orthographic) {
+        glm::mat4 result = cameraProjection;
+        // 140183a70 uses fixed near=-2000, far=2000 for the root 2D view.
+        result[0][2] = result[1][2] = 0.0f;
+        result[2][2] = 1.0f / 4000.0f;
+        result[3][2] = 0.5f;
+        return result;
+    }
+    glm::mat4 reverseDepth (1.0f);
+    reverseDepth[2][2] = -0.5f;
+    reverseDepth[3][2] = 0.5f;
+    return reverseDepth * cameraProjection;
+}
+
+inline std::optional<glm::vec3> particleMouseWorldPosition (
+    glm::vec2 visibleUv, const glm::mat4& mouseProjection, const glm::mat4& view
+) {
+    if (!std::isfinite (visibleUv.x) || !std::isfinite (visibleUv.y))
+        return std::nullopt;
+    const auto inverse = inverseFiniteTransform (mouseProjection * view);
+    if (!inverse) return std::nullopt;
+    // Mouse UV already includes the authored Fit/Fill crop and the output's
+    // V direction. The final scene quad reflects Y relative to that UV, so
+    // invert it once before unprojecting the root view.
+    const glm::vec4 projected = *inverse * glm::vec4 (
+        visibleUv.x * 2.0f - 1.0f, 1.0f - visibleUv.y * 2.0f, 0.0f, 1.0f);
+    if (!std::isfinite (projected.w) || projected.w == 0.0f) return std::nullopt;
+    const glm::vec3 world = glm::vec3 (projected) / projected.w;
+    if (!std::isfinite (world.x) || !std::isfinite (world.y) || !std::isfinite (world.z))
+        return std::nullopt;
+    return glm::vec3 (world.x, world.y, 0.0f);
+}
+
+inline glm::vec3 particleMouseControlPoint (
+    const glm::vec3& world, bool presetWorld, const glm::mat4& nodeInverse,
+    bool nodeInvertible, const glm::vec3& previous
+) {
+    // Authored CP offsets are replaced, not added. Native inverses only the
+    // local preset's node, even when the mouse descriptor has its world bit.
+    return presetWorld ? world : projectWorldControlPoint (nodeInverse, nodeInvertible, world, previous);
+}
+
+inline glm::mat4 particlePerspectiveViewProjection (
+    const glm::mat4& presentationProjection, const glm::mat4& view, bool presetWorld
+) {
+    const glm::mat4 worldBasis = presetWorld
+        ? glm::scale (glm::mat4 (1.0f), glm::vec3 (1.0f, -1.0f, 1.0f)) : glm::mat4 (1.0f);
+    // Native 1402366f0 replaces the local node stack with the root world stack
+    // for world presets. Their existing draw Y reflection needs a matching
+    // view basis; local nodes retain their authored model and presentation VP.
+    return presentationProjection * view * worldBasis;
+}
+
+inline bool particlePresentationReversesWinding (
+    bool orthographic, bool presetWorld, bool childComposition, bool perspectiveOverride
+) {
+    // Preset bit4 uses the root perspective camera even in a child target;
+    // ordinary presets use the child target's orthographic projection there.
+    return !orthographic && !presetWorld && (!childComposition || perspectiveOverride);
+}
+
 inline ResolvedSceneTransform localSceneTransform (const Data::Model::Object& object) {
     ResolvedSceneTransform result;
     result.origin = object.origin->value->getVec3 ();

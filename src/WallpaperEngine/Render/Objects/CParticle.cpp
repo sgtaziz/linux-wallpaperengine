@@ -232,6 +232,21 @@ bool ParticleImageEmitterReadback::sample (
 }
 
 namespace {
+struct ParticlePresentationFrontFace {
+    GLint previous = GL_CCW;
+    bool reversed;
+    explicit ParticlePresentationFrontFace (bool reverse) : reversed (reverse) {
+        if (!reversed) return;
+        glGetIntegerv (GL_FRONT_FACE, &previous);
+        glFrontFace (previous == GL_CCW ? GL_CW : GL_CCW);
+    }
+    ParticlePresentationFrontFace (const ParticlePresentationFrontFace&) = delete;
+    ParticlePresentationFrontFace& operator= (const ParticlePresentationFrontFace&) = delete;
+    ~ParticlePresentationFrontFace () {
+        if (reversed) glFrontFace (static_cast<GLenum> (previous));
+    }
+};
+
 const Material& particleMaterialOrEmpty (const Particle& particle) {
     static const Material empty;
     return particle.material && particle.material->material
@@ -963,24 +978,18 @@ void CParticle::update (ParticleCore::TickClock clock) {
     // Update control points with mouse position
     const glm::vec2* mousePos = getScene ().getMousePositionNormalized ();
     if (mousePos) {
-
-	for (auto& cp : m_controlPoints) {
-	    if (cp.linkMouse) {
-		// Convert mouse position from normalized [0,1] to centered screen space
-		glm::vec3 position;
-		position.x = (mousePos->x * screenWidth) - (screenWidth / 2.0f);
-		position.y = (screenHeight / 2.0f) - (mousePos->y * screenHeight);
-		position.z = 0.0f;
-
-		// Apply control point offset
-		position += cp.offset;
-
-		// Convert to particle local space to prevent double transformation by model matrix
-		// Both world-space and local-space CPs are handled the same way now
-		cp.position = Wallpapers::projectWorldControlPoint (
-		    m_controlPointInverse, m_controlPointTransformInvertible, position, cp.position);
-	    }
-	}
+        const auto& camera = getScene ().getCamera ();
+        const auto world = Wallpapers::particleMouseWorldPosition (
+            *mousePos, Wallpapers::particleMouseProjection (camera.getProjection (), camera.isOrthogonal ()),
+            camera.getLookAt ());
+        if (world) {
+            for (auto& cp : m_controlPoints) {
+                if (cp.linkMouse)
+                    cp.position = Wallpapers::particleMouseControlPoint (
+                        *world, (m_particle.flags & 1u) != 0, m_controlPointInverse,
+                        m_controlPointTransformInvertible, cp.position);
+            }
+        }
     }
 
     for (size_t i = 0; i < m_inheritedControlPointPositions.size (); ++i)
@@ -3813,14 +3822,9 @@ void CParticle::applyParallaxToModelMatrix () {
 
 void CParticle::updateParticleViewProjection () {
     const auto& sceneCamera = getScene ().getCamera ();
-    // Native perspective particle GSOut (281 event 35) projects with the
-    // unreflected camera Y row. Scene image geometry has a separate final
-    // presentation route, so its Camera projection keeps that correction.
-    const auto nativeParticlePerspective = [&] {
-        return glm::perspective (
-            glm::radians (sceneCamera.getFov ()),
-            sceneCamera.getWidth () / sceneCamera.getHeight (),
-            sceneCamera.getNearZ (), sceneCamera.getFarZ ());
+    const auto perspectiveViewProjection = [&] {
+        return Wallpapers::particlePerspectiveViewProjection (
+            sceneCamera.getProjection (), sceneCamera.getLookAt (), (m_particle.flags & 1u) != 0);
     };
     if ((m_particle.flags & 4) != 0) {
 	const auto& camera = getScene ().getCamera ();
@@ -3838,7 +3842,7 @@ void CParticle::updateParticleViewProjection () {
 	        * glm::translate (glm::mat4 (1.0f), glm::vec3 (0.0f, 0.0f, -eyeZ));
 	    m_eyePosition = glm::vec3 (0.0f, 0.0f, eyeZ);
 	} else {
-	    m_viewProjectionMatrix = nativeParticlePerspective () * camera.getLookAt ();
+	    m_viewProjectionMatrix = perspectiveViewProjection ();
 	    m_eyePosition = camera.getEye ();
 	}
     } else {
@@ -3847,7 +3851,7 @@ void CParticle::updateParticleViewProjection () {
 	    ? getScene ().getActiveRenderProjection ()
 	    : sceneCamera.isOrthogonal ()
 	        ? sceneCamera.getProjection () * sceneCamera.getLookAt ()
-	        : nativeParticlePerspective () * sceneCamera.getLookAt ();
+	        : perspectiveViewProjection ();
 	// Native 1401891a0 writes orthographic particle eye Z=2000 in authored
 	// screen coordinates. Linux centers the camera XY, so (0,0,2000) is the
 	// equivalent eye used by ComputeParticleTrailTangents. The flag-4 branch
@@ -4570,6 +4574,14 @@ void CParticle::renderRopePoints (const std::vector<ParticleInstance>& points,
 }
 
 void CParticle::drawMaterialPasses () {
+    // The corrected root local perspective VP adds a clip-Y reflection.
+    // Compensate only that presentation change, keeping authored negative
+    // scales and the existing world-preset facing intact. Restore GL state
+    // before another renderer, child particle, or scene object draws.
+    ParticlePresentationFrontFace frontFace (
+        Wallpapers::particlePresentationReversesWinding (
+            getScene ().getCamera ().isOrthogonal (), (m_particle.flags & 1u) != 0,
+            getScene ().isChildCompositionScope (), (m_particle.flags & 4u) != 0));
     // Keep the current depth-clamp workaround for sprite and rope geometry.
     glEnable (GL_DEPTH_CLAMP);
     const auto& authoredPasses = m_particle.material->material->passes;
