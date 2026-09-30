@@ -38,9 +38,32 @@ void forEachParticleScriptSetting (const Data::Model::Particle& particle, Visito
         const auto field = [&] (const char* name, const UserSettingUniquePtr& value) {
             setting (prefix + name, value);
         };
-        if (initializer->is<ColorRandomInitializer> ()) {
+        if (initializer->is<InheritControlPointVelocityInitializer> ()) {
+            const auto& value = *initializer->as<InheritControlPointVelocityInitializer> ();
+            field ("controlPoint", value.controlPoint); field ("min", value.min); field ("max", value.max);
+        } else if (initializer->is<ColorRandomInitializer> ()) {
             const auto& value = *initializer->as<ColorRandomInitializer> ();
             field ("min", value.min); field ("max", value.max);
+        } else if (initializer->is<HsvColorRandomInitializer> ()) {
+            const auto& value = *initializer->as<HsvColorRandomInitializer> ();
+            field ("hueMin", value.hueMin); field ("hueMax", value.hueMax);
+            field ("hueSteps", value.hueSteps);
+            field ("saturationMin", value.saturationMin); field ("saturationMax", value.saturationMax);
+            field ("valueMin", value.valueMin); field ("valueMax", value.valueMax);
+        } else if (initializer->is<ColorListInitializer> ()) {
+            const auto& value = *initializer->as<ColorListInitializer> ();
+            field ("hueNoise", value.hueNoise); field ("saturationNoise", value.saturationNoise);
+            field ("valueNoise", value.valueNoise);
+            for (size_t index = 0; index < value.colors.size (); ++index)
+                setting (prefix + "color" + std::to_string (index), value.colors[index]);
+        } else if (initializer->is<PositionOffsetRandomInitializer> ()) {
+            const auto& value = *initializer->as<PositionOffsetRandomInitializer> ();
+            field ("scale", value.scale); field ("distance", value.distance);
+            field ("timeScale", value.timeScale);
+        } else if (initializer->is<MapSequenceBetweenControlPointsInitializer> ()) {
+            const auto& value = *initializer->as<MapSequenceBetweenControlPointsInitializer> ();
+            field ("controlPointStart", value.controlPointStart);
+            field ("controlPointEnd", value.controlPointEnd); field ("count", value.count);
         } else if (initializer->is<SizeRandomInitializer> ()) {
             const auto& value = *initializer->as<SizeRandomInitializer> ();
             field ("min", value.min); field ("max", value.max); field ("exponent", value.exponent);
@@ -86,7 +109,19 @@ void forEachParticleScriptSetting (const Data::Model::Particle& particle, Visito
             field ("blendOutStart", op->blendEnvelope->outStart);
             field ("blendOutEnd", op->blendEnvelope->outEnd);
         }
-        if (op->is<MovementOperator> ()) {
+        if (op->is<MaintainDistanceToControlPointOperator> ()) {
+            const auto& value = *op->as<MaintainDistanceToControlPointOperator> ();
+            field ("controlPoint", value.controlPoint); field ("distance", value.distance);
+            field ("variableStrength", value.variableStrength);
+        } else if (op->is<MaintainDistanceBetweenControlPointsOperator> ()) {
+            const auto& value = *op->as<MaintainDistanceBetweenControlPointsOperator> ();
+            field ("controlPointStart", value.controlPointStart); field ("controlPointEnd", value.controlPointEnd);
+        } else if (op->is<ReduceMovementNearControlPointOperator> ()) {
+            const auto& value = *op->as<ReduceMovementNearControlPointOperator> ();
+            field ("controlPoint", value.controlPoint);
+            field ("distanceInner", value.distanceInner); field ("distanceOuter", value.distanceOuter);
+            field ("reductionInner", value.reductionInner); field ("reductionOuter", value.reductionOuter);
+        } else if (op->is<MovementOperator> ()) {
             const auto& value = *op->as<MovementOperator> ();
             field ("drag", value.drag); field ("gravity", value.gravity);
         } else if (op->is<AngularMovementOperator> ()) {

@@ -2,6 +2,7 @@
 
 #include "CRenderable.h"
 #include "ParticleCore.h"
+#include "ParticleEventInheritance.h"
 #include "WallpaperEngine/Data/Model/Object.h"
 #include "WallpaperEngine/Render/Objects/Effects/CPass.h"
 #include "WallpaperEngine/Render/Wallpapers/CScene.h"
@@ -75,6 +76,7 @@ struct ParticleInstance {
  * Control point runtime data
  */
 struct ControlPointData {
+    glm::vec3 previousPosition { 0.0f };
     glm::vec3 position { 0.0f };
     glm::vec3 offset { 0.0f };
     glm::vec3 angles { 0.0f };
@@ -143,6 +145,12 @@ protected:
 
     // Initializer creators
     InitializerFunc createColorRandomInitializer (const ColorRandomInitializer& init);
+    InitializerFunc createHsvColorRandomInitializer (const HsvColorRandomInitializer& init);
+    InitializerFunc createColorListInitializer (const ColorListInitializer& init);
+    InitializerFunc createPositionOffsetRandomInitializer (const PositionOffsetRandomInitializer& init);
+    InitializerFunc createMapSequenceBetweenControlPointsInitializer (
+        const MapSequenceBetweenControlPointsInitializer& init);
+    InitializerFunc createRemapInitialValueInitializer (const RemapInitialValueInitializer& init);
     InitializerFunc createSizeRandomInitializer (const SizeRandomInitializer& init);
     InitializerFunc createAlphaRandomInitializer (const AlphaRandomInitializer& init);
     InitializerFunc createLifetimeRandomInitializer (const LifetimeRandomInitializer& init);
@@ -153,12 +161,22 @@ protected:
     InitializerFunc
     createMapSequenceAroundControlPointInitializer (const MapSequenceAroundControlPointInitializer& init);
 
+    InitializerFunc createInheritInitialValueFromEventInitializer (const InheritInitialValueFromEventInitializer& init);
+    InitializerFunc createInheritControlPointVelocityInitializer (const InheritControlPointVelocityInitializer& init);
+    [[nodiscard]] ParticleCore::EventParticleValues eventValues (const ParticleInstance& particle) const;
+    [[nodiscard]] ParticleCore::EventParticleValues parentEventValues () const;
+    void applyEventValues (ParticleInstance& particle, const ParticleCore::EventParticleValues& values, bool birth);
+    OperatorFunc createInheritValueFromEventOperator (const InheritValueFromEventOperator& op);
+
     // Operator creators
+    OperatorFunc createMaintainDistanceToControlPointOperator (const MaintainDistanceToControlPointOperator& op);
+    OperatorFunc createMaintainDistanceBetweenControlPointsOperator (const MaintainDistanceBetweenControlPointsOperator& op);
+    OperatorFunc createReduceMovementNearControlPointOperator (const ReduceMovementNearControlPointOperator& op);
     OperatorFunc createMovementOperator (const MovementOperator& op);
     OperatorFunc createAngularMovementOperator (const AngularMovementOperator& op);
     OperatorFunc createCapVelocityOperator (const CapVelocityOperator& op);
-    OperatorFunc createScalarRemapValueOperator (const ScalarRemapValueOperator& op);
-    OperatorFunc createVectorRemapValueOperator (const VectorRemapValueOperator& op);
+    OperatorFunc createScalarRemapValueOperator (const ScalarRemapValueOperator& op, bool birth = false);
+    OperatorFunc createVectorRemapValueOperator (const VectorRemapValueOperator& op, bool birth = false);
     OperatorFunc createAlphaFadeOperator (const AlphaFadeOperator& op);
     OperatorFunc createSizeChangeOperator (const SizeChangeOperator& op);
     OperatorFunc createAlphaChangeOperator (const AlphaChangeOperator& op);
@@ -224,6 +242,10 @@ private:
     uint32_t m_childDepth { 0 };
     std::vector<std::string> m_childAncestry;
     CParticle* m_parentParticleRuntime { nullptr };
+    // Native event consumers address the parent's allocated SoA slot, including
+    // later slot reuse. Spatial event-follow remains tied to its birth identity.
+    std::optional<uint32_t> m_eventParentSlot;
+    std::vector<ParticleCore::EventParticleValues> m_eventSlotValues;
     bool m_emissionEnabled { true };
     bool m_paused { false };
     uint32_t m_forcedEmitCount { 0 };
