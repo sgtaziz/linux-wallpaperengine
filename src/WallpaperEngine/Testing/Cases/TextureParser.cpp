@@ -79,6 +79,20 @@ TEST_CASE ("Texture parser requires complete mipmap input and decoded output", "
     REQUIRE_THROWS (parse (texFile (0, 4, 4, "ABCD", 1, 0)));
 }
 
+TEST_CASE ("Texture parser retains native TEXI flag metadata with supported payloads", "[data][texture]") {
+    // The installed 3115768633 lighting mask uses 0x800002. The native
+    // header reader preserves the high authoring bit alongside clamp (2),
+    // without changing the decoded image's content or dimensions.
+    for (const uint32_t flags : {0x800002u, 0x80000003u}) {
+        const auto texture = parse (texFile (0, 4, 4, "ABCD", 1, 1, flags));
+        REQUIRE (texture->flags == flags);
+        REQUIRE ((texture->flags & 3u) == (flags & 3u)); // sampler bits unchanged
+        REQUIRE (texture->images.at (0).front ()->width == 1);
+        REQUIRE (texture->images.at (0).front ()->height == 1);
+        REQUIRE (std::string (texture->images.at (0).front ()->uncompressedData.get (), 4) == "ABCD");
+    }
+}
+
 TEST_CASE ("Animated texture parser retains zero-duration atlas frames", "[data][texture][animation]") {
     const auto valid = parse (animatedFile (0, 0.25f));
     REQUIRE (valid->frames.size () == 1);

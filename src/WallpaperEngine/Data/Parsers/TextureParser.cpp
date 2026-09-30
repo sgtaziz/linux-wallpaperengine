@@ -371,11 +371,11 @@ void TextureParser::parseAnimations (Texture& header, const BinaryReader& file) 
 }
 
 uint32_t TextureParser::parseTextureFlags (uint32_t value) {
-    if (value < TextureFlags_All) {
-	return value;
-    }
-
-    sLog.exception ("unknown texture flags: ", value);
+    // Native TEXI reader 14015c760 retains the complete flag word. Flags
+    // are a bitmask, not a bounded enum; sampling/upload consumers select
+    // the bits they implement. New authoring metadata must not reject an
+    // otherwise supported texture payload (for example flags 0x800002).
+    return value;
 }
 
 FIF TextureParser::parseFIF (uint32_t value) {
