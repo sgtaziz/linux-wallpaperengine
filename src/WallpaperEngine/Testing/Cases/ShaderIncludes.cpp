@@ -740,3 +740,26 @@ TEST_CASE ("Matching conditional varying widths survive compatibility rewriting"
         REQUIRE_FALSE (translated.second.empty ());
     }
 }
+
+TEST_CASE ("Compiler version selects native radius-scaled PBR independently of material version",
+           "[shader][lighting][version]") {
+    auto files = std::make_unique<Container> ();
+    AssetLocator assets (std::move (files));
+    // The shipped genericimage3/generic3 branch predates LightingV1 and
+    // depends on the engine environment, not its authored VERSION=2 combo.
+    const std::string source =
+        "#if SHADERVERSION < 62\n"
+        "#define LIGHT_RADIUS_FACTOR(radius) 1.0\n"
+        "#else\n"
+        "#define LIGHT_RADIUS_FACTOR(radius) ((radius)*(radius))\n"
+        "#endif\n"
+        "void main() { gl_FragColor = vec4(LIGHT_RADIUS_FACTOR(250.0)); }\n";
+    const ComboMap materialVersion {{"VERSION", 2}};
+    ShaderUnit unit (GLSLContext::UnitType_Fragment, "version-light.frag", source,
+                     assets, emptyConstants, emptyTextures, emptyTextures, materialVersion, emptyCombos);
+    const auto& compiled = unit.compile ();
+    const auto environment = compiled.find ("#define SHADERVERSION 69\n");
+    REQUIRE (environment != std::string::npos);
+    REQUIRE (environment < compiled.find ("#if SHADERVERSION < 62"));
+    REQUIRE (compiled.find ("#define VERSION 2\n") != std::string::npos);
+}

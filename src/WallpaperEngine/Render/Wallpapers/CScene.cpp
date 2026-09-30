@@ -1,3 +1,4 @@
+#include "SpotLightUniforms.h"
 #include "WallpaperEngine/Render/Objects/CImage.h"
 #include "WallpaperEngine/Render/Objects/CModel.h"
 #include "WallpaperEngine/Render/Objects/CParticle.h"
@@ -40,6 +41,17 @@ using namespace WallpaperEngine::Data::Parsers;
 using namespace WallpaperEngine::Render::Wallpapers;
 
 namespace {
+class CSpotLight final : public Scripting::ScriptableObject {
+public:
+    CSpotLight (CScene& scene, const SceneSpotLight& light) :
+        CObject (scene, light), ScriptableObject (scene, light) {
+        for (const auto& binding : Scripting::scriptPropertyBindings (light))
+            registerProperty (binding.name, binding.value);
+        if (light.castShadow || light.useCookie)
+            sLog.error ("Spot light shadow/cookie rendering is not supported: object_id=", light.id);
+    }
+};
+
 class CPointLight final : public Scripting::ScriptableObject {
 public:
     CPointLight (CScene& scene, const ScenePointLight& light) :
@@ -151,7 +163,7 @@ CScene::CScene (
 
     glClearColor (clearColor.r, clearColor.g, clearColor.b, 1.0f);
 
-    // Native LIGHTS_POINT comes from the root lightconfig's four-bit count,
+    // Native LIGHTS_POINT comes from general.lightconfig's four-bit count,
     // not the number of light objects. Keep unused slots zero-filled.
     const int pointLightSlots = scene->pointLightSlots;
     m_pointLightColors.resize (pointLightSlots, glm::vec4 (0.0f));
@@ -163,6 +175,15 @@ CScene::CScene (
 	m_pointLightObjects.push_back (light);
     }
     refreshPointLights ();
+    m_spotLightColors.resize (scene->spotLightSlots, glm::vec4 (0.0f));
+    m_spotLightOrigins.resize (scene->spotLightSlots, glm::vec4 (0.0f));
+    m_spotLightDirections.resize (scene->spotLightSlots, glm::vec4 (0.0f));
+    m_spotLightExponents.resize (scene->spotLightSlots, glm::vec4 (0.0f));
+    for (const auto& object : scene->objects) {
+        if (object->is<SceneSpotLight> () && !m_rejectedObjectIds.contains (object->id))
+            m_spotLightObjects.push_back (object->as<SceneSpotLight> ());
+    }
+    refreshSpotLights ();
 
     // create all objects based off their dependencies
     for (const auto& object : scene->objects) {
@@ -349,6 +370,8 @@ Render::CObject* CScene::dispatchObjectType (const Object& object) {
 	} else if (object.is<SceneCamera> ()) {
 	    // The camera participates in scene selection but has no draw call.
 	    renderObject = new CObject (*this, object);
+        } else if (object.is<SceneSpotLight> ()) {
+            renderObject = new CSpotLight (*this, *object.as<SceneSpotLight> ());
 	} else if (object.is<ScenePointLight> ()) {
 	    renderObject = new CPointLight (*this, *object.as<ScenePointLight> ());
 	} else if (object.is<Sound> ()) {
@@ -493,6 +516,7 @@ void CScene::renderFrame (const glm::ivec4& viewport) {
     dispatchCursorEvents ();
     flushDestroyedScriptLayers ();
     refreshPointLights ();
+    refreshSpotLights ();
 
     // Sound scheduling follows scene time even when a sound layer is hidden
     // by a render-only debug filter. Playback itself runs in the audio driver.
@@ -850,6 +874,12 @@ const glm::vec4* CScene::getPointLightColors () const { return m_pointLightColor
 
 const glm::vec4* CScene::getPointLightOrigins () const { return m_pointLightOrigins.data (); }
 
+int CScene::getSpotLightCount () const { return int (m_spotLightColors.size ()); }
+const glm::vec4* CScene::getSpotLightColors () const { return m_spotLightColors.data (); }
+const glm::vec4* CScene::getSpotLightOrigins () const { return m_spotLightOrigins.data (); }
+const glm::vec4* CScene::getSpotLightDirections () const { return m_spotLightDirections.data (); }
+const glm::vec4* CScene::getSpotLightExponents () const { return m_spotLightExponents.data (); }
+
 const glm::vec3* CScene::getLegacyLightPositions () const { return m_legacyLightPositions.data (); }
 
 const glm::vec4* CScene::getLegacyLightColors () const { return m_legacyLightColors.data (); }
@@ -908,6 +938,42 @@ void CScene::refreshPointLights () {
     }
 }
 
+void CScene::refreshSpotLights () {
+    std::fill (m_spotLightColors.begin (), m_spotLightColors.end (), glm::vec4 (0.0f));
+    std::fill (m_spotLightOrigins.begin (), m_spotLightOrigins.end (), glm::vec4 (0.0f));
+    std::fill (m_spotLightDirections.begin (), m_spotLightDirections.end (), glm::vec4 (0.0f));
+    std::fill (m_spotLightExponents.begin (), m_spotLightExponents.end (), glm::vec4 (0.0f));
+    size_t slot = 0;
+    for (const SceneSpotLight* light : m_spotLightObjects) {
+        if (slot >= m_spotLightColors.size ()) break;
+        // Shadow/cookie atlases have a separate native producer and shader
+        // branch. Keep unsupported objects out of this plain-cone producer.
+        if (light->castShadow || light->useCookie) continue;
+        const auto transform = resolveSceneTransform (*light,
+            [this] (int parentId) -> const Object* { return findObjectData (parentId); },
+            [this] (const Object& parent, const std::string& name) {
+                return getPuppetAttachmentTransform (parent.id, name);
+            });
+        if (!transform.visible) continue;
+        const auto packed = packSpotLightUniforms (
+            transform.authoredMatrix, light->color->value->getVec3 (),
+            light->intensity->value->getFloat (), light->radius->value->getFloat (),
+            light->exponent->value->getFloat (), light->innerCone->value->getFloat (),
+            light->outerCone->value->getFloat ());
+        const auto finite = [] (const glm::vec4& value) {
+            return std::isfinite (value.x) && std::isfinite (value.y)
+                && std::isfinite (value.z) && std::isfinite (value.w);
+        };
+        if (!finite (packed.color) || !finite (packed.origin)
+            || !finite (packed.direction) || !finite (packed.exponent)) continue;
+        m_spotLightColors[slot] = packed.color;
+        m_spotLightOrigins[slot] = packed.origin;
+        m_spotLightDirections[slot] = packed.direction;
+        m_spotLightExponents[slot] = packed.exponent;
+        ++slot;
+    }
+}
+
 std::optional<glm::mat4> CScene::getPuppetAttachmentTransform (
     int parentId, const std::string& name
 ) const {
@@ -947,7 +1013,8 @@ CObject* CScene::createScriptLayer (const std::string& configurationJson,
         model->as<SceneModel> ()->dynamic = std::move (dynamicModel);
     if (!model || (!model->is<Text> () && !model->is<Image> ()
                    && !model->is<Particle> () && !model->is<Sound> ()
-                   && !model->is<ScenePointLight> () && !model->is<SceneModel> ()))
+                   && !model->is<ScenePointLight> () && !model->is<SceneSpotLight> ()
+                   && !model->is<SceneModel> ()))
         throw std::invalid_argument ("Unsupported SceneScript layer configuration");
     // Destroy hooks run while their layers are still addressable. A new child
     // attached to one of those layers would outlive the parent after flush.
@@ -977,6 +1044,8 @@ CObject* CScene::createScriptLayer (const std::string& configurationJson,
 	assignLegacyLightSlot (light);
 	m_pointLightObjects.push_back (light);
     }
+    if (inserted.first->second->is<SceneSpotLight> ())
+        m_spotLightObjects.push_back (inserted.first->second->as<SceneSpotLight> ());
     m_objectsByRenderOrder.push_back (result);
     return result;
 }
@@ -1027,6 +1096,8 @@ void CScene::flushDestroyedScriptLayers () {
 		std::erase (m_pointLightObjects, light);
 		m_legacyLightSlots.erase (light);
 	    }
+            if (object->getObject ().is<SceneSpotLight> ())
+                std::erase (m_spotLightObjects, object->getObject ().as<SceneSpotLight> ());
             m_objects.erase (id);
             delete object;
             m_scriptObjectData.erase (id);

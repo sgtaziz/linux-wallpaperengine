@@ -10,6 +10,7 @@
 #include "WallpaperEngine/Render/Wallpapers/SceneCursor.h"
 #include "WallpaperEngine/Render/Wallpapers/SceneTransform.h"
 #include "WallpaperEngine/Input/MouseInput.h"
+#include "WallpaperEngine/Render/Shaders/ShaderUnit.h"
 
 #include <cmath>
 #include <glm/gtc/matrix_transform.hpp>
@@ -356,4 +357,51 @@ TEST_CASE ("Malformed object parsing leaves unrelated scene layers intact", "[sc
     REQUIRE_FALSE (report.rejected.contains (1));
     REQUIRE (report.rejected.contains (3));
     REQUIRE_FALSE (report.rejected.contains (4));
+}
+
+TEST_CASE ("Scene light slots come from general rather than a root lookalike", "[scene][parser][light]") {
+    using WallpaperEngine::Assets::AssetLocator;
+    using WallpaperEngine::Data::JSON::JSON;
+    using WallpaperEngine::Data::Model::Project;
+    using WallpaperEngine::Data::Model::Scene;
+    using WallpaperEngine::Data::Parsers::WallpaperParser;
+    using WallpaperEngine::FileSystem::Container;
+    const auto parse = [] (const JSON& general) {
+        auto files = std::make_unique<Container> ();
+        const JSON data {{"camera", {{"center", "0 0 -1"}, {"eye", "0 0 0"}, {"up", "0 1 0"}}},
+                         {"general", general}, {"lightconfig", {{"point", 9}}}, {"objects", JSON::array ()}};
+        files->getVFS ().add ("scene.json", data.dump ());
+        Project project {};
+        project.type = Project::Type_Scene;
+        project.assetLocator = std::make_unique<AssetLocator> (std::move (files));
+        const auto wallpaper = WallpaperParser::parse (JSON ("scene.json"), project);
+        const auto* scene = dynamic_cast<const Scene*> (wallpaper.get ());
+        REQUIRE (scene != nullptr);
+        return scene->pointLightSlots;
+    };
+    const int slots = parse (JSON {{"lightconfig", {{"point", 2}, {"spot", 1}}}});
+    CHECK (slots == 2);
+    auto shaderFiles = std::make_unique<Container> ();
+    AssetLocator shaderAssets (std::move (shaderFiles));
+    using WallpaperEngine::Render::Shaders::ShaderUnit;
+    using WallpaperEngine::Render::Shaders::GLSLContext;
+    const WallpaperEngine::Data::Model::ShaderConstantMap constants;
+    const WallpaperEngine::Data::Model::TextureMap textures;
+    const WallpaperEngine::Data::Model::ComboMap combos, overrides {{"LIGHTS_POINT", slots}};
+    ShaderUnit shader (GLSLContext::UnitType_Fragment, "point-slots.frag",
+        "uniform vec4 g_LPoint_Color[LIGHTS_POINT];\n"
+        "void main() { vec4 light = vec4(0);\n"
+        "for (uint l = 0u; l < CASTU(LIGHTS_POINT); ++l) light += g_LPoint_Color[l];\n"
+        "gl_FragColor = light; }\n", shaderAssets, constants, textures, textures, combos, overrides);
+    // CPass passes the parsed serialized count as the LIGHTS_POINT override.
+    REQUIRE (shader.compile ().find ("#define LIGHTS_POINT 2\n") != std::string::npos);
+    ShaderUnit vertex (GLSLContext::UnitType_Vertex, "point-slots.vert",
+        "attribute vec3 a_Position;\nvoid main() { gl_Position = vec4(a_Position, 1); }\n",
+        shaderAssets, constants, textures, textures, combos, overrides);
+    const auto translated = GLSLContext::get ().toGlsl (vertex.compile (), shader.compile ());
+    REQUIRE_FALSE (translated.first.empty ());
+    REQUIRE_FALSE (translated.second.empty ());
+    CHECK (parse (JSON::object ()) == 0);
+    CHECK (parse (JSON {{"lightconfig", {{"spot", 1}}}}) == 0);
+    CHECK (parse (JSON {{"lightconfig", {{"point", 15}}}}) == 15);
 }
