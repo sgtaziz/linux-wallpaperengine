@@ -582,6 +582,12 @@ void CWallpaper::render (
 	// Compute base UVs for the wallpaper scaled to the bounding box
 	this->updateUVs (span.totalBounds, vflip);
 	auto [baseUstart, baseUend, baseVstart, baseVend] = this->m_state.getTextureUVs ();
+	if (rendersAtOutputSize ()) {
+	    baseUstart = 0.0f;
+	    baseUend = 1.0f;
+	    baseVstart = vflip ? 0.0f : 1.0f;
+	    baseVend = vflip ? 1.0f : 0.0f;
+	}
 
 	// This viewport's relative position within the bounding box [0..1]
 	// Use logicalSize (same coordinate space as globalPosition and totalBounds)
@@ -617,6 +623,12 @@ void CWallpaper::render (
 	uend = uvs.uend;
 	vstart = uvs.vstart;
 	vend = uvs.vend;
+        if (rendersAtOutputSize ()) {
+            ustart = 0.0f;
+            uend = 1.0f;
+            vstart = vflip ? 0.0f : 1.0f;
+            vend = vflip ? 1.0f : 0.0f;
+        }
     }
 
     const GLfloat texCoords[] = {

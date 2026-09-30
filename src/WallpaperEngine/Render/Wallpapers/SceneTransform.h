@@ -17,6 +17,27 @@
 
 namespace WallpaperEngine::Render::Wallpapers {
 
+// Native 14017f1b0 allocates the root target at output dimensions, while
+// 140183a70 applies fit/fill to the authored orthographic projection. Move
+// the presentation's sampled UV window into clip space so that the final
+// root copy does not resample an authored-resolution scene image.
+inline glm::mat4 scenePresentationClipTransform (const glm::vec4& uvWindow) {
+    const float left = std::min (uvWindow.x, uvWindow.y);
+    const float right = std::max (uvWindow.x, uvWindow.y);
+    const float bottom = std::min (uvWindow.z, uvWindow.w);
+    const float top = std::max (uvWindow.z, uvWindow.w);
+    const float width = right - left;
+    const float height = top - bottom;
+    if (!(width > 0.0f && height > 0.0f)
+        || !std::isfinite (width) || !std::isfinite (height)) return glm::mat4 (1.0f);
+    glm::mat4 result (1.0f);
+    result[0][0] = 1.0f / width;
+    result[1][1] = 1.0f / height;
+    result[3][0] = (1.0f - left - right) / width;
+    result[3][1] = (1.0f - bottom - top) / height;
+    return result;
+}
+
 // Scene authored coordinates are Y-down and angles are radians. Multiplying
 // local matrices through the parent chain retains affine shear; native
 // attachment/bone adjustments and perspective still need separate handling.

@@ -154,6 +154,9 @@ protected:
      */
     virtual void renderFrame (const glm::ivec4& viewport) = 0;
 
+    /** Scene roots already apply presentation scaling in their projection. */
+    [[nodiscard]] virtual bool rendersAtOutputSize () const { return false; }
+
     /**
      * Setups OpenGL's framebuffers for ping-pong and scene rendering
      */

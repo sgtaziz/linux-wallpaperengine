@@ -1101,11 +1101,7 @@ void CText::render () {
         ? getScene ().getLayerParallaxOffset (depth)
         : getScene ().getLayerParallaxOffset (m_text.origin->value->getVec3 (), depth);
     imageWorld = glm::translate (glm::mat4 (1.0f), parallax) * imageWorld;
-    glm::mat4 mvp = getScene ().getCamera ().getProjection ()
-	* getScene ().getCamera ().getLookAt () * imageWorld;
-    if (getScene ().isChildCompositionScope ()) {
-	mvp = getScene ().getActiveRenderProjection () * imageWorld;
-    }
+    glm::mat4 mvp = getScene ().getActiveRenderProjection () * imageWorld;
 
     const auto sceneTarget = getScene ().getActiveRenderTarget ();
     const bool useEffects = hasVisibleEffects () && m_textTarget;

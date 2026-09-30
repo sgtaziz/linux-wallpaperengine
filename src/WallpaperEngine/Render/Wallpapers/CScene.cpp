@@ -433,21 +433,17 @@ const Audio::Drivers::Recorders::StereoSpectrum::Bands& CScene::getAudioSpectrum
 
 void CScene::renderFrame (const glm::ivec4& viewport) {
     m_particleFrameDurations.publish (getDeltaTime (), getContext ().getDriver ().getFrameCounter ());
-    // Native scene resize (14017f1b0) updates the perspective projection and
-    // its render targets together. Otherwise a resized preview samples a
-    // stretched old root image through newly sized fullscreen effect targets.
-    if (!m_camera->isOrthogonal () && viewport.z > 1 && viewport.w > 1)
-        resizePerspectiveTargets (viewport.z, viewport.w);
-    // The projection now has the active output size for perspective scenes;
-    // fixed authored orthographic canvases retain their own dimensions. Use
-    // the presentation crop only for fullscreen postprocessing intermediates.
-    if (viewport.z > 0 && viewport.w > 0) {
+    // Native WM_SIZE -> 14017f1b0 resizes root/auxiliary targets in both
+    // camera modes. Authored orthographic dimensions remain scene units;
+    // 140183a70 applies the output crop through projection instead.
+    if (viewport.z > 1 && viewport.w > 1) {
+        resizeSceneTargets (viewport.z, viewport.w);
         auto presentation = getState ();
         presentation.updateState (viewport, false, getWidth (), getHeight ());
         const auto uv = presentation.getTextureUVs ();
-        const glm::vec2 span (std::abs (uv.uend - uv.ustart), std::abs (uv.vend - uv.vstart));
-        if (span.x > 0.0f && span.y > 0.0f)
-            m_presentationTextureSize = glm::ceil (glm::vec2 (viewport.z, viewport.w) / span);
+        m_rootRenderClipTransform = scenePresentationClipTransform (
+            {uv.ustart, uv.uend, uv.vstart, uv.vend});
+        m_presentationTextureSize = glm::vec2 (viewport.z, viewport.w);
     }
     // Native 14017fa70:217–225 advances this scene clock before its particle
     // tree ticks. The float sent to the particle context wraps after 432000 s.
@@ -541,7 +537,8 @@ void CScene::renderFrame (const glm::ivec4& viewport) {
     glClear (GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
     m_activeRenderTarget = getFBO ();
-    m_activeRenderProjection = getCamera ().getProjection () * getCamera ().getLookAt ();
+    m_activeRenderProjection = m_rootRenderClipTransform
+        * getCamera ().getProjection () * getCamera ().getLookAt ();
     m_childCompositionScope = false;
     m_maxAlphaCompositionScope = false;
 
@@ -637,8 +634,16 @@ void CScene::renderFrame (const glm::ivec4& viewport) {
     for (auto* root : roots) renderNode (root);
 }
 
-void CScene::resizePerspectiveTargets (int width, int height) {
-    if (getWidth () == width && getHeight () == height) return;
+void CScene::resizeSceneTargets (int width, int height) {
+    if (!m_camera->isOrthogonal ()) {
+        const bool changed = getWidth () != width || getHeight () != height;
+        if (changed) {
+            m_camera->setPerspectiveProjection (width, height);
+            if (m_scriptEngine) m_scriptEngine->notifyScreenResize (width, height);
+        }
+    }
+    if (m_sceneFBO->getRealWidth () == static_cast<uint32_t> (width)
+        && m_sceneFBO->getRealHeight () == static_cast<uint32_t> (height)) return;
     const auto resize = [] (const std::shared_ptr<CFBO>& target, int w, int h) {
         if (target) target->resize (w, h, w, h);
     };
@@ -650,8 +655,6 @@ void CScene::resizePerspectiveTargets (int width, int height) {
     resize (_rt_8FrameBuffer, std::max (1, width / 8), std::max (1, height / 8));
     resize (_rt_Bloom, std::max (1, width / 8), std::max (1, height / 8));
     resizeHdrPresentation (width, height);
-    m_camera->setPerspectiveProjection (width, height);
-    if (m_scriptEngine) m_scriptEngine->notifyScreenResize (width, height);
 }
 
 void CScene::updateMouse (const glm::ivec4& viewport) {
