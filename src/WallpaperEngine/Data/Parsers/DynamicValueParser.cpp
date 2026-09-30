@@ -140,7 +140,7 @@ bool isStringComboOption (const std::string& script, const std::string& property
 }
 
 DynamicValueUniquePtr DynamicValueParser::parse (const json& data, const Properties& properties,
-                                                bool expectColor, bool expectString) {
+                                                bool expectColor, bool expectString, bool floatColor) {
     auto value = std::make_unique<DynamicValue> ();
     auto valueIt = data;
     std::optional<std::string> scriptSource = std::nullopt;
@@ -164,7 +164,11 @@ DynamicValueUniquePtr DynamicValueParser::parse (const json& data, const Propert
 	if (expectString) {
 	    value->update (valueIt.get<std::string> (), DynamicValue::UpdateSource::Initialization);
 	} else if (expectColor) {
-	    value->update (Builders::ColorBuilder::parse (valueIt), DynamicValue::UpdateSource::Initialization);
+	    // Scene image/text RGB is a floating vector even when its string
+	    // contains integers; byte/CSS color consumers retain their own encoding.
+	    value->update (floatColor ? Builders::ColorBuilder::parseProperty (valueIt)
+	                             : Builders::ColorBuilder::parse (valueIt),
+	                   DynamicValue::UpdateSource::Initialization);
 	} else {
 	    std::string str = valueIt;
 	    int size = Builders::VectorBuilder::preparseSize (str);

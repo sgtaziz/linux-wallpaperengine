@@ -451,17 +451,15 @@ JSValue scriptableobject_property_get (JSContext* ctx, JSValueConst obj_val, JSA
     const auto it = properties.find (propertyName);
     if (it == properties.end ()) return JS_UNDEFINED;
     auto& value = it->second.value;
-    const auto alive = [lifetime = std::weak_ptr (container->lifetime)] {
-        const auto current = lifetime.lock ();
-        return current && current->object;
-    };
-    const auto& adapters = container->adapter.getEngine ().getAdapters ();
-    switch (value.getType ()) {
-        case DynamicValue::Vec2: return adapters.vec2->instantiateLayerProperty (value, alive);
-        case DynamicValue::Vec3: return adapters.vec3->instantiateLayerProperty (value, alive);
-        case DynamicValue::Vec4: return adapters.vec4->instantiateLayerProperty (value, alive);
-        default: return container->adapter.getEngine ().dynamicToJs (value);
+    if (value.getType () == DynamicValue::Vec4
+        && container->lifetime->object->isRgbColorProperty (value)) {
+        DynamicValue rgb (glm::vec3 (value.getVec4 ()));
+        return container->adapter.getEngine ().dynamicToJs (rgb, true);
     }
+    // Native layer vector getters return detached values. Editing a retained
+    // component does not set the layer; whole-property assignment does.
+    return container->adapter.getEngine ().dynamicToJs (
+        value, true, container->lifetime->object->isAngleProperty (value));
 }
 
 static bool readVector (JSContext* ctx, JSValueConst value, int count, float* components) {
@@ -573,10 +571,20 @@ int scriptableobject_property_set (
 	case DynamicValue::Vec4:
 	    {
 		float components[4] {};
-		const int count = property.getType () == DynamicValue::Vec2 ? 2 : property.getType () == DynamicValue::Vec3 ? 3 : 4;
+		const bool rgbColor = property.getType () == DynamicValue::Vec4
+                    && container->lifetime->object->isRgbColorProperty (property);
+		const int count = property.getType () == DynamicValue::Vec2 ? 2
+                    : property.getType () == DynamicValue::Vec3 || rgbColor ? 3 : 4;
 		if (!readVector (ctx, val, count, components)) return -1;
-		if (count == 2) property.update (glm::vec2 (components[0], components[1]), DynamicValue::Script);
-		else if (count == 3) property.update (glm::vec3 (components[0], components[1], components[2]), DynamicValue::Script);
+		if (rgbColor) property.update (
+                    glm::vec4 (components[0], components[1], components[2], property.getVec4 ().w),
+                    DynamicValue::Script);
+		else if (count == 2) property.update (glm::vec2 (components[0], components[1]), DynamicValue::Script);
+		else if (count == 3) {
+                    const glm::vec3 vector (components[0], components[1], components[2]);
+                    property.update (container->lifetime->object->isAngleProperty (property)
+                        ? glm::radians (vector) : vector, DynamicValue::Script);
+                }
 		else property.update (glm::vec4 (components[0], components[1], components[2], components[3]), DynamicValue::Script);
 		return 1;
 	    }

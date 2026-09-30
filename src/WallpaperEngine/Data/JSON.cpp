@@ -83,8 +83,8 @@ UserSettingUniquePtr JsonExtensions::user (const std::string& key, const Propert
     return UserSettingParser::parse (value, properties);
 }
 
-UserSettingUniquePtr JsonExtensions::color (const std::string& key, const Properties& properties) const {
+UserSettingUniquePtr JsonExtensions::color (const std::string& key, const Properties& properties, bool floatColor) const {
     const auto value = this->require (key, "User setting without default value must be present");
 
-    return UserSettingParser::parse (value, properties, true);
+    return UserSettingParser::parse (value, properties, true, false, floatColor);
 }

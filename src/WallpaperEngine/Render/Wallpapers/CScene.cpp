@@ -41,6 +41,15 @@ using namespace WallpaperEngine::Data::Parsers;
 using namespace WallpaperEngine::Render::Wallpapers;
 
 namespace {
+class CTransformObject final : public Scripting::ScriptableObject {
+public:
+    CTransformObject (CScene& scene, const Object& object) :
+        CObject (scene, object), ScriptableObject (scene, object) {
+        for (const auto& binding : Scripting::scriptPropertyBindings (object))
+            registerProperty (binding.name, binding.value);
+    }
+};
+
 class CSpotLight final : public Scripting::ScriptableObject {
 public:
     CSpotLight (CScene& scene, const SceneSpotLight& light) :
@@ -394,8 +403,7 @@ Render::CObject* CScene::dispatchObjectType (const Object& object) {
 
 	    renderObject = new Objects::CParticle (*this, particleData);
 	} else {
-	    sLog.error ("Unknown object type, creating placeholder, empty object: ", object.id);
-	    renderObject = new CObject (*this, object);
+	    renderObject = new CTransformObject (*this, object);
 	}
 	renderObject->setup ();
     } catch (const std::exception& e) {

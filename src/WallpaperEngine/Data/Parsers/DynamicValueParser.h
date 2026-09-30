@@ -10,6 +10,7 @@ using namespace WallpaperEngine::Data::Model;
 class DynamicValueParser {
 public:
     static Model::DynamicValueUniquePtr parse (const json& data, const Properties& properties,
-                                               bool expectColor, bool expectString = false);
+                                               bool expectColor, bool expectString = false,
+                                               bool floatColor = false);
 };
 }
