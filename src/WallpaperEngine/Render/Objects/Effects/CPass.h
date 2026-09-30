@@ -101,7 +101,6 @@ private:
 	UniformType type;
 	const void* value;
 	int count;
-	bool authoredPosition = false;
     };
 
     class ReferenceUniformEntry {
