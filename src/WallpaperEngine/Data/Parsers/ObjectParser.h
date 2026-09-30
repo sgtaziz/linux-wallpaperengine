@@ -37,8 +37,9 @@ private:
     // Particle parsing helpers
     static ParticleEmitter parseParticleEmitter (const JSON& it);
     static ParticleInitializerUniquePtr parseParticleInitializer (
-        const JSON& it, const Properties& properties, bool orthogonalScene);
-    static ParticleOperatorUniquePtr parseParticleOperator (const JSON& it, const Properties& properties);
+        const JSON& it, const Properties& properties, bool orthogonalScene, uint32_t nodeFlags);
+    static ParticleOperatorUniquePtr parseParticleOperator (
+        const JSON& it, const Properties& properties, bool birth = false, bool orthogonalScene = false);
     static ParticleRenderer parseParticleRenderer (const JSON& it);
     static ParticleControlPoint parseParticleControlPoint (const JSON& it);
     static ParticleChild parseParticleChild (const JSON& it, const Project& project);

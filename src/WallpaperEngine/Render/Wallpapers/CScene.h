@@ -1,6 +1,7 @@
 #pragma once
 
 #include "WallpaperEngine/Render/Camera.h"
+#include "ParticleSceneClock.h"
 #include "WallpaperEngine/Audio/Drivers/Recorders/SceneSpectrumState.h"
 
 #include "WallpaperEngine/Render/CWallpaper.h"
@@ -47,6 +48,7 @@ public:
     [[nodiscard]] float getDeltaTime () const;
     [[nodiscard]] float getFps () const;
     [[nodiscard]] float getParticleSceneTime () const;
+    [[nodiscard]] float getPreviousParticleSceneDuration () const { return m_particleFrameDurations.previous; }
 
     const glm::vec2* getMousePosition () const;
     const glm::vec2* getMousePositionLast () const;
@@ -116,6 +118,7 @@ private:
     std::vector<DynamicValue*> m_scriptedValues = {};
     Audio::Drivers::Recorders::SceneSpectrumState m_audioSpectrum;
     std::mt19937 m_particleRandom { 5489u };
+    ParticleSceneFrameDurations m_particleFrameDurations;
     double m_particleSceneTimeAccumulator { 0.0 };
     float m_particleSceneTime { 0.0f };
     std::vector<const ScenePointLight*> m_pointLightObjects = {};
