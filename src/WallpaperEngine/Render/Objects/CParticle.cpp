@@ -3855,6 +3855,8 @@ void CParticle::updateParticleViewProjection () {
 	m_eyePosition = sceneCamera.isOrthogonal ()
 	    ? glm::vec3 (0.0f, 0.0f, 2000.0f) : sceneCamera.getEye ();
     }
+    if (!getScene ().isChildCompositionScope ())
+        m_viewProjectionMatrix = getScene ().getRootRenderClipTransform () * m_viewProjectionMatrix;
 }
 
 void CParticle::updateParticleRenderVars () {

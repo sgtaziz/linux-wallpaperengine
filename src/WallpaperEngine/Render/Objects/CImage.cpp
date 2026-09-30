@@ -1198,7 +1198,8 @@ void CImage::setupPasses (const std::function<void (std::shared_ptr<const CFBO>)
 	    // blur composite does the same. Its single first/final copy still uses
 	    // the separate copy geometry and projection route.
 	    if (this->getImage ().model->fullscreen
-	        && (!this->getImage ().model->passthrough || !isFirstPass)) {
+	        && (!this->getImage ().model->passthrough || !isFirstPass
+                    || (!m_composesChildren && !getScene ().isChildCompositionScope ()))) {
 	        spacePosition = isFirstPass ? this->getCopySpacePosition () : this->getPassSpacePosition ();
 	        projection = isFirstPass ? &this->m_modelViewProjectionCopy : &this->m_modelViewProjectionPass;
 	        inverseProjection = isFirstPass ? &this->m_modelViewProjectionCopyInverse
@@ -1651,8 +1652,16 @@ void CImage::updateScreenSpacePosition () {
     this->m_modelViewProjectionScreen = mvp;
     this->m_modelViewProjectionScreenInverse = glm::inverse (mvp);
     if (this->getImage ().model->passthrough) {
-	this->m_modelViewProjectionCopy = this->m_modelViewProjectionScreen;
+	// A root fullscreen passthrough samples the already cropped output
+	// framebuffer. Its copy quad is clip space; applying the authored crop
+	// again would stretch/crop postprocessing a second time.
+	this->m_modelViewProjectionCopy = this->getImage ().model->fullscreen
+            && !m_composesChildren && !getScene ().isChildCompositionScope ()
+            ? glm::mat4 (1.0f) : this->m_modelViewProjectionScreen;
 	this->m_modelViewProjectionCopyInverse = this->m_modelViewProjectionScreenInverse;
+        if (this->getImage ().model->fullscreen
+            && !m_composesChildren && !getScene ().isChildCompositionScope ())
+            this->m_modelViewProjectionCopyInverse = glm::mat4 (1.0f);
     }
 }
 
