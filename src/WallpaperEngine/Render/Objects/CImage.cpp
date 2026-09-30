@@ -1471,7 +1471,19 @@ void CImage::renderWithChildren (const std::function<void (std::shared_ptr<const
     if (this->m_image.model->passthrough && !this->m_image.effects.empty ()
 	&& m_passes.size () <= m_basePassCount) return;
 
-    if (!this->resolveTransform (this->getImage ()).visible) return;
+    if (!this->resolveTransform (this->getImage ()).visible) {
+        // Native 140186c90 marks referenced images with 0x1010; 1401ea2d0
+        // keeps those images drawable even while hidden. Their intermediate
+        // textures remain inputs to dependent layers, while the existing
+        // shouldRenderFinalPass visibility gate suppresses presentation.
+        const bool requiredComposite = std::ranges::any_of (
+            getScene ().getObjectsByRenderOrder (), [id = getId ()] (const CObject* consumer) {
+                return consumer->getId () != id
+                    && std::ranges::find (consumer->getObject ().dependencies, id)
+                        != consumer->getObject ().dependencies.end ();
+            });
+        if (!requiredComposite) return;
+    }
 
     if (!refreshSizeDependentTargets ()) return;
 
