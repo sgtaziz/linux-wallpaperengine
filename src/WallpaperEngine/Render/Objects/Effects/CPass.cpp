@@ -1028,6 +1028,25 @@ void CPass::setupUniforms () {
     this->addUniform ("g_AudioSpectrum32Right", spectrum.audio32[1].data (), 32);
     this->addUniform ("g_AudioSpectrum64Left", spectrum.audio64[0].data (), 64);
     this->addUniform ("g_AudioSpectrum64Right", spectrum.audio64[1].data (), 64);
+    // Native unregistered scalar float uniforms default to one; a valid
+    // material declaration without a default instead registers zero. Preserve
+    // all explicit bindings. Native also overrides unregistered GLSL float
+    // initializers (the original-runtime seven-stripe probe). Array/vector/sampler
+    // defaults require separate native contracts.
+    GLint count = 0, maxName = 0;
+    glGetProgramiv (m_programID, GL_ACTIVE_UNIFORMS, &count);
+    glGetProgramiv (m_programID, GL_ACTIVE_UNIFORM_MAX_LENGTH, &maxName);
+    std::vector<char> name (std::max (1, maxName));
+    for (GLint index = 0; index < count; ++index) {
+        GLsizei length = 0;
+        GLint size = 0;
+        GLenum type = 0;
+        glGetActiveUniform (m_programID, index, name.size (), &length, &size, &type, name.data ());
+        const std::string uniform (name.data (), length);
+        if (type == GL_FLOAT && size == 1 && uniform.find ('[') == std::string::npos
+            && !m_uniforms.contains (uniform) && !m_referenceUniforms.contains (uniform))
+            addUniform (uniform, 1.0f);
+    }
 }
 
 void CPass::addAttribute (const std::string& name, GLint type, GLint elements, const GLuint* value) {
@@ -1161,7 +1180,6 @@ void CPass::addUniform (const ShaderVariable* value, const DynamicValue* setting
     } else {
 	sLog.error ("Cannot convert setting dynamic value  to ", value->getName (), ". Using default value");
     }
-
 }
 
 void CPass::addUniform (const std::string& name, int value) { this->addUniform (name, UniformType::Integer, value); }

@@ -18,6 +18,7 @@
 #include "GLSLContext.h"
 #include "ExactSourceCache.h"
 #include "ParticleRopeShader.h"
+#include "ShaderMetadata.h"
 #include "WallpaperEngine/Assets/AssetLoadException.h"
 #include "WallpaperEngine/Render/Shaders/Variables/ShaderVariable.h"
 #include "WallpaperEngine/Render/Shaders/Variables/ShaderVariableFloat.h"
@@ -966,7 +967,7 @@ void ShaderUnit::parseComboConfiguration (const std::string& content, const int 
     // explicitly selected runtime permutation.
     JSON data;
     try {
-	data = WallpaperEngine::Data::JSON::parseAuthoringJson (content, this->m_file + ":combo");
+	data = parseShaderMetadata (content, this->m_file + ":combo");
     } catch (const std::exception& e) {
 	sLog.error ("Cannot parse combo metadata in shader ", this->m_file, ": ", e.what ());
 	return;
@@ -1007,7 +1008,7 @@ void ShaderUnit::parseParameterConfiguration (
 ) {
     JSON data;
     try {
-	data = WallpaperEngine::Data::JSON::parseAuthoringJson (content, this->m_file + ":parameter:" + name);
+	data = parseShaderMetadata (content, this->m_file + ":parameter:" + name);
     } catch (const std::exception& e) {
 	sLog.error ("Cannot parse parameter metadata for ", name, " in shader ", this->m_file, ": ", e.what ());
 	return;
@@ -1032,7 +1033,7 @@ void ShaderUnit::parseParameterConfiguration (
 	? constant->value.get () : nullptr;
 
     if (constantValue == nullptr && !defvalue.has_value ()) {
-	if (type != "sampler2D") {
+	if (type != "sampler2D" && type != "float") {
 	    sLog.exception ("Cannot parse parameter data for ", name, " in shader ", this->m_file);
 	}
     }
@@ -1065,11 +1066,11 @@ void ShaderUnit::parseParameterConfiguration (
 	}
     } else if (type == "float") {
 	float value = 0.0f;
-	if (!defvalue.has_value ()) {
+	if (!defvalue.has_value () && constantValue != nullptr) {
 	    if (constantValue->getType () != DynamicValue::UnderlyingType::Float)
 		throw std::invalid_argument ("Expected float material constant for " + name + " in shader " + this->m_file);
 	    value = constantValue->getFloat ();
-	} else if (defvalue->is_string ()) {
+	} else if (defvalue.has_value () && defvalue->is_string ()) {
 	    std::string token = defvalue->get<std::string> ();
 	    const auto first = token.find_first_not_of (" \t\r\n");
 	    if (first == std::string::npos)
@@ -1086,9 +1087,9 @@ void ShaderUnit::parseParameterConfiguration (
 	    } catch (const std::out_of_range&) {
 		throw std::invalid_argument ("Float default is out of range for " + name + " in shader " + this->m_file);
 	    }
-	} else if (defvalue->is_number ()) {
+	} else if (defvalue.has_value () && defvalue->is_number ()) {
 	    value = defvalue->get<float> ();
-	} else {
+	} else if (defvalue.has_value ()) {
 	    throw std::invalid_argument ("Float default must be numeric for " + name + " in shader " + this->m_file);
 	}
 	if (!std::isfinite (value))
