@@ -80,6 +80,7 @@ public:
     bool sortScriptLayer (const CObject* object, int index);
     [[nodiscard]] std::shared_ptr<const CFBO> getActiveRenderTarget () const;
     [[nodiscard]] const glm::mat4& getActiveRenderProjection () const;
+    [[nodiscard]] const glm::mat4& getRootRenderClipTransform () const { return m_rootRenderClipTransform; }
     [[nodiscard]] bool isChildCompositionScope () const;
     [[nodiscard]] bool isMaxAlphaCompositionScope () const;
 
@@ -92,7 +93,8 @@ protected:
 
 private:
     glm::vec2 m_presentationTextureSize {0.0f};
-    void resizePerspectiveTargets (int width, int height);
+    [[nodiscard]] bool rendersAtOutputSize () const override { return true; }
+    void resizeSceneTargets (int width, int height);
     Render::CObject* createObject (const Object& object);
     [[nodiscard]] const Object* findObjectData (int id) const;
     void flushDestroyedScriptLayers ();
@@ -129,6 +131,7 @@ private:
     std::array<glm::vec4, 4> m_legacyLightColors {};
     std::shared_ptr<const CFBO> m_activeRenderTarget = nullptr;
     glm::mat4 m_activeRenderProjection {1.0f};
+    glm::mat4 m_rootRenderClipTransform {1.0f};
     bool m_childCompositionScope = false;
     bool m_maxAlphaCompositionScope = false;
     glm::vec2 m_mousePosition = {};

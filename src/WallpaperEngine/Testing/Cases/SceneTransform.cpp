@@ -4,6 +4,7 @@
 #include "WallpaperEngine/Data/Builders/UserSettingBuilder.h"
 #include "WallpaperEngine/Render/Wallpapers/SceneTransform.h"
 #include "WallpaperEngine/Render/Objects/ParticleBirthGeometry.h"
+#include "WallpaperEngine/Render/WallpaperState.h"
 
 #include <glm/gtc/constants.hpp>
 #include <glm/gtc/matrix_transform.hpp>
@@ -34,6 +35,64 @@ ObjectData node (int id, std::optional<int> parent, glm::vec3 origin, glm::vec3 
     result.groupVisible = UserSettingBuilder::fromValue (visible);
     return result;
 }
+}
+
+TEST_CASE ("Output-sized scene projection preserves fit fill and stretch without a second crop",
+           "[scene][presentation]") {
+    using WallpaperEngine::Render::WallpaperState;
+    using Mode = WallpaperState::TextureUVsScaling;
+    using WallpaperEngine::Render::Wallpapers::scenePresentationClipTransform;
+    for (const auto output : {glm::ivec2 (1280, 720), glm::ivec2 (720, 960)}) {
+        for (const auto mode : {Mode::ZoomFitUVs, Mode::ZoomFillUVs, Mode::StretchUVs}) {
+            CAPTURE (output.x, output.y, mode);
+            WallpaperState state (mode, 0);
+            state.updateState ({0, 0, output.x, output.y}, false, 320, 240);
+            const auto uv = state.getTextureUVs ();
+            const auto crop = scenePresentationClipTransform (
+                {uv.ustart, uv.uend, uv.vstart, uv.vend});
+            const auto authoredProjection = glm::ortho (-160.0f, 160.0f, -120.0f, 120.0f);
+            const auto screen = [&] (const glm::vec2& point) {
+                const glm::vec4 clip = crop * authoredProjection * glm::vec4 (point, 0.0f, 1.0f);
+                return (glm::vec2 (clip) * 0.5f + 0.5f) * glm::vec2 (output);
+            };
+            const glm::vec2 center = screen ({0.0f, 0.0f});
+            REQUIRE (center.x == Catch::Approx (output.x * 0.5f));
+            REQUIRE (center.y == Catch::Approx (output.y * 0.5f));
+            const float scaleX = output.x / 320.0f;
+            const float scaleY = output.y / 240.0f;
+            const float uniformScale = mode == Mode::ZoomFitUVs
+                ? std::min (scaleX, scaleY) : std::max (scaleX, scaleY);
+            const glm::vec2 expectedSize = mode == Mode::StretchUVs
+                ? glm::vec2 (output) : glm::vec2 (320.0f, 240.0f) * uniformScale;
+            const glm::vec2 displayedSize = screen ({160.0f, 120.0f}) - screen ({-160.0f, -120.0f});
+            REQUIRE (displayedSize.x == Catch::Approx (expectedSize.x).margin (0.001f));
+            REQUIRE (displayedSize.y == Catch::Approx (expectedSize.y).margin (0.001f));
+            // Final root presentation is a one-to-one copy: cropping has
+            // already happened in the projection, with depth untouched.
+            REQUIRE ((crop * glm::vec4 (0, 0, 0.37f, 1)).z == Catch::Approx (0.37f));
+        }
+    }
+}
+
+TEST_CASE ("Native point-filter GIF keeps authored pixels at integer output scale",
+           "[scene][presentation]") {
+    using WallpaperEngine::Render::WallpaperState;
+    using WallpaperEngine::Render::Wallpapers::scenePresentationClipTransform;
+    // Actual 843530721 is a 500x291 GIF with TEXI flags7 (nearest),
+    // centered at (250,145.5). Native1000x582 captures repeat each pixel
+    // exactly2x2. The source sampler remains nearest; no sampler override
+    // is required when the root is rendered at its output dimensions.
+    WallpaperState state (WallpaperState::TextureUVsScaling::ZoomFillUVs, 0);
+    state.updateState ({0, 0, 1000, 582}, false, 500, 291);
+    const auto uv = state.getTextureUVs ();
+    const auto projection = scenePresentationClipTransform (
+        {uv.ustart, uv.uend, uv.vstart, uv.vend})
+        * glm::ortho (-250.0f, 250.0f, -145.5f, 145.5f);
+    const auto clip = [&] (float x) { return projection * glm::vec4 (x, 0, 0, 1); };
+    REQUIRE ((clip (1).x - clip (0).x) * 500.0f == Catch::Approx (2.0f));
+    REQUIRE (projection[1][1] * 291.0f == Catch::Approx (2.0f));
+    // Invalid/minimized windows do not introduce a singular clip matrix.
+    REQUIRE (scenePresentationClipTransform ({0, 0, 0, 0}) == glm::mat4 (1.0f));
 }
 
 TEST_CASE ("Scene parent matrices preserve rotated nonuniform scale and live visibility", "[scene][transform]") {
