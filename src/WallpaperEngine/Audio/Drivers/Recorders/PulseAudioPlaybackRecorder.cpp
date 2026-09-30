@@ -103,7 +103,8 @@ void pa_stream_read_cb (pa_stream* stream, const size_t /*nbytes*/, void* userda
 	&& actual->format == PA_SAMPLE_FLOAT32NE && actual->channels == 2
 	&& actual->rate == recorder->spectrum.sampleRate ();
     // Drain every queued fragment. A single read notification can cover
-    // multiple memblocks; retaining older blocks delays the visualizer.
+    // multiple memblocks. The analyzer accepts one native-sized prefix per
+    // update; later blocks are released without extending that FFT input.
     for (;;) {
 	const size_t available = pa_stream_readable_size (stream);
 	if (available == 0 || available == static_cast<size_t> (-1)) break;
@@ -115,7 +116,7 @@ void pa_stream_read_cb (pa_stream* stream, const size_t /*nbytes*/, void* userda
 	}
 	if (currentSize == 0) break;
 	// A peek can stop in the middle of a stereo frame. The analyzer carries
-	// every byte until a complete window exists.
+	// every byte until the capture prefix is complete, retaining its silent tail.
 	if (matchingRate) {
 	    if (data) recorder->spectrum.feed (data, currentSize);
 	    else recorder->spectrum.feedSilence (currentSize);

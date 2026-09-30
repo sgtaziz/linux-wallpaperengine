@@ -671,6 +671,85 @@ TEST_CASE ("Native complex FFT input preserves sample boundaries", "[audio][spec
     REQUIRE (minimum.i > 0.0f);
 }
 
+TEST_CASE ("Native capture prefix retains the full transform length", "[audio][spectrum]") {
+    using WallpaperEngine::Audio::Drivers::Recorders::nativeSpectrumCaptureLength;
+    using WallpaperEngine::Audio::Drivers::Recorders::StereoSpectrum;
+    // Literal results of divss/mulss/subss/cvttss2si at 1400d1491–14a0.
+    REQUIRE (nativeSpectrumCaptureLength (1920) == 1280);
+    REQUIRE (nativeSpectrumCaptureLength (2089) == 1392);
+    REQUIRE (nativeSpectrumCaptureLength (3840) == 2560);
+    REQUIRE (nativeSpectrumCaptureLength (4179) == 2786);
+    StereoSpectrum analyzer (48000);
+    REQUIRE (analyzer.captureSamples () == 1392);
+    REQUIRE (analyzer.captureBytes () == 1392 * 2 * sizeof (float));
+    REQUIRE (analyzer.samples () == 2089);
+}
+
+TEST_CASE ("Native capture discards released packet excess and retains incomplete prefixes", "[audio][spectrum]") {
+    using WallpaperEngine::Audio::Drivers::Recorders::StereoSpectrum;
+    StereoSpectrum analyzer (48000), reference (48000);
+    std::vector<float> packet (2089 * 2, 0.0f);
+    for (size_t n = 0; n < 1392; ++n)
+        packet[n * 2] = 0.1f * std::sin (2.0f * std::numbers::pi_v<float> * 80.0f * n / 48000.0f);
+    // Audio beyond the native ceiling must neither fill the silent FFT tail
+    // nor become the next capture, even when it arrives in a separate packet.
+    for (size_t n = 1392; n < 2089; ++n) packet[n * 2 + 1] = 0.75f;
+    const auto* bytes = reinterpret_cast<const uint8_t*> (packet.data ());
+    analyzer.feed (bytes, 1392 * 8 - 1);
+    StereoSpectrum::Bands actual {}, expected {};
+    REQUIRE_FALSE (analyzer.take (actual));
+    analyzer.feed (bytes + 1392 * 8 - 1, packet.size () * sizeof (float) - (1392 * 8 - 1));
+    analyzer.feed (bytes + 1392 * 8, (2089 - 1392) * 8);
+    reference.feed (bytes, 1392 * 8);
+    REQUIRE (reference.take (expected));
+    REQUIRE (analyzer.take (actual));
+    REQUIRE (actual.audio64 == expected.audio64);
+    REQUIRE (std::all_of (actual.audio64[1].begin (), actual.audio64[1].end (),
+                         [] (float value) { return std::abs (value) < 0.001f; }));
+    std::vector<uint8_t> silence (1392 * 8, 0);
+    analyzer.feed (silence.data (), 15);
+    REQUIRE_FALSE (analyzer.take (actual));
+    analyzer.feed (silence.data () + 15, silence.size () - 16);
+    REQUIRE_FALSE (analyzer.take (actual));
+    analyzer.feed (silence.data () + silence.size () - 1, 1);
+    REQUIRE (analyzer.take (actual));
+    for (const auto& channel : actual.audio64)
+        REQUIRE (std::all_of (channel.begin (), channel.end (),
+                             [] (float value) { return std::abs (value) < 0.001f; }));
+}
+
+TEST_CASE ("Captured stereo PCM preserves the native partial-window leakage shape", "[audio][spectrum]") {
+    using WallpaperEngine::Audio::Drivers::Recorders::StereoSpectrum;
+    // One exact 2 kHz cycle from the controlled 48 kHz float32 monitor capture,
+    // frame144000. PCM SHA256: 027f3815526aae97d2fdaa4c77d35ea887805e19e34a209471c6c6900fe8d371.
+    // Both client capture formats and input levels were independently checked.
+    constexpr std::array<float, 24> cycle {
+        0.0f, 0.0005880712415f, 0.00113711122f, 0.001608088613f,
+        0.00196891115f, 0.002196159912f, 0.002273355145f, 0.002196159912f,
+        0.00196891115f, 0.001608088613f, 0.00113711122f, 0.0005880712415f,
+        0.0f, -0.0005880712415f, -0.00113711122f, -0.001608088613f,
+        -0.00196891115f, -0.002196159912f, -0.002273355145f, -0.002196159912f,
+        -0.00196891115f, -0.001608088613f, -0.00113711122f, -0.0005880712415f
+    };
+    std::vector<float> packet (2089 * 2);
+    for (size_t n = 0; n < 2089; ++n) packet[n * 2] = packet[n * 2 + 1] = cycle[n % cycle.size ()];
+    StereoSpectrum analyzer (48000);
+    analyzer.feed (reinterpret_cast<const uint8_t*> (packet.data ()), packet.size () * sizeof (float));
+    StereoSpectrum::Bands bands;
+    REQUIRE (analyzer.take (bands));
+    // Independent double DFT of the literal PCM prefix1392 + silent tail697,
+    // followed by the recovered native bin weighting/reduction. These side
+    // bands distinguish the observed prefix from a full2089-sample tone.
+    constexpr std::array<size_t, 6> indices {35, 37, 38, 39, 40, 50};
+    constexpr std::array<double, 6> expected {
+        0.00042205169314, 0.00141705445658, 0.02636764108288,
+        0.00295341666901, 0.00094489651173, 0.00011277150229
+    };
+    REQUIRE (bands.audio64[0] == bands.audio64[1]);
+    for (size_t i = 0; i < indices.size (); ++i)
+        REQUIRE (std::abs (bands.audio64[0][indices[i]] - expected[i]) < 0.000002 + expected[i] * 0.005);
+}
+
 TEST_CASE ("Stereo spectrum sizes each window from the negotiated capture rate", "[audio][spectrum]") {
     using WallpaperEngine::Audio::Drivers::Recorders::StereoSpectrum;
     using WallpaperEngine::Audio::Drivers::Recorders::nativeSpectrumInput;
@@ -689,13 +768,13 @@ TEST_CASE ("Stereo spectrum sizes each window from the negotiated capture rate",
             / static_cast<double> (analyzer.samples ());
         const float value = static_cast<float> (0.1 * std::sin (phase));
         std::memcpy (window.data () + n * 2 * sizeof (float), &value, sizeof (value));
-        const auto input = nativeSpectrumInput (value);
+        const auto input = nativeSpectrumInput (n < analyzer.captureSamples () ? value : 0.0f);
         directBin += std::complex<double> (input.r, input.i) * std::polar (1.0, -phase);
     }
     StereoSpectrum::Bands bands;
-    analyzer.feed (window.data (), window.size () - 1);
+    analyzer.feed (window.data (), analyzer.captureBytes () - 1);
     REQUIRE_FALSE (analyzer.take (bands));
-    analyzer.feed (window.data () + window.size () - 1, 1);
+    analyzer.feed (window.data () + analyzer.captureBytes () - 1, 1);
     REQUIRE (analyzer.take (bands));
     const double ratio = static_cast<double> (toneBin - 1) / 639.0;
     const double weight = 0.501 - std::cos (std::numbers::pi_v<double> * ratio) * (1.0 - 0.501);
@@ -714,9 +793,9 @@ TEST_CASE ("Stereo spectrum sizes each window from the negotiated capture rate",
     REQUIRE (analyzer.take (bands)); // rate switch publishes a cleared window
     REQUIRE_FALSE (analyzer.take (bands));
     std::vector<uint8_t> silence (analyzer.windowBytes ());
-    analyzer.feed (silence.data (), silence.size () - 1);
+    analyzer.feed (silence.data (), analyzer.captureBytes () - 1);
     REQUIRE_FALSE (analyzer.take (bands));
-    analyzer.feed (silence.data () + silence.size () - 1, 1);
+    analyzer.feed (silence.data () + analyzer.captureBytes () - 1, 1);
     REQUIRE (analyzer.take (bands));
     REQUIRE (std::all_of (bands.audio64[0].begin (), bands.audio64[0].end (),
                          [] (float value) { return std::isfinite (value) && value < 0.001f; }));
@@ -782,7 +861,7 @@ TEST_CASE ("Production complex analyzer places an exact-bin tone at its numeric 
             / static_cast<double> (StereoSpectrum::Samples);
         const float value = static_cast<float> (0.1 * std::sin (phase));
         std::memcpy (samples.data () + n * 2 * sizeof (float), &value, sizeof (value));
-        const auto input = nativeSpectrumInput (value);
+        const auto input = nativeSpectrumInput (n < 1280 ? value : 0.0f);
         directBin += std::complex<double> (input.r, input.i) * std::polar (1.0, -phase);
     }
 

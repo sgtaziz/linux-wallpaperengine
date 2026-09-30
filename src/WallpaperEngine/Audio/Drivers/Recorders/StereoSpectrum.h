@@ -17,7 +17,7 @@
 
 namespace WallpaperEngine::Audio::Drivers::Recorders {
 
-/** Latest complete interleaved float32 stereo window, analyzed independently per channel. */
+/** Native capture prefix with a silent FFT tail, analyzed independently per channel. */
 class StereoSpectrum {
 public:
     static constexpr size_t Samples = 1920;
@@ -89,6 +89,8 @@ public:
     [[nodiscard]] unsigned sampleRate () const { return m_sampleRate; }
     [[nodiscard]] size_t samples () const { return m_samples; }
     [[nodiscard]] size_t windowBytes () const { return m_windowBytes; }
+    [[nodiscard]] size_t captureSamples () const { return m_captureSamples; }
+    [[nodiscard]] size_t captureBytes () const { return m_captureSamples * 2 * sizeof (float); }
 
     void configureSampleRate (unsigned sampleRate) {
         if (sampleRate == 0) throw std::invalid_argument ("Capture sample rate must be nonzero");
@@ -152,6 +154,7 @@ public:
         m_workSize = workSize;
         m_sampleRate = sampleRate;
         m_samples = samples;
+        m_captureSamples = nativeSpectrumCaptureLength (static_cast<unsigned> (samples));
         m_windowBytes = bytes;
         m_pending.swap (pending);
         m_latest.swap (latest);
@@ -166,19 +169,19 @@ public:
     }
 
     void feed (const uint8_t* bytes, size_t count) {
-        if (!bytes) return;
-        while (count) {
-            const size_t portion = std::min (count, m_windowBytes - m_pendingSize);
-            std::copy_n (bytes, portion, m_pending.begin () + m_pendingSize);
-            bytes += portion;
-            count -= portion;
-            m_pendingSize += portion;
-            if (m_pendingSize == m_windowBytes) {
-                m_latest = m_pending;
-                m_pendingSize = 0;
-                m_ready = true;
-            }
+        if (!bytes || m_captureComplete) return;
+        const size_t portion = std::min (count, captureBytes () - m_pendingSize);
+        std::copy_n (bytes, portion, m_pending.begin () + m_pendingSize);
+        m_pendingSize += portion;
+        if (m_pendingSize == captureBytes ()) {
+            m_latest = m_pending;
+            m_pendingSize = 0;
+            m_ready = true;
+            m_captureComplete = true;
         }
+        // Native releases the whole packet and drains the rest of the queue
+        // after reaching its prefix ceiling (0x1400d1559–0x1400d1b38).
+        // Ignore that excess until take() finishes this recorder update.
     }
 
     void feedSilence (size_t count) {
@@ -194,12 +197,14 @@ public:
         std::fill (m_pending.begin (), m_pending.end (), 0);
         std::fill (m_latest.begin (), m_latest.end (), 0);
         m_pendingSize = 0;
+        m_captureComplete = false;
         m_ready = true;
     }
 
     [[nodiscard]] bool take (Bands& bands) {
         if (!m_ready) return false;
         m_ready = false;
+        m_captureComplete = false;
         std::array<std::array<float, 64>, 2> channels {};
         for (size_t channel = 0; channel < 2; ++channel) {
             for (size_t sample = 0; sample < m_samples; ++sample) {
@@ -242,11 +247,13 @@ private:
     size_t m_workSize = 0;
     unsigned m_sampleRate = 0;
     size_t m_samples = 0;
+    size_t m_captureSamples = 0;
     size_t m_windowBytes = 0;
     std::vector<uint8_t> m_pending;
     std::vector<uint8_t> m_latest;
     size_t m_pendingSize = 0;
     bool m_ready = false;
+    bool m_captureComplete = false;
     std::vector<kiss_fft_cpx> m_input;
     std::vector<kiss_fft_cpx> m_frequency;
     std::vector<kiss_fft_cpx> m_chirp;
