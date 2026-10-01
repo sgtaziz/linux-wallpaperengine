@@ -3,6 +3,7 @@
 
 #include "WallpaperEngine/Render/Objects/PuppetMeshParser.h"
 #include "WallpaperEngine/Render/Objects/PuppetSkinning.h"
+#include "WallpaperEngine/Render/Objects/StaticModelTail.h"
 
 #include <bit>
 #include <cstdint>
@@ -375,6 +376,56 @@ TEST_CASE ("Legacy static MDLV v4 uses its header attribute mask", "[puppet][mes
     REQUIRE (model.meshes[0].normals.size () == 3);
     REQUIRE (model.meshes[0].texcoords.size () == 3);
     REQUIRE (model.meshes[0].indices == std::vector<uint16_t> {0, 1, 2});
+}
+
+TEST_CASE ("Static MDLV padding begins at the parsed mesh boundary", "[model][static][padding]") {
+    using WallpaperEngine::Render::Objects::staticModelHasOnlyPadding;
+    const auto fixture = makeFixture (13, 0xf, 0xf, 1, 0);
+    const auto bytes = fixture.bytes.substr (0, fixture.indexPayload + 6);
+    const auto unpadded = parseMeshes (bytes);
+    REQUIRE (unpadded.sectionEndOffset == bytes.size ());
+    // MDLS appears inside valid material/vertex data. Only the parsed end
+    // determines which bytes are optional sections or terminal padding.
+    REQUIRE (bytes.find ("MDLS") != std::string::npos);
+    for (const size_t length : {size_t (0), size_t (1), size_t (2), size_t (16), size_t (727009)}) {
+        const auto padded = bytes + std::string (length, '\0');
+        const auto parsed = parseMeshes (padded);
+        REQUIRE (parsed.sectionEndOffset == unpadded.sectionEndOffset);
+        REQUIRE (staticModelHasOnlyPadding (
+            {reinterpret_cast<const uint8_t*> (padded.data ()), padded.size ()}, parsed.sectionEndOffset));
+        REQUIRE (parsed.meshes[0].positions == unpadded.meshes[0].positions);
+        REQUIRE (parsed.meshes[0].indices == unpadded.meshes[0].indices);
+        REQUIRE (parsed.meshes[0].materials == unpadded.meshes[0].materials);
+    }
+}
+
+TEST_CASE ("Static MDLV padding does not accept nonzero sections or malformed mesh framing",
+           "[model][static][padding]") {
+    using WallpaperEngine::Render::Objects::staticModelHasOnlyPadding;
+    const auto fixture = makeFixture (13, 0xf, 0xf, 1, 0);
+    const auto bytes = fixture.bytes.substr (0, fixture.indexPayload + 6);
+    const auto end = parseMeshes (bytes).sectionEndOffset;
+    for (const auto tag : {"MDLS0004", "MDLA0002", "MDAT0001", "unknown"}) {
+        auto sections = bytes;
+        cstr (sections, tag);
+        REQUIRE_FALSE (staticModelHasOnlyPadding (
+            {reinterpret_cast<const uint8_t*> (sections.data ()), sections.size ()}, end));
+        // Keep conservative rejection even after an empty terminator; this
+        // does not implement the native unknown/optional section machinery.
+        sections.insert (end, 16, '\0');
+        REQUIRE_FALSE (staticModelHasOnlyPadding (
+            {reinterpret_cast<const uint8_t*> (sections.data ()), sections.size ()}, end));
+    }
+    auto lateNonzero = bytes + std::string (727009, '\0');
+    lateNonzero.back () = '\1';
+    REQUIRE_FALSE (staticModelHasOnlyPadding (
+        {reinterpret_cast<const uint8_t*> (lateNonzero.data ()), lateNonzero.size ()}, end));
+    REQUIRE_FALSE (staticModelHasOnlyPadding (
+        {reinterpret_cast<const uint8_t*> (bytes.data ()), bytes.size ()}, end + 1));
+    REQUIRE_THROWS (parseMeshes (bytes.substr (0, bytes.size () - 1)));
+    auto malformed = bytes + std::string (16, '\0');
+    patch32 (malformed, fixture.indexLength, 7); // Nonintegral uint16 index stream.
+    REQUIRE_THROWS (parseMeshes (malformed));
 }
 
 TEST_CASE ("MDLV first mesh rejects unsupported and truncated layouts", "[puppet][mesh]") {
