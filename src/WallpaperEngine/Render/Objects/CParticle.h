@@ -3,6 +3,7 @@
 #include "CRenderable.h"
 #include "ParticleCore.h"
 #include "ParticleEventInheritance.h"
+#include "ParticleInstancePatch.h"
 #include "WallpaperEngine/Data/Model/Object.h"
 #include "WallpaperEngine/Render/Objects/Effects/CPass.h"
 #include "WallpaperEngine/Render/Wallpapers/CScene.h"
@@ -211,6 +212,7 @@ protected:
     void resetPeriodicChildren ();
     void resetStaticEmitterTree ();
     void resetSequenceCounters (bool periodicOnly);
+    void patchInstanceSequenceSteps ();
     void updateOrdinaryControlPoints ();
     void setChildAnchor (const glm::mat4& parentStack, const glm::vec3& particlePosition,
                          bool staticChild);
@@ -299,8 +301,10 @@ private:
         float step { 1.0f };
         uint32_t flags { 0 };
         DynamicValue* count { nullptr };
+        ParticleCore::InstanceSequencePatch instanceCountPatch;
     };
     std::vector<std::shared_ptr<SequenceCounter>> m_sequenceCounters;
+    std::unique_ptr<ParticleCore::InstancePatchWrites> m_instancePatchWrites;
     std::vector<OperatorFunc> m_operators;
     bool m_resetAlphaEachPass { false };
     bool m_resetColorEachPass { false };
