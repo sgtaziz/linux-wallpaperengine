@@ -396,6 +396,10 @@ JSValue scriptableobject_property_get (JSContext* ctx, JSValueConst obj_val, JSA
 
     if (std::string_view (name) == "name")
         return JS_NewString (ctx, container->lifetime->object->getObject ().name.c_str ());
+    if (std::string_view (name) == "solid")
+        return JS_NewBool (ctx, container->lifetime->object->isSolid ());
+    if (std::string_view (name) == "disablepropagation")
+        return JS_NewBool (ctx, container->lifetime->object->disablesCursorPropagation ());
     if (std::string_view (name) == "getParent")
         return JS_NewCFunction (ctx, layer_get_parent, name, 0);
     if (std::string_view (name) == "getTransformMatrix")
@@ -514,6 +518,17 @@ int scriptableobject_property_set (
     }
 
     ScopeGuard guard ([=] { JS_FreeCString (ctx, name); });
+    if (std::string_view (name) == "solid" || std::string_view (name) == "disablepropagation") {
+        // Native base-layer Boolean setters ignore non-Boolean values. These
+        // flags affect live input routing without changing the authored config.
+        if (JS_IsBool (val)) {
+            if (std::string_view (name) == "solid")
+                container->lifetime->object->setSolid (JS_VALUE_GET_BOOL (val));
+            else
+                container->lifetime->object->setDisablePropagation (JS_VALUE_GET_BOOL (val));
+        }
+        return 1;
+    }
     if (std::string_view (name) == "horizontalalign" ||
         std::string_view (name) == "verticalalign") {
         auto* text = dynamic_cast<WallpaperEngine::Render::Objects::CText*> (
