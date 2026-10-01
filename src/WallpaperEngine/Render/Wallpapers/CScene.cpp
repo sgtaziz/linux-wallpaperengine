@@ -869,6 +869,16 @@ glm::vec3 CScene::getLayerParallaxOffset (const glm::vec3& origin,
 
 const std::vector<CObject*>& CScene::getObjectsByRenderOrder () const { return this->m_objectsByRenderOrder; }
 
+std::vector<CObject*> CScene::getScriptLayers () const {
+    std::vector<CObject*> layers;
+    layers.reserve (m_objectsByRenderOrder.size ());
+    for (auto* object : m_objectsByRenderOrder)
+        if (object != m_bloomObject
+            && !m_pendingScriptLayerDestroy.contains (object->getId ())
+            && !m_destroyingScriptLayerIds.contains (object->getId ())) layers.push_back (object);
+    return layers;
+}
+
 std::mt19937& CScene::getParticleRandom () { return m_particleRandom; }
 
 const CObject* CScene::getObject (int id) const {

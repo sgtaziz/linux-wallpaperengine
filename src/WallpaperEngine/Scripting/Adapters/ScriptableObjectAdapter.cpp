@@ -371,7 +371,9 @@ static JSValue layer_get_transform_matrix (JSContext* ctx, JSValueConst thisValu
 
 JSValue scriptableobject_property_get (JSContext* ctx, JSValueConst obj_val, JSAtom atom, JSValueConst receiver) {
     auto* container = scriptableContainer (obj_val);
-    if (!container || !container->lifetime->object) return JS_ThrowTypeError (ctx, "Invalid layer object");
+    if (!container) return JS_ThrowTypeError (ctx, "Invalid layer object");
+    // Native retained handles become inert when their layer is removed.
+    if (!container->lifetime->object) return JS_UNDEFINED;
 
     const char* name = JS_AtomToCString (ctx, atom);
 
@@ -488,7 +490,8 @@ int scriptableobject_property_set (
     JSContext* ctx, JSValueConst obj_val, JSAtom atom, JSValueConst val, JSValueConst receiver, int flags
 ) {
     auto* container = scriptableContainer (obj_val);
-    if (!container || !container->lifetime->object) return JS_ThrowTypeError (ctx, "Invalid layer object"), -1;
+    if (!container) return JS_ThrowTypeError (ctx, "Invalid layer object"), -1;
+    if (!container->lifetime->object) return 1;
 
     const char* name = JS_AtomToCString (ctx, atom);
 
@@ -596,7 +599,7 @@ int scriptableobject_property_set (
 }
 
 ScriptableObjectAdapter::ScriptableObjectAdapter (ScriptEngine& engine, std::string name) :
-    ObjectAdapter (engine), m_exoticMethods (), m_name (std::move (name)) {
+    ObjectAdapter (engine), m_instances (engine.getContext ()), m_exoticMethods (), m_name (std::move (name)) {
     m_exoticMethods.get_property = scriptableobject_property_get;
     m_exoticMethods.set_property = scriptableobject_property_set;
     this->registerType (
@@ -611,14 +614,26 @@ ScriptableObjectAdapter::ScriptableObjectAdapter (ScriptEngine& engine, std::str
 }
 
 JSValue ScriptableObjectAdapter::instantiate (ScriptableObject& object) {
+    JSValue cached = m_instances.find (&object);
+    if (!JS_IsUndefined (cached)) return cached;
     JSValue result = this->ObjectAdapter::instantiate (object);
+    if (JS_IsException (result)) return result;
     JS_SetOpaque (
 	result,
 	new OpaqueScriptableObjectAdapter { .magic = SCRIPTABLE_OPAQUE_MAGIC, .adapter = *this, .lifetime = object.getLifetime () }
     );
 
+    // The wrapper retains only the lifetime token, not the native layer.
+    // Removing a layer invalidates that token and releases this cache entry.
+    m_instances.retain (&object, result);
     return result;
 }
+
+void ScriptableObjectAdapter::forgetInstance (const ScriptableObject& object) {
+    m_instances.forget (&object);
+}
+
+void ScriptableObjectAdapter::releaseInstances () { m_instances.clear (); }
 
 JSValue ScriptableObjectAdapter::instantiate (DynamicValue& value) {
     throw std::runtime_error ("Cannot create a ScriptableObject instance from a DynamicValue");

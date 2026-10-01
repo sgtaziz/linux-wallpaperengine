@@ -319,10 +319,10 @@ ScriptEngine::~ScriptEngine () {
     this->m_modules.clear ();
     this->m_scriptModules.clear ();
 
-    // QuickJS may keep vector objects in module/global cycles until context
-    // or runtime destruction. Their finalizers call back into VectorAdapter,
-    // so release its JS handles now but retain the C++ adapters until after
-    // all QuickJS finalization has finished.
+    // QuickJS may keep layer/vector objects in module/global cycles until
+    // context or runtime destruction. Release retained JS handles now, but
+    // keep their C++ adapters alive through all QuickJS finalization.
+    this->m_adapters.object->releaseInstances ();
     this->m_adapters.vec4->releasePrototype ();
     this->m_adapters.vec3->releasePrototype ();
     this->m_adapters.vec2->releasePrototype ();
@@ -390,6 +390,7 @@ void ScriptEngine::unregisterObject (const ScriptableObject& object) {
 	JS_SetPropertyStr (this->m_context, this->m_globalThis, "thisLayer", JS_UNDEFINED);
     if (removedActiveObject)
 	JS_SetPropertyStr (this->m_context, this->m_globalThis, "thisObject", JS_UNDEFINED);
+    this->m_adapters.object->forgetInstance (object);
 }
 
 void ScriptEngine::destroyObjectModules (const ScriptableObject& object) {
