@@ -13,11 +13,35 @@ inline bool isBirthControlPointInput (Data::Model::ScalarRemapValueOperator::Inp
         || input == Input::DirectionToControlPoint;
 }
 
+inline void checkOrdinaryBirthRemapSource (glm::vec3 source, bool checkedBirth) {
+    if (checkedBirth && (!std::isfinite (source.x) || !std::isfinite (source.y) || !std::isfinite (source.z)))
+        throw std::invalid_argument ("Runtime control-point output nonfinite ordinary birth remap is unsupported");
+}
+
+inline void checkOrdinaryBirthBetweenControlPoints (
+    glm::vec3 position, glm::vec3 first, glm::vec3 second, bool checkedBirth) {
+    if (!checkedBirth) return;
+    checkOrdinaryBirthRemapSource (position, true);
+    checkOrdinaryBirthRemapSource (first, true);
+    checkOrdinaryBirthRemapSource (second, true);
+    const auto axis = second - first;
+    const auto offset = position - first;
+    if (!std::isfinite (glm::dot (axis, axis)) || !std::isfinite (glm::dot (offset, axis)))
+        throw std::invalid_argument ("Runtime control-point output nonfinite ordinary birth remap is unsupported");
+}
+
 inline glm::vec3 remapControlPointInput (
     glm::vec3 particlePosition, ControlPointData& controlPoint,
-    ParticleCore::RemapControlPointVector selector, bool birth) {
-    if (!birth) return ParticleCore::remapControlPointVector (
-        particlePosition, controlPoint.position, selector);
+    ParticleCore::RemapControlPointVector selector, bool birth, bool nativeSlots = false) {
+    if (!birth) {
+        if (!nativeSlots) return ParticleCore::remapControlPointVector (particlePosition, controlPoint.position, selector);
+        if (selector == ParticleCore::RemapControlPointVector::Position)
+            return ParticleCore::toAuthoredVector (controlPoint.position);
+        const auto delta = ParticleCore::toAuthoredVector (controlPoint.position - particlePosition);
+        if (selector == ParticleCore::RemapControlPointVector::Delta) return delta;
+        const float squaredLength = ParticleCore::nativeRuntimeSquaredLength (delta.x, delta.y, delta.z);
+        return delta * (squaredLength > 0.0f ? ParticleCore::nativeRuntimeReciprocalSqrt (squaredLength) : 0.0f);
+    }
     // Birth 14023b340 inputs 16..18 store zero into matrix column-three XYZ
     // before reduction/ranges/output gates. Basis and authored offset survive.
     controlPoint.position = ParticleCore::toSimulationVector (glm::vec3 (0.0f));
@@ -32,7 +56,8 @@ inline glm::vec3 remapControlPointInput (
 
 inline OperatorFunc createScalarRemapOperator (
     const Data::Model::ScalarRemapValueOperator& op, bool birth,
-    bool hasRotationRandom, bool hasAngularMovement, bool hasAngularVelocityRandom) {
+    bool hasRotationRandom, bool hasAngularMovement, bool hasAngularVelocityRandom,
+    bool nativeSlots = false) {
     using Data::Model::ScalarRemapValueOperator;
     const auto input = op.input;
     const bool birthControlPointIEEE = birth && isBirthControlPointInput (input);
@@ -91,7 +116,7 @@ inline OperatorFunc createScalarRemapOperator (
     noiseRange.noiseOctaves = op.transformOctaves;
     const auto* blend = op.blendEnvelope ? &*op.blendEnvelope : nullptr;
 	    return [input, output, inputControlPoint, inputControlPoint1, operation, vectorComponent, noiseRange, blend,
-	    hasRotationRandom, hasAngularMovement, hasAngularVelocityRandom, birth, birthControlPointIEEE, birthNoise] (
+	    hasRotationRandom, hasAngularMovement, hasAngularVelocityRandom, birth, birthControlPointIEEE, birthNoise, nativeSlots] (
 	std::vector<ParticleInstance>& particles, uint32_t count,
 	std::vector<ControlPointData>& controlPoints, float, ParticleCore::MovementTime) {
 	const auto envelope = blend ? std::optional<ParticleCore::BlendEnvelope> ({
@@ -100,16 +125,25 @@ inline OperatorFunc createScalarRemapOperator (
         }) : std::nullopt;
 	for (uint32_t i = 0; i < count; ++i) {
 	    auto& p = particles[i];
-	    if (!p.alive) continue;
-	    if (!birth && (!std::isfinite (p.lifetime) || p.lifetime <= 0.0f)) continue;
-	    const float lifetimeFraction = birth ? 0.0f : p.age / p.lifetime;
+	    if (!nativeSlots && !p.alive) continue;
+	    if (!birth && !nativeSlots && (!std::isfinite (p.lifetime) || p.lifetime <= 0.0f)) continue;
+	    const float lifetimeFraction = birth ? (nativeSlots ? p.sequenceFraction : 0.0f)
+                : nativeSlots ? ParticleCore::nativeRuntimeLifetimeFraction (p.age, p.lifetime) : p.age / p.lifetime;
+	    const bool checkedBirthSource = nativeSlots && birth && !birthControlPointIEEE && !birthNoise;
+	    if (input == ScalarRemapValueOperator::Input::PositionBetweenTwoControlPoints
+                && inputControlPoint >= 0 && inputControlPoint1 >= 0
+                && inputControlPoint < static_cast<int> (controlPoints.size ())
+                && inputControlPoint1 < static_cast<int> (controlPoints.size ()))
+                checkOrdinaryBirthBetweenControlPoints (p.position, controlPoints[inputControlPoint].position,
+                    controlPoints[inputControlPoint1].position, checkedBirthSource);
 	    float inputValue = lifetimeFraction;
 	    switch (input) {
 	    case ScalarRemapValueOperator::Input::LifetimeFraction: break;
 	    case ScalarRemapValueOperator::Input::MaxLifetime: inputValue = p.lifetime; break;
 	    case ScalarRemapValueOperator::Input::Size: inputValue = p.size; break;
 	    case ScalarRemapValueOperator::Input::Opacity: inputValue = p.alpha; break;
-	    case ScalarRemapValueOperator::Input::Speed: inputValue = glm::length (p.velocity); break;
+	    case ScalarRemapValueOperator::Input::Speed: inputValue = nativeSlots && !birth
+                ? ParticleCore::nativeRuntimeLength (p.velocity.x, p.velocity.y, p.velocity.z) : glm::length (p.velocity); break;
 	    case ScalarRemapValueOperator::Input::Rotation: inputValue = p.rotation.z; break;
 	    case ScalarRemapValueOperator::Input::AngularSpeed:
 		inputValue = ParticleCore::gatedAngularSpeed (
@@ -118,16 +152,20 @@ inline OperatorFunc createScalarRemapOperator (
 	case ScalarRemapValueOperator::Input::DistanceToControlPoint:
 		inputValue = inputControlPoint >= 0
 		    && inputControlPoint < static_cast<int> (controlPoints.size ())
-		    ? ParticleCore::remapControlPointDistance (
-		          p.position, controlPoints[inputControlPoint].position) : 0.0f;
+		    ? (nativeSlots && !birth ? ParticleCore::nativeRuntimeLength (
+                      p.position.x - controlPoints[inputControlPoint].position.x,
+                      p.position.y - controlPoints[inputControlPoint].position.y,
+                      p.position.z - controlPoints[inputControlPoint].position.z)
+                    : ParticleCore::remapControlPointDistance (p.position, controlPoints[inputControlPoint].position)) : 0.0f;
 		break;
 	case ScalarRemapValueOperator::Input::PositionBetweenTwoControlPoints:
 		inputValue = inputControlPoint >= 0 && inputControlPoint1 >= 0
 		    && inputControlPoint < static_cast<int> (controlPoints.size ())
 		    && inputControlPoint1 < static_cast<int> (controlPoints.size ())
-		    ? ParticleCore::remapPositionBetweenControlPoints (
-		          p.position, controlPoints[inputControlPoint].position,
-		          controlPoints[inputControlPoint1].position) : 0.0f;
+		    ? (nativeSlots && !birth ? ParticleCore::nativeRuntimePositionBetweenControlPoints (
+                      p.position, controlPoints[inputControlPoint].position, controlPoints[inputControlPoint1].position)
+                    : ParticleCore::remapPositionBetweenControlPoints (
+                      p.position, controlPoints[inputControlPoint].position, controlPoints[inputControlPoint1].position)) : 0.0f;
 		break;
 	case ScalarRemapValueOperator::Input::ControlPoint:
 	case ScalarRemapValueOperator::Input::DeltaToControlPoint:
@@ -140,34 +178,41 @@ inline OperatorFunc createScalarRemapOperator (
 		            ? ParticleCore::RemapControlPointVector::Delta
 		            : ParticleCore::RemapControlPointVector::Direction;
 		    const auto source = remapControlPointInput (
-		        p.position, controlPoints[inputControlPoint], selector, birth);
+		        p.position, controlPoints[inputControlPoint], selector, birth, nativeSlots);
 		    inputValue = (birthControlPointIEEE || birthNoise)
                         ? ParticleCore::reduceBirthRemapVector (source.x, source.y, source.z, vectorComponent)
+                        : nativeSlots && !birth ? ParticleCore::reduceNativeRuntimeRemapVector (source.x, source.y, source.z, vectorComponent)
                         : ParticleCore::reduceRemapVector (source.x, source.y, source.z, vectorComponent);
 		} else inputValue = 0.0f;
 		break;
 	    case ScalarRemapValueOperator::Input::Color:
 		{
                 const auto source = p.color;
+                checkOrdinaryBirthRemapSource (source, checkedBirthSource);
                 inputValue = birthNoise
                     ? ParticleCore::reduceBirthRemapVector (source.x, source.y, source.z, vectorComponent)
-                    : ParticleCore::reduceRemapVector (source.x, source.y, source.z, vectorComponent);
+                    : nativeSlots && !birth ? ParticleCore::reduceNativeRuntimeRemapVector (source.x, source.y, source.z, vectorComponent)
+                        : ParticleCore::reduceRemapVector (source.x, source.y, source.z, vectorComponent);
             }
 		break;
 	    case ScalarRemapValueOperator::Input::Position:
 		{
                 const auto source = ParticleCore::toAuthoredVector (p.position);
+                checkOrdinaryBirthRemapSource (source, checkedBirthSource);
                 inputValue = birthNoise
                     ? ParticleCore::reduceBirthRemapVector (source.x, source.y, source.z, vectorComponent)
-                    : ParticleCore::reduceRemapVector (source.x, source.y, source.z, vectorComponent);
+                    : nativeSlots && !birth ? ParticleCore::reduceNativeRuntimeRemapVector (source.x, source.y, source.z, vectorComponent)
+                        : ParticleCore::reduceRemapVector (source.x, source.y, source.z, vectorComponent);
             }
 		break;
 	    case ScalarRemapValueOperator::Input::Velocity:
 		{
                 const auto source = ParticleCore::toAuthoredVector (p.velocity);
+                checkOrdinaryBirthRemapSource (source, checkedBirthSource);
                 inputValue = birthNoise
                     ? ParticleCore::reduceBirthRemapVector (source.x, source.y, source.z, vectorComponent)
-                    : ParticleCore::reduceRemapVector (source.x, source.y, source.z, vectorComponent);
+                    : nativeSlots && !birth ? ParticleCore::reduceNativeRuntimeRemapVector (source.x, source.y, source.z, vectorComponent)
+                        : ParticleCore::reduceRemapVector (source.x, source.y, source.z, vectorComponent);
             }
 		break;
 	    }
@@ -175,26 +220,31 @@ inline OperatorFunc createScalarRemapOperator (
 	    particleRange.noiseSeedBits = std::bit_cast<uint32_t> (p.oscillatorRandom);
 	    if (output == ScalarRemapValueOperator::Output::Size)
 		p.size = ParticleCore::remapScalarValue (
-		    p.size, inputValue, lifetimeFraction, operation, envelope, particleRange, birthControlPointIEEE, birthNoise);
+		    p.size, inputValue, lifetimeFraction, operation, envelope, particleRange, birthControlPointIEEE, birthNoise, nativeSlots && !birth, nativeSlots && birth);
 	    else if (output == ScalarRemapValueOperator::Output::Opacity)
 		p.alpha = ParticleCore::remapScalarValue (
-		    p.alpha, inputValue, lifetimeFraction, operation, envelope, particleRange, birthControlPointIEEE, birthNoise);
+		    p.alpha, inputValue, lifetimeFraction, operation, envelope, particleRange, birthControlPointIEEE, birthNoise, nativeSlots && !birth, nativeSlots && birth);
 	    else if (output == ScalarRemapValueOperator::Output::MaxLifetime)
 	        p.lifetime = ParticleCore::remapScalarValue (
-	            p.lifetime, inputValue, lifetimeFraction, operation, envelope, particleRange, birthControlPointIEEE, birthNoise);
+	            p.lifetime, inputValue, lifetimeFraction, operation, envelope, particleRange, birthControlPointIEEE, birthNoise, nativeSlots && !birth, nativeSlots && birth);
 	    else if (output == ScalarRemapValueOperator::Output::Rotation)
 	        p.rotation.z = ParticleCore::remapScalarValue (
-	            p.rotation.z, inputValue, lifetimeFraction, operation, envelope, particleRange, birthControlPointIEEE, birthNoise);
+	            p.rotation.z, inputValue, lifetimeFraction, operation, envelope, particleRange, birthControlPointIEEE, birthNoise, nativeSlots && !birth, nativeSlots && birth);
 	    else if (output == ScalarRemapValueOperator::Output::AngularSpeed) {
 	        p.angularVelocity.z = ParticleCore::remapBirthAngularSpeed (
                 p.angularVelocity.z, inputValue, operation, particleRange,
-                hasAngularVelocityRandom, hasAngularMovement, birthControlPointIEEE, birthNoise);
+                hasAngularVelocityRandom, hasAngularMovement, birthControlPointIEEE, birthNoise, nativeSlots && birth);
 	    }
 	    else {
-		const float currentSpeed = glm::length (p.velocity);
+		const float currentSpeed = nativeSlots && !birth
+                ? ParticleCore::nativeRuntimeLength (p.velocity.x, p.velocity.y, p.velocity.z) : glm::length (p.velocity);
 		const float mappedSpeed = ParticleCore::remapScalarValue (
-		    currentSpeed, inputValue, lifetimeFraction, operation, envelope, particleRange, birthControlPointIEEE, birthNoise);
-		p.velocity = ParticleCore::remapSpeedOutput (p.velocity, mappedSpeed, birthControlPointIEEE || birthNoise);
+		    currentSpeed, inputValue, lifetimeFraction, operation, envelope, particleRange, birthControlPointIEEE, birthNoise, nativeSlots && !birth, nativeSlots && birth);
+		if (nativeSlots && !birth) {
+                const float factor = currentSpeed > 0.0f
+                    ? ParticleCore::nativeRuntimeReciprocal (currentSpeed) * mappedSpeed : mappedSpeed;
+                p.velocity *= factor;
+            } else p.velocity = ParticleCore::remapSpeedOutput (p.velocity, mappedSpeed, birthControlPointIEEE || birthNoise);
 	    }
 	}
     };
@@ -205,11 +255,12 @@ inline OperatorFunc createScalarRemapOperator (
 // the production closure without constructing a scene or graphics context.
 inline OperatorFunc createVectorRemapOperator (
     const Data::Model::VectorRemapValueOperator& op, bool birth,
-    bool hasRotationRandom, bool hasAngularMovement, bool hasAngularVelocityRandom) {
+    bool hasRotationRandom, bool hasAngularMovement, bool hasAngularVelocityRandom,
+    bool nativeSlots = false) {
     using Data::Model::VectorRemapValueOperator;
     // Runtime CP output consumes sparse SIMD lane-zero state, including
-    // expired slots. Only the native scalar birth writer is represented.
-    if (op.output == VectorRemapValueOperator::Output::ControlPoint && !birth) return {};
+    // expired slots. Compact execution retains its existing feature guard.
+    if (op.output == VectorRemapValueOperator::Output::ControlPoint && !birth && !nativeSlots) return {};
     const auto input = op.input;
     const bool birthControlPointIEEE = birth && isBirthControlPointInput (input);
     const bool birthNoise = birth && (op.transform == decltype (op.transform)::SimplexNoise
@@ -272,7 +323,7 @@ inline OperatorFunc createVectorRemapOperator (
     return [input, output, outputControlPoint, inputControlPoint, inputControlPoint1, outputComponent, component, inputMin, inputMax,
             outputMin, outputMax, flags, transform, transformScale, transformOctaves,
             blend, operation,
-            hasRotationRandom, hasAngularMovement, hasAngularVelocityRandom, birth, birthControlPointIEEE, birthNoise] (
+            hasRotationRandom, hasAngularMovement, hasAngularVelocityRandom, birth, birthControlPointIEEE, birthNoise, nativeSlots] (
         std::vector<ParticleInstance>& particles, uint32_t count,
         std::vector<ControlPointData>& controlPoints, float, ParticleCore::MovementTime) {
         if (output == VectorRemapValueOperator::Output::ControlPoint
@@ -281,10 +332,19 @@ inline OperatorFunc createVectorRemapOperator (
             blend->inStart->value->getFloat (), blend->inEnd->value->getFloat (),
             blend->outStart->value->getFloat (), blend->outEnd->value->getFloat ()
         }) : std::nullopt;
-        for (uint32_t i = 0; i < count; ++i) {
+        const bool blockControlPointWriter = !birth && output == VectorRemapValueOperator::Output::ControlPoint;
+        for (uint32_t i = 0; i < count; i += blockControlPointWriter ? 4u : 1u) {
             auto& p = particles[i];
-            if (!p.alive || (!birth && (!std::isfinite (p.lifetime) || p.lifetime <= 0.0f))) continue;
-            const float age = birth ? 0.0f : p.age / p.lifetime;
+            if (!nativeSlots && (!p.alive || (!birth && (!std::isfinite (p.lifetime) || p.lifetime <= 0.0f)))) continue;
+            const float age = birth ? (nativeSlots ? p.sequenceFraction : 0.0f)
+                : nativeSlots ? ParticleCore::nativeRuntimeLifetimeFraction (p.age, p.lifetime) : p.age / p.lifetime;
+            const bool checkedBirthSource = nativeSlots && birth && !birthControlPointIEEE && !birthNoise;
+            if (input == VectorRemapValueOperator::Input::PositionBetweenTwoControlPoints
+                && inputControlPoint >= 0 && inputControlPoint1 >= 0
+                && inputControlPoint < static_cast<int> (controlPoints.size ())
+                && inputControlPoint1 < static_cast<int> (controlPoints.size ()))
+                checkOrdinaryBirthBetweenControlPoints (p.position, controlPoints[inputControlPoint].position,
+                    controlPoints[inputControlPoint1].position, checkedBirthSource);
             glm::vec3 source (age);
             bool vectorInput = false;
             switch (input) {
@@ -292,7 +352,8 @@ inline OperatorFunc createVectorRemapOperator (
             case VectorRemapValueOperator::Input::MaxLifetime: source = glm::vec3 (p.lifetime); break;
             case VectorRemapValueOperator::Input::Size: source = glm::vec3 (p.size); break;
             case VectorRemapValueOperator::Input::Opacity: source = glm::vec3 (p.alpha); break;
-            case VectorRemapValueOperator::Input::Speed: source = glm::vec3 (glm::length (p.velocity)); break;
+            case VectorRemapValueOperator::Input::Speed: source = glm::vec3 (nativeSlots && !birth
+                ? ParticleCore::nativeRuntimeLength (p.velocity.x, p.velocity.y, p.velocity.z) : glm::length (p.velocity)); break;
             case VectorRemapValueOperator::Input::Rotation: source = glm::vec3 (p.rotation.z); break;
             case VectorRemapValueOperator::Input::AngularSpeed:
                 source = glm::vec3 (ParticleCore::gatedAngularSpeed (
@@ -301,16 +362,20 @@ inline OperatorFunc createVectorRemapOperator (
             case VectorRemapValueOperator::Input::DistanceToControlPoint:
                 source = glm::vec3 (inputControlPoint >= 0
                     && inputControlPoint < static_cast<int> (controlPoints.size ())
-                    ? ParticleCore::remapControlPointDistance (
-                          p.position, controlPoints[inputControlPoint].position) : 0.0f);
+                    ? (nativeSlots && !birth ? ParticleCore::nativeRuntimeLength (
+                          p.position.x - controlPoints[inputControlPoint].position.x,
+                          p.position.y - controlPoints[inputControlPoint].position.y,
+                          p.position.z - controlPoints[inputControlPoint].position.z)
+                        : ParticleCore::remapControlPointDistance (p.position, controlPoints[inputControlPoint].position)) : 0.0f);
                 break;
             case VectorRemapValueOperator::Input::PositionBetweenTwoControlPoints:
                 source = glm::vec3 (inputControlPoint >= 0 && inputControlPoint1 >= 0
                     && inputControlPoint < static_cast<int> (controlPoints.size ())
                     && inputControlPoint1 < static_cast<int> (controlPoints.size ())
-                    ? ParticleCore::remapPositionBetweenControlPoints (
-                          p.position, controlPoints[inputControlPoint].position,
-                          controlPoints[inputControlPoint1].position) : 0.0f);
+                    ? (nativeSlots && !birth ? ParticleCore::nativeRuntimePositionBetweenControlPoints (
+                          p.position, controlPoints[inputControlPoint].position, controlPoints[inputControlPoint1].position)
+                        : ParticleCore::remapPositionBetweenControlPoints (
+                          p.position, controlPoints[inputControlPoint].position, controlPoints[inputControlPoint1].position)) : 0.0f);
                 break;
             case VectorRemapValueOperator::Input::ControlPoint:
             case VectorRemapValueOperator::Input::DeltaToControlPoint:
@@ -323,7 +388,7 @@ inline OperatorFunc createVectorRemapOperator (
                             ? ParticleCore::RemapControlPointVector::Delta
                             : ParticleCore::RemapControlPointVector::Direction;
                     source = remapControlPointInput (
-                        p.position, controlPoints[inputControlPoint], selector, birth);
+                        p.position, controlPoints[inputControlPoint], selector, birth, nativeSlots);
                 } else source = glm::vec3 (0.0f);
                 vectorInput = true;
                 break;
@@ -334,10 +399,12 @@ inline OperatorFunc createVectorRemapOperator (
             case VectorRemapValueOperator::Input::Velocity:
                 source = ParticleCore::toAuthoredVector (p.velocity); vectorInput = true; break;
             }
+            if (vectorInput) checkOrdinaryBirthRemapSource (source, checkedBirthSource);
             if (vectorInput && component != ParticleCore::RemapVectorComponent::All) {
                 source = glm::vec3 ((birthControlPointIEEE || birthNoise)
                     ? ParticleCore::reduceBirthRemapVector (source.x, source.y, source.z, component)
-                    : ParticleCore::reduceRemapVector (source.x, source.y, source.z, component));
+                    : nativeSlots && !birth ? ParticleCore::reduceNativeRuntimeRemapVector (source.x, source.y, source.z, component)
+                        : ParticleCore::reduceRemapVector (source.x, source.y, source.z, component));
             }
             glm::vec3 current = output == VectorRemapValueOperator::Output::Color
                 ? p.color : output == VectorRemapValueOperator::Output::Position
@@ -349,15 +416,15 @@ inline OperatorFunc createVectorRemapOperator (
                 inputMin, inputMax, outputMin, outputMax, flags, envelope,
                 outputComponent, transform, transformScale,
                 std::bit_cast<uint32_t> (p.oscillatorRandom), vectorInput,
-                transformOctaves, birthControlPointIEEE, birthNoise);
+                transformOctaves, birthControlPointIEEE, birthNoise, nativeSlots && !birth, nativeSlots && birth);
             if (output == VectorRemapValueOperator::Output::Color) p.color = current;
             else if (output == VectorRemapValueOperator::Output::Position)
                 p.position = ParticleCore::toSimulationVector (current);
             else if (output == VectorRemapValueOperator::Output::Velocity)
                 p.velocity = ParticleCore::toSimulationVector (current);
             else {
-                // 14023b340 output 16 writes only matrix column-three XYZ;
-                // subsequent births and component records observe this write.
+                // Birth 14023b340 and runtime 140243dd0 output 16 write only
+                // translation XYZ; subsequent births/blocks/records observe it.
                 controlPoints[outputControlPoint].position = ParticleCore::toSimulationVector (current);
             }
         }

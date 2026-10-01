@@ -629,8 +629,10 @@ ParticleUniquePtr ObjectParser::parseParticle (const JSON& it, const Project& pr
 	} else if (particleIt->is_object ()) {
 	    particleJson = *particleIt;
 	}
+	bool hasUnsupportedComponents = false;
 	const auto reportUnsupported = [&] (const char* component, size_t index, const JSON& entry,
 	                                    const char* action) {
+	    hasUnsupportedComponents = true;
 	    const auto nameIt = entry.find ("name");
 	    const std::string name = nameIt != entry.end () && nameIt->is_string ()
 	        ? nameIt->get<std::string> () : "<missing>";
@@ -749,19 +751,21 @@ ParticleUniquePtr ObjectParser::parseParticle (const JSON& it, const Project& pr
 
         // Native 1401c5490 marks direct remap CP outputs as generated, before
         // runtime CP construction. Ownership also applies to omitted slots.
-        for (const auto& initializer : initializers) {
-            if (!initializer->is<RemapInitialValueInitializer> ()) continue;
-            const auto& remap = initializer->as<RemapInitialValueInitializer> ()->remap;
-            if (!remap->is<VectorRemapValueOperator> ()) continue;
+        const auto ownRemapControlPoint = [&controlPoints] (const ParticleOperatorBase* remap) {
+            if (!remap || !remap->is<VectorRemapValueOperator> ()) return;
             const auto& value = *remap->as<VectorRemapValueOperator> ();
-            if (value.output != VectorRemapValueOperator::Output::ControlPoint) continue;
+            if (value.output != VectorRemapValueOperator::Output::ControlPoint) return;
             const auto target = std::find_if (controlPoints.begin (), controlPoints.end (),
                 [&value] (const ParticleControlPoint& cp) { return cp.id == value.outputControlPoint0; });
             if (target != controlPoints.end ()) target->flags |= 0x10000u;
             else controlPoints.push_back (ParticleControlPoint {
                 .id = value.outputControlPoint0, .flags = 0x10000u, .parentControlPoint = 0,
                 .offset = glm::vec3 (0.0f), .angles = glm::vec3 (0.0f), .lockToPointer = false });
-        }
+        };
+        for (const auto& initializer : initializers)
+            if (initializer && initializer->is<RemapInitialValueInitializer> ())
+                ownRemapControlPoint (initializer->as<RemapInitialValueInitializer> ()->remap.get ());
+        for (const auto& op : operators) ownRemapControlPoint (op.get ());
 
 	// Parse children
 	std::vector<ParticleChild> children;
@@ -930,6 +934,7 @@ ParticleUniquePtr ObjectParser::parseParticle (const JSON& it, const Project& pr
 		.presetHasColor = presetHasColor,
 		.presetTintCompiled = (flags & 0x200000u) != 0
 		    || !presetHasColor || project.sceneVersion < 5,
+		.hasUnsupportedComponents = hasUnsupportedComponents,
 		.material = std::move (material),
 		.emitters = std::move (emitters),
 		.initializers = std::move (initializers),
@@ -1233,10 +1238,10 @@ ParticleOperatorUniquePtr ObjectParser::parseParticleOperator (
 	return std::make_unique<CapVelocityOperator> (
 	    it.user ("maxspeed", properties, 100.0f), !it.contains ("maxspeed"));
     } else if (name == "remapvalue") {
-	// Native ranges are literal numeric/vector JSON values. Direct CP output
-	// is represented only for the scalar birth dispatcher, not sparse SIMD ticks.
+	// Native ranges are literal numeric/vector JSON values. Runtime CP writers
+	// select the canonical physical-slot execution route at node construction.
 	const auto output = it.optional<std::string> ("output", "size");
-	const bool controlPointOutput = birth && output == "controlpoint";
+	const bool controlPointOutput = output == "controlpoint";
 	const auto isDefaultNumber = [&it] (const char* key, float value) {
 	    if (!it.contains (key)) return true;
 	    const auto& field = it.at (key);

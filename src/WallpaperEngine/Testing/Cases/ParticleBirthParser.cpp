@@ -190,7 +190,7 @@ TEST_CASE ("Birth remap CP translation outputs compile ownership for every nativ
     REQUIRE (particle.controlPoints[1].angles == glm::vec3 (30.0f, 40.0f, 50.0f));
 }
 
-TEST_CASE ("Birth CP output bounds literal targets while runtime and unsupported outputs stay gated",
+TEST_CASE ("Birth and runtime CP output own literal targets while unsupported fields stay gated",
            "[particle][birth][parser][remap][controlpoint]") {
     Project project {};
     const auto data = JSON::parse (R"({"id":1,"particle":{"initializer":[
@@ -230,14 +230,18 @@ TEST_CASE ("Birth CP output bounds literal targets while runtime and unsupported
             ->remap->as<VectorRemapValueOperator> ();
         REQUIRE (remap.outputControlPoint0 == targets[index]);
     }
-    REQUIRE (particle.controlPoints.size () == 5); // rejected ranges/targets do not claim ownership
+    REQUIRE (particle.controlPoints.size () == 6); // rejected ranges/targets do not claim ownership
     REQUIRE (particle.controlPoints[0].id == 0);
     REQUIRE (particle.controlPoints[1].id == 7);
     REQUIRE (particle.controlPoints[2].id == 2);
     REQUIRE (particle.controlPoints[3].id == 3);
     REQUIRE (particle.controlPoints[4].id == 4);
-    REQUIRE (particle.operators.size () == 1);
-    REQUIRE (particle.operators[0]->as<VectorRemapValueOperator> ()->output
+    REQUIRE (particle.controlPoints[5].id == 5);
+    REQUIRE ((particle.controlPoints[5].flags & 0x10000u) != 0);
+    REQUIRE (particle.operators.size () == 3);
+    REQUIRE (particle.operators[0]->as<VectorRemapValueOperator> ()->outputControlPoint0 == 0);
+    REQUIRE (particle.operators[1]->as<VectorRemapValueOperator> ()->outputControlPoint0 == 5);
+    REQUIRE (particle.operators[2]->as<VectorRemapValueOperator> ()->output
         == VectorRemapValueOperator::Output::Position);
 }
 

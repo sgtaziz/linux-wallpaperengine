@@ -1,5 +1,6 @@
 #include "CParticle.h"
 #include "ParticleRemapOperators.h"
+#include "ParticleNativeSlotScope.h"
 #include "ParticleCore.h"
 #include "ParticleBirthGeometry.h"
 #include "ParticleInitialColor.h"
@@ -481,6 +482,17 @@ CParticle::CParticle (Wallpapers::CScene& scene, const Particle& particle, uint3
     m_maxParticles = ParticleCore::particleCapacity (particle.maxCount);
 
     m_particles.resize (m_maxParticles);
+    if (ParticleCore::needsNativeSlotStreams (particle)) {
+        if (!ParticleCore::nativeRuntimeArithmeticAvailable)
+            throw std::invalid_argument ("Runtime control-point output requires native SSE arithmetic support");
+        if (const auto error = ParticleCore::nativeSlotScopeError (particle, m_parentParticleRuntime != nullptr))
+            throw std::invalid_argument (*error);
+        ParticleInstance zero;
+        zero.color = zero.initial.color = glm::vec3 (0.0f);
+        zero.alpha = zero.initial.alpha = zero.size = zero.initial.size = 0.0f;
+        zero.lifetime = zero.initial.lifetime = 0.0f;
+        m_slotStreams.emplace (m_maxParticles, zero);
+    }
     if (m_hasRopeTrailHistory) {
 	m_ropeTrailHistory = ParticleCore::RopeTrailHistory (m_maxParticles, m_ropeSegments);
 	// Native 1401d2340 stores length / segments as the sampling interval.
@@ -633,6 +645,9 @@ void CParticle::setup () {
 	m_spritesheetFrames = static_cast<int> (texture->getSpritesheetFrames ());
 	m_spritesheetDuration = texture->getSpritesheetDuration ();
 	const auto& frames = texture->getFrames ();
+        if (m_slotStreams && ((texture->getFlags () & TextureFlags_IsGif) != 0
+            || texture->isAnimated () || m_spritesheetFrames > 1 || frames.size () > 1))
+            throw std::invalid_argument (*ParticleCore::nativeSlotScopeError (m_particle, false, true));
 	m_animationFrameCount = static_cast<int> (frames.size ());
 	m_separatePageAnimation = frames.size () > 1
 	    && std::any_of (frames.begin () + 1, frames.end (), [&] (const auto& frame) {
@@ -813,9 +828,15 @@ void CParticle::render () {
 void CParticle::emitNewParticles (float dt) {
 	std::vector<ParticleInstance> bornParticles;
 	bool allocatedSlots = false;
+	if (m_slotStreams) {
+	    m_slotStreams->beginEmissionPass ();
+	}
 	if (m_emissionEnabled || m_forcedEmitCount != 0) for (auto& emitter : m_emitters) {
 	    const uint32_t oldCount = m_particleCount;
-	    emitter (m_particles, m_particleCount, dt);
+	    uint32_t emissionCount = m_slotStreams ? m_slotStreams->nativeCount () : m_particleCount;
+	    emitter (m_particles, emissionCount, dt);
+	    if (m_slotStreams) continue;
+	    m_particleCount = emissionCount;
 	    for (uint32_t i = oldCount; i < m_particleCount; ++i) {
 		const auto slot = m_nativeSlots.allocate (m_maxParticles);
 		if (!slot) throw std::logic_error ("Particle native slot allocation exceeded pool capacity");
@@ -829,6 +850,7 @@ void CParticle::emitNewParticles (float dt) {
 		if (!m_particle.children.empty ()) bornParticles.push_back (m_particles[i]);
 	    }
 	}
+	if (m_slotStreams) refreshNativeLiveView ();
 	// Native operator, render and CP loops scan live SoA slots from zero to
 	// high-water. A reused low slot must precede older high-slot survivors.
 	if (allocatedSlots && !std::is_sorted (
@@ -859,6 +881,46 @@ void CParticle::emitNewParticles (float dt) {
 		              " vx=", p.velocity.x, " vy=", p.velocity.y,
 		              " vz=", p.velocity.z, " birthseed=", p.oscillatorRandom);
 	}
+}
+
+uint32_t CParticle::emissionCapacity (const std::vector<ParticleInstance>& particles, uint32_t count) const {
+    return m_slotStreams ? m_slotStreams->capacity () - m_slotStreams->nativeCount ()
+                         : static_cast<uint32_t> (particles.size () - count);
+}
+
+ParticleInstance& CParticle::emittedParticleTarget (std::vector<ParticleInstance>& particles, uint32_t count) {
+    if (!m_slotStreams) return particles[count];
+    const auto slot = m_slotStreams->nextBirthSlot ();
+    if (!slot) throw std::logic_error ("Native particle birth exceeded physical capacity");
+    auto& particle = m_slotStreams->streams ()[*slot];
+    particle.poolSlot = *slot;
+    particle.birthId = m_nextParticleBirthId++;
+    if (m_nextParticleBirthId == 0) m_nextParticleBirthId = 1;
+    return particle;
+}
+
+void CParticle::finishEmittedParticle (ParticleInstance& particle, uint32_t& count) {
+    if (!m_slotStreams) {
+        ++count;
+        return;
+    }
+    if (!std::isfinite (particle.lifetime) || particle.lifetime <= 0.0f)
+        throw std::invalid_argument ("Runtime control-point output requires a finite positive birth lifetime");
+    // Birth remaps consume the baseline proxy during ordered initialization.
+    // Native current streams remain at raw defaults until interpreter restore;
+    // unseparated RGB/alpha streams alias their updated baselines instead.
+    particle.size = 0.5f;
+    if (m_resetColorEachPass) particle.color = instanceBirthRgbGain ();
+    if (m_resetAlphaEachPass) particle.alpha = alphaOverrideValue ()->getFloat ();
+    m_slotStreams->commitBirth (particle.poolSlot);
+    count = m_slotStreams->nativeCount ();
+}
+
+void CParticle::refreshNativeLiveView () {
+    m_particleCount = 0;
+    m_slotStreams->visitDrawSlots ([this] (const ParticleInstance& source, uint32_t) {
+        m_particles[m_particleCount++] = source;
+    });
 }
 
 void CParticle::resetStaticEmitterTree () {
@@ -955,6 +1017,7 @@ void CParticle::stop () {
     m_ropeExpiredCount = 0;
     m_nativeSlots = ParticleCore::NativeSlotAllocation {};
     m_eventSlotValues.clear ();
+    if (m_slotStreams) m_slotStreams->stop ();
     for (size_t index = 0; index < m_childNodes.size ();) {
         auto& node = m_childNodes[index];
         if (m_particle.children[node.descriptor].type == "static") {
@@ -1071,6 +1134,12 @@ void CParticle::update (ParticleCore::TickClock clock) {
 
     ParticleCore::dispatchTick (clock, [this] (float dt) {
 	std::vector<ParticleInstance> expiredParticles;
+	if (m_slotStreams) {
+	    m_slotStreams->ageAndExpire (dt, [] (const ParticleInstance&, uint32_t) {});
+	    refreshNativeLiveView ();
+	    emitNewParticles (dt);
+	    return;
+	}
 	// Native tick ages and expires existing particles before running emitters.
 	for (uint32_t i = 0; i < m_particleCount; i++) {
 	    m_particles[i].age += dt;
@@ -1116,8 +1185,10 @@ void CParticle::update (ParticleCore::TickClock clock) {
 
 	emitNewParticles (dt);
     }, [this] {
-	for (uint32_t i = 0; i < m_particleCount; ++i) {
-	    auto& p = m_particles[i];
+	auto& streams = m_slotStreams ? m_slotStreams->streams () : m_particles;
+	const uint32_t restoreCount = m_slotStreams ? m_slotStreams->highWater () : m_particleCount;
+	for (uint32_t i = 0; i < restoreCount; ++i) {
+	    auto& p = streams[i];
 	    ParticleCore::restoreOperatorStreams (
 		p.alpha, p.size, p.initial.alpha, p.initial.size, m_resetAlphaEachPass);
 	    if (m_resetColorEachPass) p.color = p.initial.color;
@@ -1132,8 +1203,11 @@ void CParticle::update (ParticleCore::TickClock clock) {
 	              " secondbirth=", m_particles[1].birthId,
 	              " secondslot=", m_particles[1].poolSlot);
 	for (auto& op : m_operators) {
-	    op (m_particles, m_particleCount, m_controlPoints, static_cast<float> (m_time), movementTime);
+	    auto& streams = m_slotStreams ? m_slotStreams->streams () : m_particles;
+	    const uint32_t domain = m_slotStreams ? m_slotStreams->paddedHighWater () : m_particleCount;
+	    op (streams, domain, m_controlPoints, static_cast<float> (m_time), movementTime);
 	}
+        if (m_slotStreams) refreshNativeLiveView ();
     });
 
     if (m_hasRopeTrailHistory) {
@@ -1566,7 +1640,7 @@ EmitterFunc CParticle::createBoxEmitter (const ParticleEmitter& emitter, size_t 
 		activeSchedule.rate = ParticleCore::effectiveRate (
 		    activeSchedule.rate, sampleParticleAudio (*this, audioSettings (emitter)));
 	    }
-	    const uint32_t capacity = static_cast<uint32_t> (particles.size () - count);
+	    const uint32_t capacity = emissionCapacity (particles, count);
 	    bool periodRestarted = false;
 	    const uint32_t toEmit = m_forcedEmitCount != 0
 	        ? ParticleCore::advanceEmitterForced (activeSchedule, state, m_forcedEmitCount,
@@ -1581,7 +1655,7 @@ EmitterFunc CParticle::createBoxEmitter (const ParticleEmitter& emitter, size_t 
 
 	    // Emit particles
 	    for (uint32_t i = 0; i < toEmit && count < particles.size (); i++) {
-		auto& p = particles[count];
+		auto& p = emittedParticleTarget (particles, count);
 
 		glm::vec3 spawnOrigin = transformedEmitterOrigin;
 		if (controlPointIndex >= 0 && controlPointIndex < static_cast<int> (m_controlPoints.size ())) {
@@ -1626,12 +1700,14 @@ EmitterFunc CParticle::createBoxEmitter (const ParticleEmitter& emitter, size_t 
 
 		p.color = instanceBirthRgbGain ();
 		p.alpha = alphaOverrideValue ()->getFloat ();
-		p.size = 20.0f * ((m_particle.flags & 0x80u) != 0
+		p.size = m_slotStreams ? 0.5f : 20.0f * ((m_particle.flags & 0x80u) != 0
 		    ? 1.0f : sizeOverrideValue ()->getFloat ());
-		p.lifetime = lifetimeOverrideValue ()->getFloat ();
+		p.lifetime = m_slotStreams ? 1.0f : lifetimeOverrideValue ()->getFloat ();
 		p.age = 0.0f;
 		p.oscillatorRandom = WallpaperEngine::Maths::randomFloat (m_rng, 0.0f, 1.0f);
 		p.alive = true;
+	    p.previousPosition = p.position;
+	    p.sequenceFraction = m_particle.animationMode == "randomframe" ? p.oscillatorRandom : 0.0f;
 		p.frame = -1.0f;
 
 		p.initial.color = p.color;
@@ -1650,7 +1726,7 @@ EmitterFunc CParticle::createBoxEmitter (const ParticleEmitter& emitter, size_t 
 		    init (p);
 		}
 
-		count++;
+		finishEmittedParticle (p, count);
 	    }
 	};
 }
@@ -1690,7 +1766,7 @@ EmitterFunc CParticle::createSphereEmitter (const ParticleEmitter& emitter, size
 	    activeSchedule.rate = ParticleCore::effectiveRate (
 		activeSchedule.rate, sampleParticleAudio (*this, audioSettings (emitter)));
 	}
-	const uint32_t capacity = static_cast<uint32_t> (particles.size () - count);
+	const uint32_t capacity = emissionCapacity (particles, count);
 	bool periodRestarted = false;
 	const uint32_t toEmit = m_forcedEmitCount != 0
 	    ? ParticleCore::advanceEmitterForced (activeSchedule, state, m_forcedEmitCount,
@@ -1704,7 +1780,7 @@ EmitterFunc CParticle::createSphereEmitter (const ParticleEmitter& emitter, size
 	m_emitterCanProduce[index] = ParticleCore::emitterCanProduceMore (schedule, state);
 
 	for (uint32_t i = 0; i < toEmit && count < particles.size (); i++) {
-	    auto& p = particles[count];
+	    auto& p = emittedParticleTarget (particles, count);
 
 	    // Determine spawn origin (control point or emitter origin)
 	    glm::vec3 spawnOrigin = transformedEmitterOrigin;
@@ -1761,12 +1837,14 @@ EmitterFunc CParticle::createSphereEmitter (const ParticleEmitter& emitter, size
 
 	    p.color = instanceBirthRgbGain ();
 	    p.alpha = alphaOverrideValue ()->getFloat ();
-	    p.size = 20.0f * ((m_particle.flags & 0x80u) != 0
+	    p.size = m_slotStreams ? 0.5f : 20.0f * ((m_particle.flags & 0x80u) != 0
 	        ? 1.0f : sizeOverrideValue ()->getFloat ());
-	    p.lifetime = lifetime;
+	    p.lifetime = m_slotStreams ? 1.0f : lifetime;
 	    p.age = 0.0f;
 	    p.oscillatorRandom = WallpaperEngine::Maths::randomFloat (m_rng, 0.0f, 1.0f);
 	    p.alive = true;
+		p.previousPosition = p.position;
+		p.sequenceFraction = m_particle.animationMode == "randomframe" ? p.oscillatorRandom : 0.0f;
 	    p.frame = -1.0f;
 
 	    p.initial.color = p.color;
@@ -1782,7 +1860,7 @@ EmitterFunc CParticle::createSphereEmitter (const ParticleEmitter& emitter, size
 		init (p);
 	    }
 
-	    count++;
+	    finishEmittedParticle (p, count);
 	}
     };
 }
@@ -1833,7 +1911,7 @@ EmitterFunc CParticle::createImageEmitter (const ParticleEmitter& emitter, size_
             activeSchedule.rate = ParticleCore::effectiveRate (
                 activeSchedule.rate, sampleParticleAudio (*this, audioSettings (emitter)));
         }
-        const uint32_t capacity = static_cast<uint32_t> (particles.size () - count);
+        const uint32_t capacity = emissionCapacity (particles, count);
         bool periodRestarted = false;
         const uint32_t toEmit = m_forcedEmitCount != 0
             ? ParticleCore::advanceEmitterForced (activeSchedule, state, m_forcedEmitCount,
@@ -1937,7 +2015,7 @@ EmitterFunc CParticle::createImageEmitter (const ParticleEmitter& emitter, size_
             sourceSize.y / static_cast<float> (height));
 
         for (uint32_t emitted = 0; emitted < toEmit && count < particles.size (); ++emitted) {
-            auto& particle = particles[count];
+            auto& particle = emittedParticleTarget (particles, count);
             const uint32_t chosen = ParticleCore::nativeImageSampleIndex (
                 m_rng, static_cast<uint32_t> (cache->samples.size ()));
             const auto& sample = cache->samples[chosen];
@@ -1989,7 +2067,7 @@ EmitterFunc CParticle::createImageEmitter (const ParticleEmitter& emitter, size_
             m_birthInitializerBasis = (m_particle.flags & 1u) != 0
                 ? glm::mat3 (m_simulationModelMatrix) : glm::mat3 (1.0f);
             for (auto& initializer : m_initializers) initializer (particle);
-            ++count;
+            finishEmittedParticle (particle, count);
         }
     };
 }
@@ -2253,8 +2331,9 @@ InitializerFunc CParticle::createSizeRandomInitializer (const SizeRandomInitiali
 
 	// Apply exponent for non-linear distribution
 	float adjustedT = std::pow (t, exponent);
-	p.size = (min + adjustedT * (max - min))
-	    * ((m_particle.flags & 0x80u) != 0 ? 1.0f : sizeOverride->getFloat ()) / 2.0f;
+	const float sample = (min + adjustedT * (max - min))
+	    * ((m_particle.flags & 0x80u) != 0 ? 1.0f : sizeOverride->getFloat ());
+	p.size = m_slotStreams ? p.initial.size * sample : sample / 2.0f;
 	p.initial.size = p.size;
     };
 }
@@ -2269,7 +2348,7 @@ InitializerFunc CParticle::createAlphaRandomInitializer (const AlphaRandomInitia
 	const float min = minValue->getFloat ();
 	const float max = maxValue->getFloat ();
 	const float exponent = exponentValue->getFloat ();
-	const float instanceAlpha = alphaOverride->getFloat ();
+	const float instanceAlpha = m_slotStreams ? p.initial.alpha : alphaOverride->getFloat ();
 	// Keep the established linear draw bit-for-bit when the authored exponent
 	// is omitted. A shaped draw consumes the same single MT word.
 	p.alpha = exponent == 1.0f
@@ -2289,6 +2368,7 @@ InitializerFunc CParticle::createLifetimeRandomInitializer (const LifetimeRandom
     return [this, minValue, maxValue, lifetimeOverride] (ParticleInstance& p) {
 	p.lifetime = WallpaperEngine::Maths::randomFloat (m_rng, minValue->getFloat (), maxValue->getFloat ())
 	    * lifetimeOverride->getFloat ();
+	if (m_slotStreams && p.lifetime <= 0.001f) p.lifetime = 0.001f;
 	p.initial.lifetime = p.lifetime;
     };
 }
@@ -2621,7 +2701,7 @@ OperatorFunc CParticle::createMovementOperator (const MovementOperator& op) {
     DynamicValue* gravityValue = op.gravity->value.get ();
     DynamicValue* speedOverride = speedOverrideValue ();
 
-    return [dragValue, gravityValue, speedOverride] (
+    return [dragValue, gravityValue, speedOverride, nativeSlots = m_slotStreams.has_value ()] (
 	       std::vector<ParticleInstance>& particles, uint32_t count, const std::vector<ControlPointData>&, float,
 	       ParticleCore::MovementTime time
 	   ) {
@@ -2634,7 +2714,7 @@ OperatorFunc CParticle::createMovementOperator (const MovementOperator& op) {
 
 	for (uint32_t i = 0; i < count; i++) {
 	    auto& p = particles[i];
-	    if (!p.alive) {
+	    if (!nativeSlots && !p.alive) {
 		continue;
 	    }
 
@@ -2678,17 +2758,21 @@ OperatorFunc CParticle::createCapVelocityOperator (const CapVelocityOperator& op
     const bool useSceneDefault = op.useSceneDefault;
     const auto* blend = op.blendEnvelope ? &*op.blendEnvelope : nullptr;
 
-    return [maxSpeedValue, sceneDefault, useSceneDefault, blend] (
+    return [maxSpeedValue, sceneDefault, useSceneDefault, blend, nativeSlots = m_slotStreams.has_value ()] (
 	std::vector<ParticleInstance>& particles, uint32_t count,
 	const std::vector<ControlPointData>&, float, ParticleCore::MovementTime) {
 	const float maxSpeed = useSceneDefault ? sceneDefault : maxSpeedValue->getFloat ();
 	const auto envelope = operatorEnvelope (blend);
 	for (uint32_t i = 0; i < count; ++i) {
 	    auto& p = particles[i];
-	    if (!p.alive) continue;
-	    const float factor = ParticleCore::capVelocityFactor (
-		p.velocity.x, p.velocity.y, p.velocity.z, maxSpeed,
-		p.getLifetimePos (), envelope);
+	    if (!nativeSlots && !p.alive) continue;
+	    float factor;
+            if (nativeSlots) {
+                factor = ParticleCore::nativeRuntimeCapVelocityFactor (
+                    p.velocity.x, p.velocity.y, p.velocity.z, maxSpeed,
+                    ParticleCore::nativeRuntimeLifetimeFraction (p.age, p.lifetime), envelope);
+            } else factor = ParticleCore::capVelocityFactor (
+		p.velocity.x, p.velocity.y, p.velocity.z, maxSpeed, p.getLifetimePos (), envelope);
 	    p.velocity *= factor;
 	}
     };
@@ -2711,7 +2795,7 @@ OperatorFunc CParticle::createScalarRemapValueOperator (const ScalarRemapValueOp
             return initializer && initializer->template is<AngularVelocityRandomInitializer> ();
         });
     return createScalarRemapOperator (
-        op, birth, hasRotationRandom, hasAngularMovement, hasAngularVelocityRandom);
+        op, birth, hasRotationRandom, hasAngularMovement, hasAngularVelocityRandom, m_slotStreams.has_value ());
 }
 
 OperatorFunc CParticle::createVectorRemapValueOperator (const VectorRemapValueOperator& op, bool birth) {
@@ -2725,7 +2809,7 @@ OperatorFunc CParticle::createVectorRemapValueOperator (const VectorRemapValueOp
         m_particle.initializers.begin (), m_particle.initializers.end (),
         [] (const auto& init) { return init && init->template is<AngularVelocityRandomInitializer> (); });
     return createVectorRemapOperator (
-        op, birth, hasRotationRandom, hasAngularMovement, hasAngularVelocityRandom);
+        op, birth, hasRotationRandom, hasAngularMovement, hasAngularVelocityRandom, m_slotStreams.has_value ());
 }
 
 OperatorFunc CParticle::createAlphaFadeOperator (const AlphaFadeOperator& op) {
@@ -3710,7 +3794,7 @@ void CParticle::renderSprites (uint32_t rendererIndex) {
 	// and frac(lifetime * numFrames) for the blend factor between frames.
 	// For timed animation, encode the CPU-computed frame. Native random-frame
 	// mode passes the birth random stream directly instead.
-	float lifetime = p.getLifetimePos ();
+	float lifetime = m_slotStreams ? p.sequenceFraction : p.getLifetimePos ();
 
 	if (m_spritesheetFrames > 0 && m_particle.animationMode == "randomframe") {
 	    lifetime = ParticleCore::randomFrameLifetime (p.oscillatorRandom);

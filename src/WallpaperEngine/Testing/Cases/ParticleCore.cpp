@@ -1,6 +1,8 @@
 #include "WallpaperEngine/Render/Objects/ParticleCore.h"
 #include "WallpaperEngine/Render/Objects/CParticle.h"
 #include "WallpaperEngine/Render/Objects/ParticleRemapOperators.h"
+#include "WallpaperEngine/Render/Objects/ParticleSlotStreams.h"
+#include "WallpaperEngine/Render/Objects/ParticleNativeSlotScope.h"
 #include "WallpaperEngine/Render/Shaders/ParticleRopeShader.h"
 #include "WallpaperEngine/Render/Utils/NoiseUtils.h"
 #include "WallpaperEngine/Render/Utils/NativeParticleGradientNoise.h"
@@ -9,6 +11,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/catch_approx.hpp>
+#include <catch2/matchers/catch_matchers.hpp>
 
 #include "WallpaperEngine/Data/Parsers/ObjectParser.h"
 #include "WallpaperEngine/Data/Model/Project.h"
@@ -27,6 +30,418 @@
 #include <glm/gtc/matrix_transform.hpp>
 
 using namespace WallpaperEngine::Render::Objects::ParticleCore;
+
+TEST_CASE ("Native physical streams retain holes and padded tail across restore and stop",
+           "[particle][sparse][slots]") {
+    using WallpaperEngine::Render::Objects::ParticleInstance;
+    ParticleInstance zero;
+    zero.color = zero.initial.color = glm::vec3 (0.0f);
+    zero.alpha = zero.initial.alpha = zero.size = zero.initial.size = 0.0f;
+    zero.lifetime = zero.initial.lifetime = 0.0f;
+    NativeSlotStreams<ParticleInstance> slots (6, zero);
+    REQUIRE (slots.streams ().size () == 8);
+    REQUIRE (slots.capacity () == 6);
+    slots.beginEmissionPass ();
+    for (uint32_t index = 0; index < 6; ++index) {
+        REQUIRE (slots.birth ([index] (ParticleInstance& p, uint32_t physical) {
+            REQUIRE (physical == index);
+            p.lifetime = index == 4 ? 0.25f : 4.0f;
+            p.alive = true;
+            p.position.x = 100.0f + static_cast<float> (physical);
+            p.velocity.x = 8.0f;
+            p.size = 5.0f;
+            p.initial.size = 2.0f;
+        }) == index);
+    }
+    REQUIRE (slots.nativeCount () == 6);
+    std::vector<uint32_t> expired;
+    slots.ageAndExpire (0.25f, [&] (const auto&, uint32_t index) { expired.push_back (index); });
+    REQUIRE (expired.empty ()); // Native expires only strict age > lifetime.
+    slots.ageAndExpire (0.125f, [&] (const auto&, uint32_t index) { expired.push_back (index); });
+    REQUIRE (expired == std::vector<uint32_t> {4});
+    REQUIRE (slots.highWater () == 6);
+    REQUIRE (slots.nativeCount () == 5);
+    REQUIRE (slots.streams ()[4].position.x == 104.0f);
+    REQUIRE (slots.streams ()[7].age == 0.375f);
+    // Unmasked operators execute dead and padded lanes; a later writer reads
+    // physical lane four, while the dense view's fifth record is slot five.
+    for (uint32_t index = 0; index < slots.paddedHighWater (); ++index) {
+        auto& p = slots.streams ()[index];
+        p.position += p.velocity * 0.5f;
+        p.size += 3.0f;
+    }
+    slots.restore ([] (ParticleInstance& p) { p.size = p.initial.size; });
+    REQUIRE (slots.streams ()[4].position.x == 108.0f);
+    REQUIRE (slots.streams ()[4].size == 2.0f);
+    REQUIRE (slots.streams ()[7].size == 3.0f);
+    std::vector<uint32_t> drawn;
+    slots.visitDrawSlots ([&] (const auto&, uint32_t index) { drawn.push_back (index); });
+    REQUIRE (drawn == std::vector<uint32_t> {0, 1, 2, 3, 5});
+    slots.beginEmissionPass ();
+    REQUIRE (slots.birth ([] (ParticleInstance& p, uint32_t index) {
+        REQUIRE (index == 4);
+        REQUIRE (p.position.x == 108.0f); // Reuse occurs before birth overwrite.
+        p.position.x = 204.0f;
+        p.lifetime = 2.0f;
+        p.age = 0.0f;
+        p.alive = true;
+    }) == 4);
+    REQUIRE (slots.highWater () == 6);
+    REQUIRE (slots.nativeCount () == 6);
+    REQUIRE_FALSE (slots.birth ([] (auto&, uint32_t) {}));
+    slots.stop ();
+    REQUIRE (slots.highWater () == 0);
+    REQUIRE (slots.nativeCount () == 0);
+    REQUIRE (slots.streams ()[4].position.x == 204.0f);
+    REQUIRE (slots.streams ()[7].size == 3.0f);
+    REQUIRE (slots.streams ()[7].age == 0.375f);
+    for (const auto& p : slots.streams ()) REQUIRE (p.lifetime == 0.0f);
+    REQUIRE (slots.birth ([] (ParticleInstance& p, uint32_t index) {
+        REQUIRE (index == 0);
+        REQUIRE (p.position.x == 104.0f);
+        p.lifetime = 1.0f;
+    }) == 0);
+}
+
+TEST_CASE ("Native birth cursor and count are independent of zero and nonfinite markers",
+           "[particle][sparse][slots]") {
+    using WallpaperEngine::Render::Objects::ParticleInstance;
+    ParticleInstance zero;
+    zero.lifetime = 0.0f;
+    NativeSlotStreams<ParticleInstance> slots (8, zero);
+    slots.beginEmissionPass ();
+    for (uint32_t index = 0; index < 3; ++index) {
+        REQUIRE (slots.birth ([&] (ParticleInstance& p, uint32_t physical) {
+            REQUIRE (physical == index);
+            REQUIRE (slots.nativeCount () == index);
+            REQUIRE (slots.highWater () == index);
+            p.lifetime = index == 0 ? 0.0f : index == 1 ? -1.0f
+                : std::numeric_limits<float>::quiet_NaN ();
+        }) == index);
+    }
+    REQUIRE (slots.nativeCount () == 3);
+    REQUIRE (slots.highWater () == 3);
+    std::vector<uint32_t> drawn;
+    slots.visitDrawSlots ([&] (const auto&, uint32_t index) { drawn.push_back (index); });
+    REQUIRE (drawn == std::vector<uint32_t> {1, 2});
+    std::vector<uint32_t> expired;
+    slots.ageAndExpire (0.125f, [&] (const auto&, uint32_t index) { expired.push_back (index); });
+    REQUIRE (expired == std::vector<uint32_t> {1});
+    REQUIRE (slots.nativeCount () == 2); // The invisible zero birth still counts.
+    REQUIRE (std::isnan (slots.streams ()[2].lifetime));
+    REQUIRE (slots.streams ()[3].age == 0.125f);
+    slots.beginEmissionPass ();
+    REQUIRE (slots.birth ([] (ParticleInstance& p, uint32_t index) {
+        REQUIRE (index == 0);
+        REQUIRE (p.age == 0.125f);
+        p.lifetime = 0.0f;
+        p.age = 0.0f;
+    }) == 0);
+    // The cursor is shared by subsequent emitter records in this pass.
+    REQUIRE (slots.birth ([] (ParticleInstance& p, uint32_t index) {
+        REQUIRE (index == 1);
+        p.lifetime = 1.0f;
+    }) == 1);
+    REQUIRE (slots.birth ([] (ParticleInstance& p, uint32_t index) {
+        REQUIRE (index == 3); // NaN marker at two is occupied.
+        p.lifetime = 1.0f;
+    }) == 3);
+    REQUIRE (slots.nativeCount () == 5);
+    REQUIRE (slots.highWater () == 4);
+}
+
+TEST_CASE ("Parsed sparse control-point output uses the production capability boundary",
+           "[particle][sparse][parser]") {
+    using namespace WallpaperEngine::Data::Model;
+    using WallpaperEngine::Data::Parsers::ObjectParser;
+    using WallpaperEngine::Data::JSON::JSON;
+    Project project {};
+    const auto authored = JSON::parse (R"({"id":1,"parent":70,"particle":{
+        "maxcount":8,"emitter":[{"name":"sphererandom","rate":0},{"name":"boxrandom","rate":0}],
+        "initializer":[{"name":"lifetimerandom","min":-2,"max":0},
+            {"name":"sizerandom","min":4,"max":4},
+            {"name":"mapsequencebetweencontrolpoints","count":6},
+            {"name":"remapinitialvalue","input":"position","inputcomponent":"x",
+             "output":"maxlifetime","operation":"remap","flags":1,
+             "inputrangemin":36,"inputrangemax":60,"outputrangemin":1,"outputrangemax":20}],
+        "operator":[{"name":"movement"},{"name":"capvelocity","maxspeed":10},
+            {"name":"remapvalue","input":"position","output":"controlpoint","outputcontrolpoint0":2,
+             "operation":"remap","flags":0},
+            {"name":"remapvalue","input":"controlpoint","inputcontrolpoint0":2,"output":"color",
+             "operation":"remap","flags":0}],"renderer":[{"name":"sprite"}]}})");
+    const auto check = [&] (const JSON& data) {
+        return ObjectParser::parse (data, project);
+    };
+    const auto valid = check (authored);
+    const auto& model = *valid->as<Particle> ();
+    REQUIRE (needsNativeSlotStreams (model));
+    REQUIRE (model.emitters[0].name == "sphererandom");
+    REQUIRE (model.emitters[1].name == "boxrandom");
+    REQUIRE_FALSE (nativeSlotScopeError (model)); // Scene transform parent is valid.
+    REQUIRE (nativeSlotScopeError (model, true));
+    REQUIRE (nativeSlotScopeError (model, false, true));
+    const auto owned = std::find_if (model.controlPoints.begin (), model.controlPoints.end (),
+        [] (const auto& cp) { return cp.id == 2; });
+    REQUIRE (owned != model.controlPoints.end ());
+    REQUIRE ((owned->flags & 0x10000u) != 0);
+
+    for (const char* transform : {"sine", "square", "saw", "triangle", "simplexnoise", "fbmnoise"}) {
+        auto data = authored;
+        data["particle"]["operator"][2]["transformfunction"] = transform;
+        const auto parsed = check (data);
+        REQUIRE (nativeSlotScopeError (*parsed->as<Particle> ()));
+    }
+    for (const char* renderer : {"spritetrail", "rope", "ropetrail", "unknown"}) {
+        auto data = authored;
+        data["particle"]["renderer"][0]["name"] = renderer;
+        const auto parsed = check (data);
+        REQUIRE (nativeSlotScopeError (*parsed->as<Particle> ()));
+    }
+    for (const char* name : {"turbulence", "angularmovement", "alphafade", "boids"}) {
+        auto data = authored;
+        data["particle"]["operator"].push_back ({{"name", name}});
+        const auto parsed = check (data);
+        REQUIRE (nativeSlotScopeError (*parsed->as<Particle> ()));
+    }
+    auto event = authored;
+    event["particle"]["initializer"].push_back ({{"name", "inheritinitialvaluefromevent"}});
+    const auto parsedEvent = check (event);
+    REQUIRE (nativeSlotScopeError (*parsedEvent->as<Particle> ()));
+    auto unproven = authored;
+    unproven["particle"]["initializer"][3]["outputrangemin"] = 0;
+    const auto parsedUnproven = check (unproven);
+    REQUIRE (nativeSlotScopeError (*parsedUnproven->as<Particle> ()));
+    auto& positive = *valid->as<Particle> ()->initializers[3]->as<RemapInitialValueInitializer> ()
+        ->remap->as<ScalarRemapValueOperator> ();
+    positive.outputMin = std::numeric_limits<float>::quiet_NaN ();
+    REQUIRE (nativeSlotScopeError (model));
+}
+
+TEST_CASE ("Canonical ordinary birth remaps diagnose nonfinite state without changing birth division",
+           "[particle][sparse][birth]") {
+    using namespace WallpaperEngine::Render::Objects;
+    using namespace WallpaperEngine::Data::Model;
+    using WallpaperEngine::Data::Parsers::ObjectParser;
+    using WallpaperEngine::Data::JSON::JSON;
+    Project project {};
+    const auto parsed = ObjectParser::parse (JSON::parse (R"({"id":1,"particle":{
+        "initializer":[{"name":"remapinitialvalue","input":"position","inputcomponent":"x",
+            "output":"maxlifetime","operation":"remap","flags":1,
+            "inputrangemin":0,"inputrangemax":10,"outputrangemin":1,"outputrangemax":20}],
+        "operator":[{"name":"remapvalue","input":"position","output":"controlpoint",
+            "outputcontrolpoint0":2,"operation":"remap","flags":0}]}})"), project);
+    const auto& model = *parsed->as<Particle> ();
+    const auto& birth = *model.initializers[0]->as<RemapInitialValueInitializer> ()
+        ->remap->as<ScalarRemapValueOperator> ();
+    const auto canonical = createScalarRemapOperator (birth, true, false, false, false, true);
+    const auto compact = createScalarRemapOperator (birth, true, false, false, false);
+    std::vector<ParticleInstance> particles (1);
+    std::vector<ControlPointData> cps (3);
+    particles[0].alive = true;
+    particles[0].position.x = 7.0f;
+    particles[0].lifetime = 1.0f;
+    canonical (particles, 1, cps, 0.0f, {0.0f, 0.0f});
+    const float birthDivide = 7.0f / 10.0f;
+    REQUIRE (particles[0].lifetime == 1.0f + birthDivide * 19.0f);
+    if (nativeRuntimeArithmeticAvailable)
+        REQUIRE (particles[0].lifetime != 1.0f + (7.0f * nativeRuntimeReciprocal (10.0f)) * 19.0f);
+
+    particles[0].lifetime = 1.0f;
+    particles[0].position.x = std::numeric_limits<float>::quiet_NaN ();
+    REQUIRE_THROWS_WITH (canonical (particles, 1, cps, 0.0f, {0.0f, 0.0f}),
+        "Runtime control-point output nonfinite ordinary birth remap is unsupported");
+    REQUIRE (particles[0].lifetime == 1.0f);
+    REQUIRE_NOTHROW (compact (particles, 1, cps, 0.0f, {0.0f, 0.0f}));
+    REQUIRE (particles[0].lifetime == 1.0f); // Accepted compact finite wrapper remains unchanged.
+
+    const float huge = std::numeric_limits<float>::max ();
+    ScalarRemapRange overflowing {-huge, huge, 1.0f, 20.0f, 1};
+    REQUIRE_THROWS_AS (remapScalarValue (1.0f, huge, 0.0f, RemapOperation::Set,
+        std::nullopt, overflowing, false, false, false, true), std::invalid_argument);
+    ScalarRemapRange overflowingSquare {0.0f, 1.0f, 1.0f, 20.0f, 0,
+        RemapTransform::Square, huge};
+    REQUIRE_THROWS_AS (remapScalarValue (1.0f, 2.0f, 0.0f, RemapOperation::Set,
+        std::nullopt, overflowingSquare, false, false, false, true), std::invalid_argument);
+    const float nan = std::numeric_limits<float>::quiet_NaN ();
+    REQUIRE (std::isnan (remapScalarValue (1.0f, nan, 0.0f, RemapOperation::Set,
+        std::nullopt, {}, true, false, false, true))); // Existing exact birth CP path retains NaN.
+    REQUIRE (std::isnan (remapScalarValue (1.0f, nan, 0.0f, RemapOperation::Set,
+        std::nullopt, {}, false, true, false, true))); // Existing exact noise route remains unchecked.
+
+    auto& vectorBirth = *model.operators[0]->as<VectorRemapValueOperator> ();
+    vectorBirth.inputComponent = VectorRemapValueOperator::InputComponent::Min;
+    const auto vectorCanonical = createVectorRemapOperator (vectorBirth, true, false, false, false, true);
+    particles[0].position = glm::vec3 (1.0f, nan, 3.0f);
+    REQUIRE_THROWS_AS (vectorCanonical (particles, 1, cps, 0.0f, {0.0f, 0.0f}), std::invalid_argument);
+    // A nonfinite denominator must be diagnosed before the compact geometry
+    // helper turns it into zero and silently admits the birth.
+    auto& betweenBirth = *model.initializers[0]->as<RemapInitialValueInitializer> ()
+        ->remap->as<ScalarRemapValueOperator> ();
+    betweenBirth.input = ScalarRemapValueOperator::Input::PositionBetweenTwoControlPoints;
+    betweenBirth.inputControlPoint0 = 0;
+    betweenBirth.inputControlPoint1 = 1;
+    const auto betweenCanonical = createScalarRemapOperator (betweenBirth, true, false, false, false, true);
+    particles[0].position = glm::vec3 (1.0f);
+    cps[1].position = glm::vec3 (huge);
+    REQUIRE_THROWS_AS (betweenCanonical (particles, 1, cps, 0.0f, {0.0f, 0.0f}), std::invalid_argument);
+}
+
+TEST_CASE ("Runtime control-point writers read physical lane zero and ordered feedback",
+           "[particle][sparse][remap]") {
+    if (!nativeRuntimeArithmeticAvailable) return;
+    using namespace WallpaperEngine::Render::Objects;
+    using namespace WallpaperEngine::Data::Model;
+    using WallpaperEngine::Data::Parsers::ObjectParser;
+    using WallpaperEngine::Data::JSON::JSON;
+    Project project {};
+    const auto parsed = ObjectParser::parse (JSON::parse (R"({"id":1,"particle":{"operator":[
+        {"name":"remapvalue","input":"position","output":"controlpoint","outputcontrolpoint0":2,
+         "operation":"remap","flags":0},
+        {"name":"remapvalue","input":"controlpoint","inputcontrolpoint0":2,"output":"size",
+         "operation":"remap","flags":0},
+        {"name":"remapvalue","input":"controlpoint","inputcontrolpoint0":2,"output":"controlpoint",
+         "outputcontrolpoint0":2,"operation":"add","flags":0}]}})"), project);
+    const auto& model = *parsed->as<Particle> ();
+    const auto writer = createVectorRemapOperator (*model.operators[0]->as<VectorRemapValueOperator> (),
+        false, false, false, false, true);
+    const auto reader = createScalarRemapOperator (*model.operators[1]->as<ScalarRemapValueOperator> (),
+        false, false, false, false, true);
+    const auto feedback = createVectorRemapOperator (*model.operators[2]->as<VectorRemapValueOperator> (),
+        false, false, false, false, true);
+    std::vector<ParticleInstance> particles (8);
+    for (uint32_t index = 0; index < 8; ++index) {
+        auto& p = particles[index];
+        p.position = glm::vec3 (10.0f * index, 0.0f, 0.0f);
+        p.alive = index < 6 && index != 4;
+        p.lifetime = p.alive ? 20.0f : 0.0f;
+        p.age = 3.0f;
+    }
+    std::vector<ControlPointData> cps (8);
+    cps[2].basis = glm::mat3 (2.0f);
+    cps[2].offset = glm::vec3 (7.0f);
+    cps[2].previousPosition = glm::vec3 (9.0f);
+    writer (particles, 8, cps, 0.0f, {0.0f, 0.0f});
+    // Independent native factory RCPPS(1) and physical lane4 source40. A
+    // compact index4 would be the live slot5 source50; a tail lane is70.
+    const float reciprocal = nativeRuntimeReciprocal (1.0f);
+    REQUIRE (cps[2].position.x == 40.0f * reciprocal);
+    REQUIRE (cps[2].basis == glm::mat3 (2.0f));
+    REQUIRE (cps[2].offset == glm::vec3 (7.0f));
+    REQUIRE (cps[2].previousPosition == glm::vec3 (9.0f));
+    reader (particles, 8, cps, 0.0f, {0.0f, 0.0f});
+    REQUIRE (particles[4].size == 40.0f * reciprocal * reciprocal);
+    REQUIRE (particles[7].size == particles[4].size);
+    cps[2].position = glm::vec3 (5.0f, 0.0f, 0.0f);
+    feedback (particles, 8, cps, 0.0f, {0.0f, 0.0f});
+    const float first = 5.0f + 5.0f * reciprocal;
+    REQUIRE (cps[2].position.x == first + first * reciprocal);
+    // A five-slot pool still executes block4 even though three lanes are padding.
+    writer (particles, 5, cps, 0.0f, {0.0f, 0.0f});
+    REQUIRE (cps[2].position.x == 40.0f * reciprocal);
+}
+
+TEST_CASE ("Sparse runtime IEEE fractions clamps reductions and ranges retain native semantics",
+           "[particle][sparse][remap][ieee]") {
+    if (!nativeRuntimeArithmeticAvailable) return;
+    const float nan = std::bit_cast<float> (0x7fc12345u);
+    REQUIRE (std::isinf (nativeRuntimeLifetimeFraction (1.0f, 0.0f)));
+    REQUIRE (std::isnan (nativeRuntimeLifetimeFraction (0.0f, 0.0f)));
+    REQUIRE (nativeRuntimeClamp01 (nan) == 1.0f);
+    REQUIRE (std::signbit (nativeRuntimeClamp01 (-0.0f)));
+    REQUIRE (reduceNativeRuntimeRemapVector (nan, 2.0f, 1.0f, RemapVectorComponent::Max) == 2.0f);
+    REQUIRE (reduceNativeRuntimeRemapVector (2.0f, nan, 1.0f, RemapVectorComponent::Max) == 1.0f);
+    REQUIRE (std::bit_cast<uint32_t> (reduceNativeRuntimeRemapVector (
+        2.0f, 1.0f, nan, RemapVectorComponent::Max)) == 0x7fc12345u);
+    const BlendEnvelope envelope {0.0f, 0.25f, 0.75f, 1.0f};
+    REQUIRE (blendWeight (nativeRuntimeLifetimeFraction (1.0f, 0.0f), envelope, true) == 0.0f);
+    REQUIRE (blendWeight (nativeRuntimeLifetimeFraction (0.0f, 0.0f), envelope, true) == 1.0f);
+    REQUIRE (nativeRuntimePositionBetweenControlPoints ({1, 2, 3}, {}, {}) == 0.0f);
+    REQUIRE (std::isnan (nativeRuntimeCapVelocityFactor (0, 0, 0, 0, 0, std::nullopt)));
+    REQUIRE (nativeRuntimeCapVelocityFactor (0, 0, 0, 1, 0, std::nullopt) == 1.0f);
+    REQUIRE (nativeRuntimeCapVelocityFactor (3, 4, 0, 2,
+        nativeRuntimeLifetimeFraction (1, 0), envelope) == 1.0f);
+    REQUIRE (nativeRuntimeCapVelocityFactor (3, 4, 0, 2, 0, std::nullopt)
+        == Catch::Approx (0.4f).epsilon (0.001f));
+    ScalarRemapRange range {0, 3, 0, 1, 0};
+    REQUIRE (remapScalarValue (0.0f, 1.0f, nan, RemapOperation::Set,
+        std::nullopt, range, false, false, true) == nativeRuntimeReciprocal (3.0f));
+    REQUIRE (remapScalarValue (4.0f, 1.0f, nan, RemapOperation::Set,
+        std::nullopt, range) == 4.0f); // Accepted compact finite guard remains.
+}
+
+TEST_CASE ("Blended runtime control-point output preserves native dead-lane envelope cases",
+           "[particle][sparse][remap][blend]") {
+    if (!nativeRuntimeArithmeticAvailable) return;
+    using namespace WallpaperEngine::Render::Objects;
+    using namespace WallpaperEngine::Data::Model;
+    using WallpaperEngine::Data::Parsers::ObjectParser;
+    using WallpaperEngine::Data::JSON::JSON;
+    Project project {};
+    auto data = JSON::parse (R"({"id":1,"particle":{"operator":[
+        {"name":"remapvalue","input":"lifetimefraction","output":"controlpoint","outputcontrolpoint0":2,
+         "outputcomponent":"x","operation":"remap","flags":1,"outputrangemin":3,"outputrangemax":7,
+         "blendinend":0.25,"blendoutstart":0.75}]}})");
+    std::vector<ParticleInstance> particles (8);
+    particles[0].age = 0.0f;
+    particles[0].lifetime = 1.0f;
+    particles[4].alive = false;
+    particles[4].lifetime = 0.0f;
+    std::vector<ControlPointData> cps (8);
+    for (const char* operation : {"remap", "multiply", "add", "subtract"}) {
+        data["particle"]["operator"][0]["operation"] = operation;
+        const auto parsed = ObjectParser::parse (data, project);
+        const auto& model = *parsed->as<Particle> ()->operators[0]->as<VectorRemapValueOperator> ();
+        const auto writer = createVectorRemapOperator (model, false, false, false, false, true);
+        cps[2].position = glm::vec3 (9.0f, 20.0f, 30.0f);
+        particles[4].age = 1.0f;
+        writer (particles, 8, cps, 0.0f, {0.0f, 0.0f});
+        REQUIRE (cps[2].position == glm::vec3 (9.0f, 20.0f, 30.0f));
+        particles[4].age = 0.0f;
+        writer (particles, 8, cps, 0.0f, {0.0f, 0.0f});
+        const float expected = std::string (operation) == "remap" ? 7.0f
+            : std::string (operation) == "multiply" ? 63.0f
+            : std::string (operation) == "add" ? 16.0f : 2.0f;
+        REQUIRE (cps[2].position == glm::vec3 (expected, 20.0f, 30.0f));
+    }
+    data["particle"]["operator"][0]["operation"] = "remap";
+    data["particle"]["operator"][0]["outputrangemin"] = 7.0f;
+    data["particle"]["operator"][0]["outputrangemax"] = 7.0f;
+    data["particle"]["operator"][0]["blendinstart"] = 0.1f;
+    data["particle"]["operator"][0]["blendinend"] = 0.4f;
+    data["particle"]["operator"][0]["blendoutstart"] = 0.6f;
+    data["particle"]["operator"][0]["blendoutend"] = 0.9f;
+    const auto parsed = ObjectParser::parse (data, project);
+    const auto writer = createVectorRemapOperator (*parsed->as<Particle> ()->operators[0]
+        ->as<VectorRemapValueOperator> (), false, false, false, false, true);
+    particles[0].age = 0.25f;
+    cps[2].position.x = 9.0f;
+    writer (particles, 1, cps, 0.0f, {0.0f, 0.0f});
+#if defined(__SSE__)
+    // Independent instruction oracle pinned to native 1401c2a40/14022a530:
+    // pack both adjusted durations with RCPPS, then OUT*IN and CP lerp. This
+    // avoids fixing an approximation to one processor's reciprocal table.
+    const auto rcp = _mm_rcp_ps (_mm_setr_ps (0.4f - 0.1f, 0.9f - 0.6f, 1.0f, 1.0f));
+    alignas (16) float inverse[4];
+    _mm_store_ps (inverse, rcp);
+    const float fraction = 0.25f * inverse[2];
+    const auto ramps = _mm_mul_ps (_mm_setr_ps (fraction - 0.1f, 0.9f - fraction, 0, 0), rcp);
+    const auto clamped = _mm_max_ps (_mm_setzero_ps (), _mm_min_ps (ramps, _mm_set1_ps (1.0f)));
+    alignas (16) float weights[4];
+    _mm_store_ps (weights, clamped);
+    const float expected = 9.0f + (7.0f - 9.0f) * (weights[1] * weights[0]);
+    REQUIRE (std::bit_cast<uint32_t> (cps[2].position.x) == std::bit_cast<uint32_t> (expected));
+    REQUIRE (cps[2].position.x != 8.0f); // Division-based envelope counterfactual.
+#endif
+    particles[0].lifetime = 0.0f;
+    particles[0].age = 0.0f;
+    cps[2].position.x = 9.0f;
+    writer (particles, 1, cps, 0.0f, {0.0f, 0.0f});
+    REQUIRE (cps[2].position.x == 7.0f);
+    particles[0].age = 1.0f;
+    cps[2].position.x = 9.0f;
+    writer (particles, 1, cps, 0.0f, {0.0f, 0.0f});
+    REQUIRE (cps[2].position.x == 9.0f);
+}
 
 TEST_CASE ("Native control-point attraction uses full-radius falloff and default overshoot cap",
            "[particle][controlpoint][attract]") {

@@ -911,6 +911,8 @@ struct ParticleData {
     glm::vec3 presetColorN { 1.0f };
     bool presetHasColor { false };
     bool presetTintCompiled { true };
+    /** Retain skipped/fallback authored components for exact runtime capability checks. */
+    bool hasUnsupportedComponents { false };
 
     /** Material for rendering */
     ModelUniquePtr material;

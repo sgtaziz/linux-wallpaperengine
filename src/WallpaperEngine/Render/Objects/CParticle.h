@@ -4,6 +4,7 @@
 #include "ParticleCore.h"
 #include "ParticleEventInheritance.h"
 #include "ParticleInstancePatch.h"
+#include "ParticleSlotStreams.h"
 #include "WallpaperEngine/Data/Model/Object.h"
 #include "WallpaperEngine/Render/Objects/Effects/CPass.h"
 #include "WallpaperEngine/Render/Wallpapers/CScene.h"
@@ -35,6 +36,7 @@ struct ParticleInstance {
     glm::vec3 position { 0.0f };
     glm::vec3 velocity { 0.0f };
     glm::vec3 acceleration { 0.0f };
+    glm::vec3 previousPosition { 0.0f };
 
     // Rotation
     glm::vec3 rotation { 0.0f };
@@ -54,6 +56,8 @@ struct ParticleInstance {
 
     // Shared native random stream component consumed by oscillators.
     float oscillatorRandom { 0.0f };
+    // Native stream 0x4d is distinct from the inline operator age/lifetime.
+    float sequenceFraction { 0.0f };
 
     // Initial values for resets/multipliers
     struct {
@@ -209,6 +213,10 @@ protected:
     void drawMaterialPasses ();
     void updateMatrices ();
     void emitNewParticles (float dt);
+    ParticleInstance& emittedParticleTarget (std::vector<ParticleInstance>& particles, uint32_t count);
+    void finishEmittedParticle (ParticleInstance& particle, uint32_t& count);
+    [[nodiscard]] uint32_t emissionCapacity (const std::vector<ParticleInstance>& particles, uint32_t count) const;
+    void refreshNativeLiveView ();
     void resetPeriodicChildren ();
     void resetStaticEmitterTree ();
     void resetSequenceCounters (bool periodicOnly);
@@ -235,6 +243,9 @@ private:
     const Particle& m_particle;
 
     std::vector<ParticleInstance> m_particles;
+    // Engaged only by typed runtime CP-output nodes; the parser guard remains
+    // until the physical execution route has passed its integration gates.
+    std::optional<ParticleCore::NativeSlotStreams<ParticleInstance>> m_slotStreams;
     // Native ordinary-rope draw list (node+0x218): live SoA slots in birth order.
     std::vector<uint32_t> m_ropeBirthSlots;
     uint32_t m_ropeExpiredCount { 0 };
