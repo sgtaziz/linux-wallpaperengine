@@ -2,6 +2,7 @@
 
 #include "PlaybackRecorder.h"
 #include "StereoSpectrum.h"
+#include "CaptureWorker.h"
 #include <pulse/pulseaudio.h>
 #include <chrono>
 #include <string>
@@ -16,6 +17,8 @@ public:
      */
     struct PulseAudioData {
 	StereoSpectrum spectrum;
+	CapturePollState poll;
+	std::stop_token stop;
 	pa_stream* captureStream = nullptr;
 	std::string monitorName;
 	bool refreshRequested = true;
@@ -25,16 +28,20 @@ public:
 	std::chrono::steady_clock::time_point retryAfter {};
     };
 
-    PulseAudioPlaybackRecorder ();
+    explicit PulseAudioPlaybackRecorder (int framesPerSecond);
     ~PulseAudioPlaybackRecorder () override;
 
     void update () override;
 
 private:
-    pa_mainloop* m_mainloop;
-    pa_mainloop_api* m_mainloopApi;
-    pa_context* m_context;
+    void initializeCapture ();
+    void pollCapture ();
+    void destroyCapture ();
+    pa_mainloop* m_mainloop = nullptr;
+    pa_context* m_context = nullptr;
     PulseAudioData m_captureData;
+    CaptureWorker m_worker;
+    uint64_t m_resetGeneration = 0;
 
     StereoSpectrum::Bands m_destination;
     StereoSpectrum::Bands m_published;

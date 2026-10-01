@@ -201,6 +201,13 @@ public:
         m_ready = true;
     }
 
+    // Capture errors and native silent packets clear raw publication directly;
+    // they must not enqueue a synthetic baseline FFT on the next empty poll.
+    void discard () {
+        reset ();
+        m_ready = false;
+    }
+
     [[nodiscard]] bool take (Bands& bands) {
         if (!m_ready) return false;
         m_ready = false;
