@@ -6,10 +6,46 @@
 #include "WallpaperEngine/Data/Parsers/ObjectParser.h"
 #include "WallpaperEngine/Render/Wallpapers/SceneDependencies.h"
 #include "WallpaperEngine/Render/Wallpapers/SceneTransform.h"
+#include "WallpaperEngine/Render/Wallpapers/LegacyLightUniforms.h"
 #include "WallpaperEngine/Render/Objects/ModelNormalMatrix.h"
 
 #include <cmath>
+#include <bit>
+#include <cstdint>
 #include <string>
+
+TEST_CASE ("Legacy PBR uploads radius-squared colors and preserves the fourth packed light",
+           "[scene][lighting][legacy]") {
+    using WallpaperEngine::Render::Wallpapers::legacyLightPremultipliedColors;
+    // Values represent already intensity-scaled RGB, as the native scene
+    // producer stores them. Distinct components expose fourth-light packing.
+    std::array<glm::vec4, 4> lights {
+        glm::vec4 (1, 2, 3, 2), glm::vec4 (2, 3, 4, 3),
+        glm::vec4 (3, 4, 5, 4), glm::vec4 (5, 7, 11, 5),
+    };
+    const auto packed = legacyLightPremultipliedColors (lights);
+    REQUIRE (packed[0] == glm::vec4 (4, 8, 12, 125));
+    REQUIRE (packed[1] == glm::vec4 (18, 27, 36, 175));
+    REQUIRE (packed[2] == glm::vec4 (48, 64, 80, 275));
+    // Hidden/unoccupied slots retain zero RGB and cannot contribute through W.
+    lights[1] = glm::vec4 (0, 0, 0, 1);
+    lights[3] = glm::vec4 (0, 0, 0, 1);
+    const auto hidden = legacyLightPremultipliedColors (lights);
+    REQUIRE (hidden[1] == glm::vec4 (0));
+    REQUIRE (hidden[0] == glm::vec4 (4, 8, 12, 0));
+    REQUIRE (hidden[2] == glm::vec4 (48, 64, 80, 0));
+    // Changing radius affects radiance quadratically without mutating raw slots.
+    lights[0].w = -3;
+    REQUIRE (legacyLightPremultipliedColors (lights)[0] == glm::vec4 (9, 18, 27, 0));
+    REQUIRE (lights[0] == glm::vec4 (1, 2, 3, -3));
+    // Native squares radius before multiplying color. Reassociating these
+    // noninteger floats differs by one ULP (0x3fa95810 versus 0x3fa9580f).
+    lights[0] = glm::vec4 (0.3f, 0, 0, 2.1f);
+    lights[3] = lights[0];
+    const auto rounded = legacyLightPremultipliedColors (lights);
+    REQUIRE (std::bit_cast<std::uint32_t> (rounded[0].x) == 0x3fa9580fu);
+    REQUIRE (std::bit_cast<std::uint32_t> (rounded[0].w) == 0x3fa9580fu);
+}
 
 TEST_CASE ("Static model object retains path and authored skin", "[scene][parser][model]") {
     using WallpaperEngine::Data::JSON::JSON;

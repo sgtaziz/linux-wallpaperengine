@@ -78,6 +78,7 @@ public:
     [[nodiscard]] const glm::vec4* getSpotLightExponents () const;
     [[nodiscard]] const glm::vec3* getLegacyLightPositions () const;
     [[nodiscard]] const glm::vec4* getLegacyLightColors () const;
+    [[nodiscard]] const glm::vec4* getLegacyLightPremultipliedColors () const;
     [[nodiscard]] std::optional<glm::mat4> getPuppetAttachmentTransform (
         int parentId, const std::string& name
     ) const;
@@ -144,6 +145,7 @@ private:
     std::vector<glm::vec4> m_pointLightOrigins = {};
     std::array<glm::vec3, 4> m_legacyLightPositions {};
     std::array<glm::vec4, 4> m_legacyLightColors {};
+    std::array<glm::vec4, 3> m_legacyLightPremultipliedColors {};
     std::shared_ptr<const CFBO> m_activeRenderTarget = nullptr;
     glm::mat4 m_activeRenderProjection {1.0f};
     glm::mat4 m_rootRenderClipTransform {1.0f};

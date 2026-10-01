@@ -1012,6 +1012,7 @@ void CPass::setupUniforms () {
     }
     this->addUniform ("g_LightsPosition", scene.getLegacyLightPositions (), 4);
     this->addUniform ("g_LightsColorRadius", scene.getLegacyLightColors (), 4);
+    this->addUniform ("g_LightsColorPremultiplied", scene.getLegacyLightPremultipliedColors (), 3);
     // Native model materials retain their authored/default scalar bindings.
     // MeshDraw supplies neutral layer values only as a fallback; image and
     // particle layer appearance continues to override these uniforms.
