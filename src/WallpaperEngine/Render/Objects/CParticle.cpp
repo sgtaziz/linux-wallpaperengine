@@ -2695,29 +2695,6 @@ OperatorFunc CParticle::createCapVelocityOperator (const CapVelocityOperator& op
 }
 
 OperatorFunc CParticle::createScalarRemapValueOperator (const ScalarRemapValueOperator& op, bool birth) {
-    const auto input = op.input;
-    const auto output = op.output;
-    const int inputControlPoint = op.inputControlPoint0;
-    const int inputControlPoint1 = op.inputControlPoint1;
-    ParticleCore::RemapVectorComponent vectorComponent = ParticleCore::RemapVectorComponent::X;
-    switch (op.inputComponent) {
-    case ScalarRemapValueOperator::InputComponent::All:
-        vectorComponent = ParticleCore::RemapVectorComponent::All; break;
-    case ScalarRemapValueOperator::InputComponent::X:
-	vectorComponent = ParticleCore::RemapVectorComponent::X; break;
-    case ScalarRemapValueOperator::InputComponent::Y:
-	vectorComponent = ParticleCore::RemapVectorComponent::Y; break;
-    case ScalarRemapValueOperator::InputComponent::Z:
-	vectorComponent = ParticleCore::RemapVectorComponent::Z; break;
-    case ScalarRemapValueOperator::InputComponent::Sum:
-	vectorComponent = ParticleCore::RemapVectorComponent::Sum; break;
-    case ScalarRemapValueOperator::InputComponent::Average:
-	vectorComponent = ParticleCore::RemapVectorComponent::Average; break;
-    case ScalarRemapValueOperator::InputComponent::Max:
-	vectorComponent = ParticleCore::RemapVectorComponent::Max; break;
-    case ScalarRemapValueOperator::InputComponent::Min:
-	vectorComponent = ParticleCore::RemapVectorComponent::Min; break;
-    }
     const bool hasRotationRandom = std::any_of (
 	m_particle.initializers.begin (), m_particle.initializers.end (),
 	[] (const auto& initializer) {
@@ -2733,126 +2710,8 @@ OperatorFunc CParticle::createScalarRemapValueOperator (const ScalarRemapValueOp
         [] (const auto& initializer) {
             return initializer && initializer->template is<AngularVelocityRandomInitializer> ();
         });
-    ParticleCore::RemapOperation operation = ParticleCore::RemapOperation::Multiply;
-    switch (op.operation) {
-    case ScalarRemapValueOperator::Operation::Set:
-	operation = ParticleCore::RemapOperation::Set; break;
-    case ScalarRemapValueOperator::Operation::Multiply:
-	operation = ParticleCore::RemapOperation::Multiply; break;
-    case ScalarRemapValueOperator::Operation::Add:
-	operation = ParticleCore::RemapOperation::Add; break;
-    case ScalarRemapValueOperator::Operation::Subtract:
-	operation = ParticleCore::RemapOperation::Subtract; break;
-    }
-    const ParticleCore::ScalarRemapRange range {
-	op.inputMin, op.inputMax, op.outputMin, op.outputMax, op.flags,
-	op.transform == ScalarRemapValueOperator::Transform::Sine
-	    ? ParticleCore::RemapTransform::Sine
-	    : op.transform == ScalarRemapValueOperator::Transform::Square
-	        ? ParticleCore::RemapTransform::Square
-	    : op.transform == ScalarRemapValueOperator::Transform::Saw
-	        ? ParticleCore::RemapTransform::Saw
-	    : op.transform == ScalarRemapValueOperator::Transform::Triangle
-	        ? ParticleCore::RemapTransform::Triangle
-	    : op.transform == ScalarRemapValueOperator::Transform::SimplexNoise
-	        ? ParticleCore::RemapTransform::SimplexNoise
-	    : op.transform == ScalarRemapValueOperator::Transform::FBMNoise
-	        ? ParticleCore::RemapTransform::FBMNoise : ParticleCore::RemapTransform::Identity,
-	op.transformScale };
-	// The fallback noise normalizes by the authored octave count before
-	// applying its 0.5 gain and 2.0 lacunarity recurrence.
-    auto noiseRange = range;
-    noiseRange.noiseOctaves = op.transformOctaves;
-    const auto* blend = op.blendEnvelope ? &*op.blendEnvelope : nullptr;
-	    return [input, output, inputControlPoint, inputControlPoint1, operation, vectorComponent, noiseRange, blend,
-	    hasRotationRandom, hasAngularMovement, hasAngularVelocityRandom, birth] (
-	std::vector<ParticleInstance>& particles, uint32_t count,
-	const std::vector<ControlPointData>& controlPoints, float, ParticleCore::MovementTime) {
-	const auto envelope = operatorEnvelope (blend);
-	for (uint32_t i = 0; i < count; ++i) {
-	    auto& p = particles[i];
-	    if (!p.alive) continue;
-	    if (!birth && (!std::isfinite (p.lifetime) || p.lifetime <= 0.0f)) continue;
-	    const float lifetimeFraction = birth ? 0.0f : p.age / p.lifetime;
-	    float inputValue = lifetimeFraction;
-	    switch (input) {
-	    case ScalarRemapValueOperator::Input::LifetimeFraction: break;
-	    case ScalarRemapValueOperator::Input::MaxLifetime: inputValue = p.lifetime; break;
-	    case ScalarRemapValueOperator::Input::Size: inputValue = p.size; break;
-	    case ScalarRemapValueOperator::Input::Opacity: inputValue = p.alpha; break;
-	    case ScalarRemapValueOperator::Input::Speed: inputValue = glm::length (p.velocity); break;
-	    case ScalarRemapValueOperator::Input::Rotation: inputValue = p.rotation.z; break;
-	    case ScalarRemapValueOperator::Input::AngularSpeed:
-		inputValue = ParticleCore::gatedAngularSpeed (
-		    p.angularVelocity.z, birth ? hasAngularVelocityRandom : hasRotationRandom, hasAngularMovement);
-		break;
-	case ScalarRemapValueOperator::Input::DistanceToControlPoint:
-		inputValue = inputControlPoint >= 0
-		    && inputControlPoint < static_cast<int> (controlPoints.size ())
-		    ? ParticleCore::remapControlPointDistance (
-		          p.position, controlPoints[inputControlPoint].position) : 0.0f;
-		break;
-	case ScalarRemapValueOperator::Input::PositionBetweenTwoControlPoints:
-		inputValue = inputControlPoint >= 0 && inputControlPoint1 >= 0
-		    && inputControlPoint < static_cast<int> (controlPoints.size ())
-		    && inputControlPoint1 < static_cast<int> (controlPoints.size ())
-		    ? ParticleCore::remapPositionBetweenControlPoints (
-		          p.position, controlPoints[inputControlPoint].position,
-		          controlPoints[inputControlPoint1].position) : 0.0f;
-		break;
-	case ScalarRemapValueOperator::Input::ControlPoint:
-	case ScalarRemapValueOperator::Input::DeltaToControlPoint:
-	case ScalarRemapValueOperator::Input::DirectionToControlPoint:
-		if (inputControlPoint >= 0
-		    && inputControlPoint < static_cast<int> (controlPoints.size ())) {
-		    const auto selector = input == ScalarRemapValueOperator::Input::ControlPoint
-		        ? ParticleCore::RemapControlPointVector::Position
-		        : input == ScalarRemapValueOperator::Input::DeltaToControlPoint
-		            ? ParticleCore::RemapControlPointVector::Delta
-		            : ParticleCore::RemapControlPointVector::Direction;
-		    const auto source = ParticleCore::remapControlPointVector (
-		        p.position, controlPoints[inputControlPoint].position, selector);
-		    inputValue = ParticleCore::reduceRemapVector (
-		        source.x, source.y, source.z, vectorComponent);
-		} else inputValue = 0.0f;
-		break;
-	    case ScalarRemapValueOperator::Input::Color:
-		inputValue = ParticleCore::remapVectorInput (p.color, vectorComponent, false);
-		break;
-	    case ScalarRemapValueOperator::Input::Position:
-		inputValue = ParticleCore::remapVectorInput (p.position, vectorComponent, true);
-		break;
-	    case ScalarRemapValueOperator::Input::Velocity:
-		inputValue = ParticleCore::remapVectorInput (p.velocity, vectorComponent, true);
-		break;
-	    }
-	    auto particleRange = noiseRange;
-	    particleRange.noiseSeedBits = std::bit_cast<uint32_t> (p.oscillatorRandom);
-	    if (output == ScalarRemapValueOperator::Output::Size)
-		p.size = ParticleCore::remapScalarValue (
-		    p.size, inputValue, lifetimeFraction, operation, envelope, particleRange);
-	    else if (output == ScalarRemapValueOperator::Output::Opacity)
-		p.alpha = ParticleCore::remapScalarValue (
-		    p.alpha, inputValue, lifetimeFraction, operation, envelope, particleRange);
-	    else if (output == ScalarRemapValueOperator::Output::MaxLifetime)
-	        p.lifetime = ParticleCore::remapScalarValue (
-	            p.lifetime, inputValue, lifetimeFraction, operation, envelope, particleRange);
-	    else if (output == ScalarRemapValueOperator::Output::Rotation)
-	        p.rotation.z = ParticleCore::remapScalarValue (
-	            p.rotation.z, inputValue, lifetimeFraction, operation, envelope, particleRange);
-	    else if (output == ScalarRemapValueOperator::Output::AngularSpeed) {
-	        p.angularVelocity.z = ParticleCore::remapBirthAngularSpeed (
-                p.angularVelocity.z, inputValue, operation, particleRange,
-                hasAngularVelocityRandom, hasAngularMovement);
-	    }
-	    else {
-		const float currentSpeed = glm::length (p.velocity);
-		const float mappedSpeed = ParticleCore::remapScalarValue (
-		    currentSpeed, inputValue, lifetimeFraction, operation, envelope, particleRange);
-		p.velocity = ParticleCore::remapSpeedOutput (p.velocity, mappedSpeed);
-	    }
-	}
-    };
+    return createScalarRemapOperator (
+        op, birth, hasRotationRandom, hasAngularMovement, hasAngularVelocityRandom);
 }
 
 OperatorFunc CParticle::createVectorRemapValueOperator (const VectorRemapValueOperator& op, bool birth) {
