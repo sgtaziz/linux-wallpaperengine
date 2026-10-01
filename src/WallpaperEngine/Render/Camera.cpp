@@ -12,10 +12,11 @@ using namespace WallpaperEngine::Render;
 Camera::Camera (Wallpapers::CScene& scene, const SceneData::Camera& camera,
                 const SceneCamera* activeObject) :
     m_width (0), m_height (0),
-    m_pose (poseForRootCamera (camera)),
+    m_pose (poseForRootCamera (camera)), m_scriptTransforms {m_pose},
     m_camera (camera), m_activeObject (activeObject), m_scene (scene) {
     if (m_activeObject) m_pose = poseForSceneCamera (*m_activeObject);
     m_lookat = glm::lookAt (m_pose.eye, m_pose.center, m_pose.up);
+    m_renderLookat = m_lookat;
 }
 
 Camera::~Camera () = default;
@@ -63,6 +64,62 @@ const glm::mat4& Camera::getProjection () const { return this->m_projection; }
 
 const glm::mat4& Camera::getLookAt () const { return this->m_lookat; }
 
+const glm::mat4& Camera::getRenderLookAt () const { return m_renderLookat; }
+
+Camera::Transforms Camera::updatedTransforms (
+    Transforms current, const glm::vec3* eye, const glm::vec3* center,
+    const glm::vec3* up, const float* zoom) {
+    // Native 2.8.42 14018da90 copies each supplied pointer independently.
+    if (eye) current.pose.eye = *eye;
+    if (center) current.pose.center = *center;
+    if (up) current.pose.up = *up;
+    if (zoom) current.zoom = *zoom;
+    return current;
+}
+
+glm::mat4 Camera::renderLookAtForTransforms (const Pose& pose, bool orthogonal) {
+    const auto nativeView = glm::lookAt (pose.eye, pose.center, pose.up);
+    if (!orthogonal) return nativeView;
+    // Orthographic image/particle positions are already expressed in the
+    // centered GL basis. Change both ends of the native view's basis; simply
+    // reflecting the three lookAt vectors would change its handedness.
+    const auto flip = glm::scale (glm::mat4 (1.0f), glm::vec3 (1, -1, 1));
+    return flip * nativeView * flip;
+}
+
+glm::mat4 Camera::makeScriptOrthogonalProjection (float width, float height, float zoom) {
+    // Native 140183a70 uses fixed orthographic depth -2000/+2000.
+    // 14017fa70 scales XY about the authored canvas center by camera zoom;
+    // our scene positions are centered already. Perspective ignores zoom.
+    return glm::ortho (-width * 0.5f, width * 0.5f, -height * 0.5f, height * 0.5f,
+                       -2000.0f, 2000.0f)
+        * glm::scale (glm::mat4 (1.0f), glm::vec3 (zoom, zoom, 1));
+}
+
+glm::mat4 Camera::makeProjectionForTransforms (
+    float width, float height, float fov, float nearZ, float farZ,
+    const Transforms& transforms, bool orthogonal, float authoredZoom) {
+    return orthogonal ? makeScriptOrthogonalProjection (width, height, transforms.zoom * authoredZoom)
+        : makePerspectiveProjectionForScene (width, height, fov, nearZ, farZ);
+}
+
+void Camera::setTransforms (const glm::vec3* eye, const glm::vec3* center,
+                            const glm::vec3* up, const float* zoom) {
+    if (!eye && !center && !up && !zoom) return;
+    m_scriptTransforms = updatedTransforms (m_scriptTransforms, eye, center, up, zoom);
+    // Native 1401891a0 chooses an active camera object, then camera paths,
+    // before the stored root transforms. Paths are not animated here yet.
+    if (m_activeObject || m_camera.configuration.hasPaths) return;
+    m_hasScriptTransforms = true;
+    m_pose = m_scriptTransforms.pose;
+    m_lookat = glm::lookAt (m_pose.eye, m_pose.center, m_pose.up);
+    m_renderLookat = renderLookAtForTransforms (m_pose, m_isOrthogonal);
+    if (m_width > 0 && m_height > 0) {
+        if (m_isOrthogonal) setOrthogonalProjection (m_width, m_height);
+        else setPerspectiveProjection (m_width, m_height);
+    }
+}
+
 bool Camera::isOrthogonal () const { return this->m_isOrthogonal; }
 
 Wallpapers::CScene& Camera::getScene () const { return this->m_scene; }
@@ -88,17 +145,24 @@ void Camera::setOrthogonalProjection (const float width, const float height) {
     this->m_width = width;
     this->m_height = height;
 
-    this->m_projection = makeOrthogonalProjectionForScene (
-        width, height, getNearZ (), getFarZ (), getEye ());
+    this->m_projection = m_hasScriptTransforms
+        ? makeProjectionForTransforms (width, height, getFov (), getNearZ (), getFarZ (),
+                                       m_scriptTransforms, true,
+                                       m_camera.projection.zoom ? m_camera.projection.zoom->value->getFloat () : 1.0f)
+        : makeOrthogonalProjectionForScene (width, height, getNearZ (), getFarZ (), getEye ());
     this->m_isOrthogonal = true;
+    m_renderLookat = m_hasScriptTransforms ? renderLookAtForTransforms (m_pose, true) : m_lookat;
 }
 
 void Camera::setPerspectiveProjection (float width, float height) {
     m_width = width;
     m_height = height;
-    m_projection = makePerspectiveProjectionForScene (
-        width, height, getFov (), getNearZ (), getFarZ ());
+    m_projection = m_hasScriptTransforms
+        ? makeProjectionForTransforms (width, height, getFov (), getNearZ (), getFarZ (),
+                                       m_scriptTransforms, false)
+        : makePerspectiveProjectionForScene (width, height, getFov (), getNearZ (), getFarZ ());
     m_isOrthogonal = false;
+    m_renderLookat = m_lookat;
 }
 
 glm::mat4 Camera::makePerspectiveProjectionForScene (

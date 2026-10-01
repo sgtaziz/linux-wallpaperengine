@@ -147,6 +147,7 @@ SceneUniquePtr WallpaperParser::parseScene (const JSON& file, Project& project) 
 		    .nearz = cameraSetting ("nearz", useOrthogonalProjection ? 0.0f : 0.1f),
 		    .farz = cameraSetting ("farz", useOrthogonalProjection ? 1000.0f : 10000.0f),
 	            .fov = cameraSetting ("fov", 50.0f),
+	            .zoom = general.user ("zoom", properties, 1.0f),
 	            .perspectiveOverrideFov = general.user ("perspectiveoverridefov", properties, 95.0f)
                 }
             },

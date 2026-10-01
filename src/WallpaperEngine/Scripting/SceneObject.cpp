@@ -3,6 +3,7 @@
 #include "Adapters/ScriptableObjectAdapter.h"
 #include "ScriptEngine.h"
 #include "SceneScriptClassRegistration.h"
+#include "SceneCameraTransforms.h"
 #include "ScriptableObject.h"
 #include "WorkshopScriptAssetPath.h"
 #include "WallpaperEngine/Data/JSON.h"
@@ -503,6 +504,22 @@ static const WallpaperEngine::Render::CObject* resolve_scene_layer (
     return nullptr;
 }
 
+JSValue scene_set_camera_transforms (JSContext* ctx, JSValueConst thisValue,
+                                     int argc, JSValueConst* argv) {
+    auto* owner = get_opaque (ctx, thisValue);
+    if (!owner) return JS_EXCEPTION;
+    if (owner->getEngine ().isEvaluatingModuleTopLevel ())
+        return JS_ThrowTypeError (ctx, "setCameraTransforms cannot be used in global scope");
+    if (argc == 0 || !JS_IsObject (argv[0])) return JS_FALSE;
+    const auto values = readSceneCameraTransforms (ctx, argv[0]);
+    if (!values) return JS_EXCEPTION;
+    if (!owner->getEngine ().isInitializingAuthoredLayer ())
+        owner->getMutableScene ().getCamera ().setTransforms (
+            values->eye ? &*values->eye : nullptr, values->center ? &*values->center : nullptr,
+            values->up ? &*values->up : nullptr, values->zoom ? &*values->zoom : nullptr);
+    return JS_TRUE;
+}
+
 JSValue scene_enumerate_layers (JSContext* ctx, JSValueConst thisValue, int, JSValueConst*) {
     auto* owner = get_opaque (ctx, thisValue);
     if (!owner) return JS_EXCEPTION;
@@ -863,6 +880,10 @@ SceneObject::SceneObject (ScriptEngine& engine, Render::Wallpapers::CScene& scen
     JS_DefinePropertyValueStr (
 	this->m_engine.getContext (), this->m_instance, "getLayer",
 	JS_NewCFunction (this->m_engine.getContext (), get_layer, "getLayer", 1), JS_PROP_ENUMERABLE
+    );
+    JS_DefinePropertyValueStr (
+        this->m_engine.getContext (), this->m_instance, "setCameraTransforms",
+        JS_NewCFunction (this->m_engine.getContext (), scene_set_camera_transforms, "setCameraTransforms", 1), JS_PROP_ENUMERABLE
     );
     JS_DefinePropertyValueStr (
         this->m_engine.getContext (), this->m_instance, "enumerateLayers",

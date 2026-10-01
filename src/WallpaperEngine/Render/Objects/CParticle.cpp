@@ -3850,7 +3850,7 @@ void CParticle::updateParticleViewProjection () {
 	m_viewProjectionMatrix = getScene ().isChildCompositionScope ()
 	    ? getScene ().getActiveRenderProjection ()
 	    : sceneCamera.isOrthogonal ()
-	        ? sceneCamera.getProjection () * sceneCamera.getLookAt ()
+	        ? sceneCamera.getProjection () * sceneCamera.getRenderLookAt ()
 	        : perspectiveViewProjection ();
 	// Native 1401891a0 writes orthographic particle eye Z=2000 in authored
 	// screen coordinates. Linux centers the camera XY, so (0,0,2000) is the
