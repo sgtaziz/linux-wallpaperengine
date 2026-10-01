@@ -733,8 +733,12 @@ void CParticle::setup () {
 	sLog.error ("Particle child nesting exceeds Linux safety depth 64 for object ", m_particle.id);
     }
 
-    const auto warmup = ParticleCore::warmupPlan (m_particle.startTime, m_maxParticles);
-    if (warmup.truncated) {
+    warmup ();
+}
+
+void CParticle::warmup () {
+    const auto plan = ParticleCore::warmupPlan (m_particle.startTime, m_maxParticles);
+    if (plan.truncated) {
 	sLog.error ("Particle warm-up limited to ", ParticleCore::MAX_WARMUP_STEPS,
 	            " steps for object ", m_particle.id);
     }
@@ -742,8 +746,8 @@ void CParticle::setup () {
     const uint32_t fps = configuredFps > 0 ? static_cast<uint32_t> (configuredFps) : 0;
     // Native warm-up calls the inner tick directly, bypassing the outer
     // node-time accumulator; keep m_time at startup until ordinary render.
-    for (uint32_t i = 0; i < warmup.steps; ++i) {
-	update (ParticleCore::warmupClock (warmup.step, fps));
+    for (uint32_t i = 0; i < plan.steps; ++i) {
+	update (ParticleCore::warmupClock (plan.step, fps));
     }
     if (m_hasRopeTrailHistory) {
 	for (uint32_t i = 0; i < m_particleCount; ++i)
@@ -925,6 +929,7 @@ void CParticle::refreshNativeLiveView () {
 }
 
 void CParticle::resetStaticEmitterTree () {
+    m_time = 0.0;
     resetSequenceCounters (false);
     m_emitters.clear ();
     m_emitterCanProduce.clear ();
@@ -956,9 +961,11 @@ void CParticle::patchInstanceSequenceSteps () {
     const float count = countOverrideValue ()->getFloat ();
     for (const auto& counter : m_sequenceCounters)
         counter->instanceCountPatch.apply (counter->step, count);
-    // Native 14022bd40 traverses every retained node. Linux currently retires
-    // completed event runtimes by destruction, so visit all surviving children.
+    // Native 14022bd40 patches both active and inactive event vectors.
     for (auto& node : m_childNodes) node.runtime->patchInstanceSequenceSteps ();
+    m_retainedChildNodes.visit ([] (ChildNode& node) {
+        node.runtime->patchInstanceSequenceSteps ();
+    });
 }
 
 void CParticle::emitParticles (int32_t count) {
@@ -1333,11 +1340,12 @@ void CParticle::update (ParticleCore::TickClock clock) {
 			? node.runtime->m_particles[0].position.y : 0.0f,
 		      " nodeclock=", clock.nodeDuration);
 	// Native 1402308a0 checks 14022c310 on every tick, including warm-up,
-	// then moves completed event nodes out of the active descriptor vector.
+	// then moves completed event nodes into that descriptor's inactive pool.
 	if (node.parentBirthId != 0 && node.runtime->isFinishedForEvent ()) {
 	    if (traceParticleChildren (*this))
 		sLog.out ("CHILD_TRACE retire object=", m_particle.id,
 		          " child=", node.model->id, " parentbirth=", node.parentBirthId);
+            m_retainedChildNodes.retire (node.descriptor, std::move (node));
 	    m_childNodes.erase (m_childNodes.begin () + static_cast<std::ptrdiff_t> (childIndex));
 	} else ++childIndex;
     }
@@ -1360,30 +1368,38 @@ void CParticle::spawnChild (size_t descriptor, const ParticleInstance* parent, b
     if (active >= limit) return;
 
     try {
-        const auto vecString = [] (glm::vec3 value) {
-            return std::to_string (value.x) + " " + std::to_string (value.y) + " "
-                + std::to_string (value.z);
-        };
-        using JSON = WallpaperEngine::Data::JSON::JSON;
-        const JSON record = {
-            { "id", nextParticleChildId (getScene ()) },
-            { "name", child.name.empty () ? child.particleFile : child.name },
-            { "particle", child.particleFile },
-            { "origin", vecString (child.origin) },
-            { "angles", vecString (child.angles) },
-            { "scale", vecString (child.scale) },
-        };
-        auto parsed = WallpaperEngine::Data::Parsers::ObjectParser::parse (
-            record, getScene ().getScene ().project);
-        if (!parsed || !parsed->is<Particle> ()) return;
-        auto model = std::unique_ptr<Particle> (static_cast<Particle*> (parsed.release ()));
         ChildNode node;
+        auto retained = parent ? m_retainedChildNodes.take (descriptor) : std::nullopt;
+        const bool reused = retained.has_value ();
+        if (retained) {
+            node = std::move (*retained);
+        } else {
+            const auto vecString = [] (glm::vec3 value) {
+                return std::to_string (value.x) + " " + std::to_string (value.y) + " "
+                    + std::to_string (value.z);
+            };
+            using JSON = WallpaperEngine::Data::JSON::JSON;
+            const JSON record = {
+                { "id", nextParticleChildId (getScene ()) },
+                { "name", child.name.empty () ? child.particleFile : child.name },
+                { "particle", child.particleFile },
+                { "origin", vecString (child.origin) },
+                { "angles", vecString (child.angles) },
+                { "scale", vecString (child.scale) },
+            };
+            auto parsed = WallpaperEngine::Data::Parsers::ObjectParser::parse (
+                record, getScene ().getScene ().project);
+            if (!parsed || !parsed->is<Particle> ()) return;
+            auto model = std::unique_ptr<Particle> (static_cast<Particle*> (parsed.release ()));
+            node.model = std::move (model);
+            node.runtime = std::make_unique<CParticle> (
+                getScene (), *node.model, m_childDepth + 1, m_childAncestry, this);
+        }
         node.descriptor = descriptor;
         node.parentBirthId = parent ? parent->birthId : 0;
         node.follow = follow;
-        node.model = std::move (model);
-        node.runtime = std::make_unique<CParticle> (
-            getScene (), *node.model, m_childDepth + 1, m_childAncestry, this);
+        node.detached = false;
+        node.runtime->m_eventParentSlot.reset ();
         if (parent) {
             if (m_eventSlotValues.size () <= parent->poolSlot)
                 m_eventSlotValues.resize (parent->poolSlot + 1);
@@ -1395,11 +1411,20 @@ void CParticle::spawnChild (size_t descriptor, const ParticleInstance* parent, b
         // children and live follow children inherit the changing parent basis.
         node.runtime->setChildAnchor (m_simulationModelMatrix,
             parent ? parent->position : glm::vec3 (0.0f), parent == nullptr);
-        node.runtime->setup ();
+        if (reused) {
+            // Native reuse restores emitter clocks and sequence phase without
+            // reconstructing CPs, compiled initializers, slot high-water or
+            // static descendants. Reenable the retained static emitter tree.
+            node.runtime->resetStaticEmitterTree ();
+            node.runtime->m_preTickedByParent = false;
+            node.runtime->warmup ();
+        } else {
+            node.runtime->setup ();
+        }
         if (traceParticleChildren (*this))
             sLog.out ("CHILD_TRACE spawn object=", m_particle.id,
                       " child=", node.model->id, " descriptor=", descriptor,
-                      " parentbirth=", node.parentBirthId);
+		      " parentbirth=", node.parentBirthId, " reused=", reused);
         // Native 1402308a0 visits static children first, then descriptor
         // groups in authored order; keep creation order inside each group.
         const auto order = [] (const ChildNode& value) {
