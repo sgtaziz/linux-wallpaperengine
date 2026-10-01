@@ -623,6 +623,56 @@ TEST_CASE ("Shader metadata accepts typed material constants without authored de
     REQUIRE (overridden.findParameter ("exposure").fragment->getFloat () == 0.875f);
 }
 
+TEST_CASE ("Model scalar material names retain defaults and authored override mapping",
+           "[shader][model][material]") {
+    // The native rendered contract exercises both the custom Bright spelling
+    // and generic2's literal Brigtness spelling, with reserved GLSL names.
+    for (const std::string brightness : {"Bright", "Brigtness"}) {
+        auto files = std::make_unique<Container> ();
+        files->getVFS ().add ("shaders/model-scalar.vert",
+                             "void main() { gl_Position = vec4(1.0); }\n");
+        const auto source = [&] (bool defaults) {
+            const std::string brightnessDefault = defaults ? ",\"default\":0.35" : "";
+            const std::string alphaDefault = defaults ? ",\"default\":0.45" : "";
+            const std::string powerDefault = defaults ? ",\"default\":0.55" : "";
+            return "uniform float g_Brightness; // {\"material\":\"" + brightness
+                + "\"" + brightnessDefault + "}\n"
+                  "uniform float g_UserAlpha; // {\"material\":\"Alpha\"" + alphaDefault + "}\n"
+                  "uniform float g_Power; // {\"material\":\"Power\"" + powerDefault + "}\n"
+                  "void main() { gl_FragColor = vec4(g_Brightness,g_UserAlpha,g_Power,1.0); }\n";
+        };
+        files->getVFS ().add ("shaders/model-scalar.frag", source (false));
+        files->getVFS ().add ("shaders/model-default.vert",
+                             "void main() { gl_Position = vec4(1.0); }\n");
+        files->getVFS ().add ("shaders/model-default.frag", source (true));
+        AssetLocator assets (std::move (files));
+        ShaderConstantMap authored;
+        authored.emplace (brightness, UserSettingBuilder::fromValue (0.2f));
+        authored.emplace ("Alpha", UserSettingBuilder::fromValue (0.4f));
+        authored.emplace ("Power", UserSettingBuilder::fromValue (0.6f));
+        Shader base (assets, "model-scalar", emptyCombos, emptyCombos,
+                     emptyTextures, emptyTextures, emptyConstants, &authored);
+        REQUIRE (base.findParameter (brightness).fragment->getName () == "g_Brightness");
+        REQUIRE (base.findParameter ("Alpha").fragment->getName () == "g_UserAlpha");
+        REQUIRE (base.findParameter (brightness).fragment->getFloat () == 0.2f);
+        REQUIRE (base.findParameter ("Alpha").fragment->getFloat () == 0.4f);
+        REQUIRE (base.findParameter ("Power").fragment->getFloat () == 0.6f);
+        ShaderConstantMap overrides;
+        overrides.emplace (brightness, UserSettingBuilder::fromValue (0.7f));
+        overrides.emplace ("Alpha", UserSettingBuilder::fromValue (0.8f));
+        Shader overridden (assets, "model-scalar", emptyCombos, emptyCombos,
+                           emptyTextures, emptyTextures, overrides, &authored);
+        REQUIRE (overridden.findParameter (brightness).fragment->getFloat () == 0.7f);
+        REQUIRE (overridden.findParameter ("Alpha").fragment->getFloat () == 0.8f);
+        REQUIRE (overridden.findParameter ("Power").fragment->getFloat () == 0.6f);
+        Shader defaulted (assets, "model-default", emptyCombos, emptyCombos,
+                          emptyTextures, emptyTextures, emptyConstants);
+        REQUIRE (defaulted.findParameter (brightness).fragment->getFloat () == 0.35f);
+        REQUIRE (defaulted.findParameter ("Alpha").fragment->getFloat () == 0.45f);
+        REQUIRE (defaulted.findParameter ("Power").fragment->getFloat () == 0.55f);
+    }
+}
+
 TEST_CASE ("Sampler requirements read override-only combos without invalid iterators", "[shader][metadata]") {
     // This checks safe override lookup and preserves existing gating decisions;
     // the native require/requireany meaning is still under investigation.
