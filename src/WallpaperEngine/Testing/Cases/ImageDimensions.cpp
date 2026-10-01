@@ -1,4 +1,5 @@
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/catch_approx.hpp>
 #include <algorithm>
 
 #include "WallpaperEngine/Assets/AssetLocator.h"
@@ -8,10 +9,66 @@
 #include "WallpaperEngine/Data/Parsers/ObjectParser.h"
 #include "WallpaperEngine/FileSystem/Container.h"
 #include "WallpaperEngine/Render/Objects/ImageDimensions.h"
+#include "WallpaperEngine/Render/Objects/ImagePrelighting.h"
 
 using namespace WallpaperEngine::Data::Model;
 using WallpaperEngine::Data::JSON::JSON;
 using WallpaperEngine::Data::Parsers::ObjectParser;
+
+TEST_CASE ("Native image instancing is independent of automatic source sizing",
+           "[scene][image][prelighting][parser]") {
+    auto files = std::make_unique<WallpaperEngine::FileSystem::Container> ();
+    files->getVFS ().add ("material.json", R"({"passes":[{"shader":"genericimage2"}]})");
+    files->getVFS ().add ("shared.json", R"({"material":"material.json","autosize":true})");
+    files->getVFS ().add ("instanced.json", R"({"material":"material.json","instanced":true,"width":192,"height":96})");
+    Project project {};
+    project.assetLocator = std::make_unique<WallpaperEngine::Assets::AssetLocator> (std::move (files));
+    const auto shared = ObjectParser::parse (JSON {{"id", 20}, {"image", "shared.json"}}, project);
+    REQUIRE (shared->as<Image> ()->model->autosize);
+    REQUIRE_FALSE (shared->as<Image> ()->model->instanced);
+    // Loading distinct scene instances must retain their own parsed model flag.
+    for (int id : {40, 50}) {
+        const auto instance = ObjectParser::parse (
+            JSON {{"id", id}, {"image", "instanced.json"}}, project);
+        REQUIRE (instance->as<Image> ()->model->instanced);
+        REQUIRE_FALSE (instance->as<Image> ()->model->autosize);
+        REQUIRE (instance->as<Image> ()->size->value->getVec2 () == glm::vec2 (192, 96));
+    }
+}
+
+TEST_CASE ("Prelighting separates native source-pixel light coordinates from target coverage",
+           "[scene][image][prelighting]") {
+    using WallpaperEngine::Render::Objects::imagePrelightingBasis;
+    // Native controlled source32x32/logical192x96: a shared material lights a
+    // 32-pixel world basis; an instance lights the full logical rectangle.
+    auto authored = glm::translate (glm::mat4 (1.0f), glm::vec3 (640, 480, 7));
+    authored = glm::rotate (authored, glm::half_pi<float> (), glm::vec3 (0, 0, 1));
+    authored = glm::scale (authored, glm::vec3 (2, 3, 1));
+    const auto shared = imagePrelightingBasis (authored, {192, 96}, {32, 32}, false);
+    const auto instance = imagePrelightingBasis (authored, {192, 96}, {32, 32}, true);
+    const auto sharedRight = shared.world * glm::vec4 (16, 0, 0, 1);
+    const auto instanceRight = instance.world * glm::vec4 (16, 0, 0, 1);
+    REQUIRE (sharedRight.x == Catch::Approx (640));
+    REQUIRE (sharedRight.y == Catch::Approx (512));
+    REQUIRE (instanceRight.x == Catch::Approx (640));
+    REQUIRE (instanceRight.y == Catch::Approx (672));
+    const auto instanceLower = instance.world * glm::vec4 (0, 16, 0, 1);
+    REQUIRE (instanceLower.x == Catch::Approx (496));
+    REQUIRE (instanceLower.y == Catch::Approx (480));
+    REQUIRE (instanceLower.z == Catch::Approx (7));
+    REQUIRE (shared.targetProjection == instance.targetProjection);
+    const auto upperLeft = shared.targetProjection * glm::vec4 (-16, -16, 0, 1);
+    const auto lowerRight = shared.targetProjection * glm::vec4 (16, 16, 0, 1);
+    REQUIRE (upperLeft.x == Catch::Approx (-1));
+    REQUIRE (upperLeft.y == Catch::Approx (1));
+    REQUIRE (lowerRight.x == Catch::Approx (1));
+    REQUIRE (lowerRight.y == Catch::Approx (-1));
+    // Source resolution changes the shared material's physical light span,
+    // while per-image instancing keeps the same logical world point.
+    const auto resized = imagePrelightingBasis (authored, {192, 96}, {64, 16}, true);
+    const auto resizedRight = resized.world * glm::vec4 (32, 0, 0, 1);
+    REQUIRE (resizedRight.y == Catch::Approx (instanceRight.y));
+}
 
 TEST_CASE ("Native image logical defaults preserve explicit zero and authored omission",
            "[scene][image][size][parser]") {

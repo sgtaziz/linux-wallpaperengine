@@ -18,6 +18,7 @@
 #include <functional>
 #include <optional>
 #include <vector>
+#include <unordered_set>
 
 using namespace WallpaperEngine;
 using namespace WallpaperEngine::Render;
@@ -175,6 +176,12 @@ private:
     glm::mat4 m_lightingMvp {1.0f};
     glm::mat4 m_lightingMvpInverse {1.0f};
     glm::vec3 m_lightingEye {0.0f};
+    GLuint m_prelightingLocalPosition = GL_NONE;
+    glm::mat4 m_prelightingWorld {1.0f};
+    glm::mat3 m_prelightingNormal {1.0f};
+    glm::mat4 m_prelightingProjection {1.0f};
+    glm::mat4 m_prelightingProjectionInverse {1.0f};
+    std::unordered_set<Effects::CPass*> m_prelightingPasses;
 
     std::shared_ptr<CFBO> m_mainFBO = nullptr;
     std::shared_ptr<CFBO> m_subFBO = nullptr;

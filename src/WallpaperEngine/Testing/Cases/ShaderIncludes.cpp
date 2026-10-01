@@ -23,6 +23,30 @@ static const ShaderConstantMap emptyConstants;
 static const TextureMap emptyTextures;
 static const ComboMap emptyCombos;
 
+TEST_CASE ("Prelighting variants compile override combos separately from authored shader metadata",
+           "[shader][scene][prelighting]") {
+    auto files = std::make_unique<Container> ();
+    files->getVFS ().add ("shaders/prelighting-probe.vert",
+        "uniform mat4 g_ModelViewProjectionMatrix; uniform mat4 g_AltModelMatrix;\n"
+        "attribute vec3 a_Position;\n"
+        "void main(){\n#if PRELIGHTING\n"
+        "gl_Position=g_ModelViewProjectionMatrix*vec4(a_Position,1.0);\n"
+        "#else\ngl_Position=g_AltModelMatrix*vec4(a_Position,1.0);\n#endif\n}\n");
+    files->getVFS ().add ("shaders/prelighting-probe.frag",
+        "void main(){gl_FragColor=vec4(1.0);}\n");
+    AssetLocator assets (std::move (files));
+    ComboMap authored {{"LIGHTING", 1}, {"PRELIGHTING", 0}};
+    ComboMap variant {{"PRELIGHTING", 1}};
+    Shader shader (assets, "prelighting-probe", authored, variant,
+                   emptyTextures, emptyTextures, emptyConstants);
+    // Renderer draw stages must retain the selected variant identity: the
+    // authored metadata API is not the effective preprocessor combo map.
+    REQUIRE (shader.vertex ().find ("#define PRELIGHTING 1") != std::string::npos);
+    REQUIRE (shader.vertex ().find ("#define PRELIGHTING 0") == std::string::npos);
+    REQUIRE (shader.getCombos ().at ("PRELIGHTING") == 0);
+    REQUIRE (authored.at ("PRELIGHTING") == 0);
+}
+
 TEST_CASE ("Active scene HDR overrides authored shader combos while inactive scenes preserve them",
            "[shader][hdr][scene]") {
     using WallpaperEngine::Render::Shaders::applySceneHdrCombo;

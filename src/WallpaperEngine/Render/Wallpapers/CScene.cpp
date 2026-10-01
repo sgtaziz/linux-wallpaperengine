@@ -1,4 +1,5 @@
 #include "SpotLightUniforms.h"
+#include "LegacyLightUniforms.h"
 #include "WallpaperEngine/Render/Objects/CImage.h"
 #include "WallpaperEngine/Render/Objects/ImageDimensions.h"
 #include "WallpaperEngine/Render/Objects/CModel.h"
@@ -909,6 +910,10 @@ const glm::vec3* CScene::getLegacyLightPositions () const { return m_legacyLight
 
 const glm::vec4* CScene::getLegacyLightColors () const { return m_legacyLightColors.data (); }
 
+const glm::vec4* CScene::getLegacyLightPremultipliedColors () const {
+    return m_legacyLightPremultipliedColors.data ();
+}
+
 void CScene::assignLegacyLightSlot (const ScenePointLight* light) {
     if (m_legacyLightSlots.contains (light)) return;
     size_t slot = 0;
@@ -961,6 +966,7 @@ void CScene::refreshPointLights () {
             ++modernSlot;
         }
     }
+    m_legacyLightPremultipliedColors = legacyLightPremultipliedColors (m_legacyLightColors);
 }
 
 void CScene::refreshSpotLights () {
