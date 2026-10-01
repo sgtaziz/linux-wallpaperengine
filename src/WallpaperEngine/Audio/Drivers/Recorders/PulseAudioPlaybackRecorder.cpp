@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <exception>
+#include <stdexcept>
 
 namespace WallpaperEngine::Audio::Drivers::Recorders {
 void pa_server_info_cb (pa_context* ctx, const pa_server_info* info, void* userdata);
@@ -35,6 +36,8 @@ void releaseCapture (PulseAudioData& recorder) {
     recorder.captureStream = nullptr;
     recorder.monitorName.clear ();
     recorder.clearPublished = true;
+    recorder.spectrum.discard ();
+    recorder.poll.reset ();
 }
 } // namespace
 
@@ -91,7 +94,7 @@ void pa_stream_moved_cb (pa_stream* stream, void* userdata) {
 void pa_stream_suspended_cb (pa_stream* stream, void* userdata) {
     if (pa_stream_is_suspended (stream) > 0) {
 	auto* recorder = static_cast<PulseAudioData*> (userdata);
-	recorder->spectrum.reset ();
+	recorder->spectrum.discard ();
 	recorder->clearPublished = true;
     }
 }
@@ -105,23 +108,27 @@ void pa_stream_read_cb (pa_stream* stream, const size_t /*nbytes*/, void* userda
     // Drain every queued fragment. A single read notification can cover
     // multiple memblocks. The analyzer accepts one native-sized prefix per
     // update; later blocks are released without extending that FFT input.
-    for (;;) {
+    while (!recorder->stop.stop_requested ()) {
 	const size_t available = pa_stream_readable_size (stream);
-	if (available == 0 || available == static_cast<size_t> (-1)) break;
+	if (available == 0) break;
+	if (available == static_cast<size_t> (-1)) { recorder->poll.failed (); break; }
 	const uint8_t* data = nullptr;
 	size_t currentSize = 0;
 	if (pa_stream_peek (stream, reinterpret_cast<const void**> (&data), &currentSize) != 0) {
+	    recorder->poll.failed ();
 	    sLog.error ("Failed to peek at stream data...");
 	    break;
 	}
 	if (currentSize == 0) break;
 	// A peek can stop in the middle of a stereo frame. The analyzer carries
 	// every byte until the capture prefix is complete, retaining its silent tail.
-	if (matchingRate) {
-	    if (data) recorder->spectrum.feed (data, currentSize);
-	    else recorder->spectrum.feedSilence (currentSize);
-	}
+	// Pulse holes contain no PCM, corresponding to a native silent packet.
+        // Ordinary zero-valued PCM still fills the native capture prefix.
+        recorder->poll.packet (!data);
+        if (matchingRate && data) recorder->spectrum.feed (data, currentSize);
+        else if (!matchingRate) recorder->poll.failed ();
 	if (pa_stream_drop (stream) != 0) {
+	    recorder->poll.failed ();
 	    sLog.error ("Failed to drop data after peeking");
 	    break;
 	}
@@ -262,64 +269,98 @@ void pa_context_notify_cb (pa_context* ctx, void* userdata) {
     }
 }
 
-PulseAudioPlaybackRecorder::PulseAudioPlaybackRecorder () : m_captureData {} {
-    this->m_mainloop = pa_mainloop_new ();
-    this->m_mainloopApi = pa_mainloop_get_api (this->m_mainloop);
-    this->m_context = pa_context_new (this->m_mainloopApi, "wallpaperengine-audioprocessing");
+PulseAudioPlaybackRecorder::PulseAudioPlaybackRecorder (int framesPerSecond) : m_worker (framesPerSecond) {
+    m_worker.start ([this] (std::stop_token stop) {
+        m_captureData.stop = stop;
+        initializeCapture ();
+    }, [this] { pollCapture (); }, [this] { destroyCapture (); }, [this] (std::exception_ptr error) {
+        try { std::rethrow_exception (error); }
+        catch (const std::exception& reason) {
+            sLog.error ("PulseAudio capture worker failed; audio processing is disabled: ", reason.what ());
+        } catch (...) { sLog.error ("PulseAudio capture worker failed with an unknown error"); }
+        m_worker.publish ({}, true);
+    });
+}
 
-    pa_context_set_state_callback (this->m_context, &pa_context_notify_cb, &this->m_captureData);
-
-    if (pa_context_connect (this->m_context, nullptr, PA_CONTEXT_NOFLAGS, nullptr) < 0) {
-	sLog.error ("PulseAudio connection failed! Audio processing is disabled");
-	return;
-    }
-
-    // wait until the context is ready
-    while (pa_context_get_state (this->m_context) != PA_CONTEXT_READY) {
-	const auto state = pa_context_get_state (this->m_context);
-	if (state == PA_CONTEXT_FAILED || state == PA_CONTEXT_TERMINATED
-	    || pa_mainloop_iterate (this->m_mainloop, 1, nullptr) < 0) {
-	    sLog.error ("PulseAudio capture setup failed; audio processing is disabled");
-	    return;
-	}
-    }
+void PulseAudioPlaybackRecorder::initializeCapture () {
+    m_mainloop = pa_mainloop_new ();
+    if (!m_mainloop) throw std::runtime_error ("Cannot create PulseAudio mainloop");
+    m_context = pa_context_new (pa_mainloop_get_api (m_mainloop), "wallpaperengine-audioprocessing");
+    if (!m_context) throw std::runtime_error ("Cannot create PulseAudio context");
+    pa_context_set_state_callback (m_context, &pa_context_notify_cb, &m_captureData);
+    if (pa_context_connect (m_context, nullptr, PA_CONTEXT_NOFLAGS, nullptr) < 0)
+        throw std::runtime_error ("Cannot connect PulseAudio context");
+    // Initialization is asynchronous. Every dispatch is nonblocking so stop
+    // can always wake the worker and join, even if the server never responds.
 }
 
 PulseAudioPlaybackRecorder::~PulseAudioPlaybackRecorder () {
-    releaseCapture (m_captureData);
+    m_worker.stop ();
+}
 
-    pa_context_disconnect (this->m_context);
-    pa_context_unref (this->m_context);
-    pa_mainloop_free (this->m_mainloop);
+void PulseAudioPlaybackRecorder::destroyCapture () {
+    releaseCapture (m_captureData);
+    if (m_context) {
+        pa_context_set_state_callback (m_context, nullptr, nullptr);
+        pa_context_set_subscribe_callback (m_context, nullptr, nullptr);
+        pa_context_disconnect (m_context);
+        pa_context_unref (m_context);
+        m_context = nullptr;
+    }
+    if (m_mainloop) { pa_mainloop_free (m_mainloop); m_mainloop = nullptr; }
+}
+
+void PulseAudioPlaybackRecorder::pollCapture () {
+    m_captureData.poll.begin ();
+    for (int dispatch = 0; dispatch < 64 && !m_captureData.stop.stop_requested (); ++dispatch) {
+        const int result = pa_mainloop_iterate (m_mainloop, 0, nullptr);
+        if (result < 0) m_captureData.poll.failed ();
+        if (result <= 0) break;
+    }
+    const auto state = pa_context_get_state (m_context);
+    if (state == PA_CONTEXT_FAILED || state == PA_CONTEXT_TERMINATED) {
+        // Recreate a failed server connection on the capture owner, after the
+        // same bounded retry used for a failed/missing sink monitor.
+        if (std::chrono::steady_clock::now () >= m_captureData.retryAfter) {
+            destroyCapture ();
+            m_captureData.queryPending = false;
+            m_captureData.retryAfter = std::chrono::steady_clock::now () + std::chrono::seconds (2);
+            initializeCapture ();
+        }
+        m_captureData.clearPublished = true;
+    }
+    if (m_captureData.refreshRequested && !m_captureData.queryPending
+        && std::chrono::steady_clock::now () >= m_captureData.retryAfter) {
+        requestServerInfo (m_context, m_captureData);
+    }
+    const bool ready = m_captureData.captureStream
+        && pa_stream_get_state (m_captureData.captureStream) == PA_STREAM_READY
+        && pa_stream_is_suspended (m_captureData.captureStream) == 0;
+    const bool clear = m_captureData.clearPublished || !ready
+        || m_captureData.poll.finish (m_worker.delay ());
+    if (clear) {
+        m_destination = {};
+        m_captureData.spectrum.discard ();
+        m_captureData.clearPublished = false;
+        m_worker.publish (m_destination, true);
+    } else if (m_captureData.spectrum.take (m_destination)) {
+        m_worker.publish (m_destination);
+    }
 }
 
 void PulseAudioPlaybackRecorder::update () {
-    // Capture may produce several fragments per rendered frame. One event
-    // dispatch per frame lets unread audio lag increasingly behind playback.
-    for (int dispatch = 0; dispatch < 64; ++dispatch) {
-	if (pa_mainloop_iterate (this->m_mainloop, 0, nullptr) <= 0) break;
+    // Public compatibility arrays and the host scene's filter stay on the
+    // render thread. The capture worker publishes only this private snapshot.
+    const auto snapshot = m_worker.snapshot ();
+    if (snapshot.resetGeneration != m_resetGeneration) {
+        m_published = {};
+        m_resetGeneration = snapshot.resetGeneration;
     }
-    if (m_captureData.refreshRequested && !m_captureData.queryPending
-	&& std::chrono::steady_clock::now () >= m_captureData.retryAfter) {
-	requestServerInfo (m_context, m_captureData);
-    }
-    if (m_captureData.clearPublished) {
-	m_destination = {};
-	m_published = {};
-	m_captureData.clearPublished = false;
-    }
-    if (m_captureData.captureStream
-	&& pa_stream_get_state (m_captureData.captureStream) == PA_STREAM_READY
-	&& pa_stream_is_suspended (m_captureData.captureStream) == 0) {
-	(void) m_captureData.spectrum.take (m_destination);
-    } else {
-	m_destination = {};
-    }
+    const auto& destination = snapshot.bands;
+    std::copy (destination.audio64[0].begin (), destination.audio64[0].end (), this->audio64RawLeft);
+    std::copy (destination.audio64[1].begin (), destination.audio64[1].end (), this->audio64RawRight);
 
-    std::copy (m_destination.audio64[0].begin (), m_destination.audio64[0].end (), this->audio64RawLeft);
-    std::copy (m_destination.audio64[1].begin (), m_destination.audio64[1].end (), this->audio64RawRight);
-
-    StereoSpectrum::advancePublished (m_published, m_destination, 0.3f);
+    StereoSpectrum::advancePublished (m_published, destination, 0.3f);
     for (size_t i = 0; i < 64; ++i) {
 	this->audio64Left[i] = m_published.audio64[0][i];
 	this->audio64Right[i] = m_published.audio64[1][i];

@@ -706,7 +706,8 @@ void WallpaperApplication::setupAudio () {
 
     if (audioProcessingRequired && this->m_context.settings.audio.audioprocessing) {
 	this->m_audioRecorder
-	    = std::make_unique<WallpaperEngine::Audio::Drivers::Recorders::PulseAudioPlaybackRecorder> ();
+	    = std::make_unique<WallpaperEngine::Audio::Drivers::Recorders::PulseAudioPlaybackRecorder> (
+                this->m_context.settings.render.maximumFPS);
     } else {
 	this->m_audioRecorder = std::make_unique<WallpaperEngine::Audio::Drivers::Recorders::PlaybackRecorder> ();
     }

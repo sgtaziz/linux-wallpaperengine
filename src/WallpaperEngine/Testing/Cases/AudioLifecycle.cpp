@@ -7,6 +7,8 @@
 #include "WallpaperEngine/Audio/SoundPlaybackPolicy.h"
 #include "WallpaperEngine/Audio/Drivers/Detectors/AudioPlayingDetector.h"
 #include "WallpaperEngine/Audio/Drivers/Recorders/PlaybackRecorder.h"
+#include "WallpaperEngine/Audio/Drivers/Recorders/CaptureWorker.h"
+#include "WallpaperEngine/Audio/Drivers/Recorders/PulseAudioPlaybackRecorder.h"
 #include "WallpaperEngine/Audio/Drivers/Recorders/NativeSpectrumMapping.h"
 #include "WallpaperEngine/Audio/Drivers/Recorders/NativeSpectrumSmoother.h"
 #include "WallpaperEngine/Audio/Drivers/Recorders/SceneSpectrumState.h"
@@ -30,6 +32,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <limits>
 #include <optional>
 #include <numbers>
@@ -1143,4 +1146,224 @@ TEST_CASE ("Vortex audio settings retain native defaults and authored frequency 
     REQUIRE (vortex->audioProcessingExponent->value->getFloat () == 1.5f);
     REQUIRE (vortex->audioProcessingFrequencyStart->value->getInt () == 4);
     REQUIRE (vortex->audioProcessingFrequencyEnd->value->getInt () == 9);
+}
+
+TEST_CASE ("Capture cadence uses native FPS delay and relative waits after work", "[audio][capture-worker]") {
+    using namespace WallpaperEngine::Audio::Drivers::Recorders;
+    using namespace std::chrono_literals;
+    REQUIRE (nativeCaptureDelay (15) == 33ms);
+    REQUIRE (nativeCaptureDelay (30) == 16ms);
+    REQUIRE (nativeCaptureDelay (60) == 8ms);
+    REQUIRE (nativeCaptureDelay (144) == 6ms);
+    REQUIRE (nativeCaptureDelay (1) == 100ms);
+    REQUIRE (nativeCaptureDelay (29) == 17ms); // floor before halving
+    REQUIRE (nativeCaptureDelay (0) == 100ms);
+    REQUIRE (nativeCaptureDelay (-1) == 6ms);
+
+    std::stop_source stop;
+    std::chrono::milliseconds clock {0};
+    std::vector<std::chrono::milliseconds> starts;
+    runCapturePolling (stop.get_token (), 16ms, [&] {
+        starts.push_back (clock);
+        clock += starts.size () == 1 ? 250ms : 5ms;
+    }, [&] (std::stop_token, auto delay) {
+        clock += delay;
+        if (starts.size () == 3) stop.request_stop ();
+    });
+    REQUIRE (starts == std::vector<std::chrono::milliseconds> {0ms, 266ms, 287ms});
+}
+
+TEST_CASE ("Capture idle and silent packet resets follow original poll boundaries", "[audio][capture-worker]") {
+    using namespace WallpaperEngine::Audio::Drivers::Recorders;
+    using namespace std::chrono_literals;
+    CapturePollState poll;
+    // Native compares the prior counter >1000 before adding configured Sleep.
+    for (int i = 0; i < 63; ++i) {
+        poll.begin ();
+        REQUIRE_FALSE (poll.finish (16ms));
+    }
+    poll.begin ();
+    REQUIRE (poll.finish (16ms));
+    poll.begin ();
+    poll.packet (false); // receiving any packet resets idle accumulation
+    REQUIRE_FALSE (poll.finish (16ms));
+    poll.begin ();
+    REQUIRE_FALSE (poll.finish (16ms));
+    poll.begin ();
+    poll.packet (true);
+    REQUIRE (poll.finish (16ms));
+    poll.begin ();
+    poll.packet (true);
+    poll.packet (false); // last normal packet clears native silent reset
+    REQUIRE_FALSE (poll.finish (16ms));
+    poll.begin ();
+    poll.packet (false);
+    poll.packet (true);
+    REQUIRE (poll.finish (16ms));
+    poll.begin ();
+    poll.failed ();
+    poll.packet (false); // a capture API error still overrides normal data
+    REQUIRE (poll.finish (16ms));
+
+    // A 100ms cadence reaches exactly 1000 on poll10 and adds once more at
+    // equality; the reset is poll12, proving the strict comparison.
+    poll.reset ();
+    for (int i = 0; i < 11; ++i) { poll.begin (); REQUIRE_FALSE (poll.finish (100ms)); }
+    poll.begin ();
+    REQUIRE (poll.finish (100ms));
+}
+
+TEST_CASE ("Capture polls retain prefixes and discard complete released packet excess", "[audio][capture-worker]") {
+    using namespace WallpaperEngine::Audio::Drivers::Recorders;
+    using namespace std::chrono_literals;
+    StereoSpectrum spectrum (48000);
+    StereoSpectrum reference (48000);
+    CapturePollState poll;
+    StereoSpectrum::Bands bands {};
+    std::vector<float> first (spectrum.captureSamples () * 2, 0.0f);
+    for (size_t i = 0; i < spectrum.captureSamples (); ++i)
+        first[i * 2] = 0.1f * std::sin (2.0f * std::numbers::pi_v<float> * 320.0f * i / 48000.0f);
+    std::vector<float> excess (first.size (), 0.75f);
+    const auto* bytes = reinterpret_cast<const uint8_t*> (first.data ());
+    const size_t half = spectrum.captureBytes () / 2;
+    poll.begin ();
+    poll.packet (false);
+    spectrum.feed (bytes, half);
+    REQUIRE_FALSE (poll.finish (16ms));
+    REQUIRE_FALSE (spectrum.take (bands));
+    // No packet poll leaves the prefix intact rather than inserting silence.
+    poll.begin ();
+    REQUIRE_FALSE (poll.finish (16ms));
+    REQUIRE_FALSE (spectrum.take (bands));
+    poll.begin ();
+    poll.packet (false);
+    std::vector<uint8_t> crossing (bytes + half, bytes + spectrum.captureBytes ());
+    crossing.insert (crossing.end (), reinterpret_cast<const uint8_t*> (excess.data ()),
+                     reinterpret_cast<const uint8_t*> (excess.data ()) + spectrum.captureBytes ());
+    spectrum.feed (crossing.data (), crossing.size ());
+    poll.packet (false);
+    spectrum.feed (reinterpret_cast<const uint8_t*> (excess.data ()), spectrum.captureBytes ());
+    REQUIRE_FALSE (poll.finish (16ms));
+    REQUIRE (spectrum.take (bands));
+    StereoSpectrum::Bands expected {};
+    reference.feed (bytes, spectrum.captureBytes ());
+    REQUIRE (reference.take (expected));
+    REQUIRE (bands.audio64 == expected.audio64);
+    // Excess from either packet was released; the next prefix needs all bytes.
+    spectrum.feed (bytes, half);
+    REQUIRE_FALSE (spectrum.take (bands));
+    spectrum.discard (); // native reset discards a partial prefix and raw bank
+    REQUIRE_FALSE (spectrum.take (bands));
+    spectrum.feed (bytes, half);
+    REQUIRE_FALSE (spectrum.take (bands));
+    spectrum.feed (bytes + half, half);
+    REQUIRE (spectrum.take (bands));
+    REQUIRE (bands.audio64 == expected.audio64);
+}
+
+TEST_CASE ("Capture worker owns callbacks and cleans up initialization failure", "[audio][capture-worker][lifecycle]") {
+    using namespace WallpaperEngine::Audio::Drivers::Recorders;
+    using namespace std::chrono_literals;
+    CaptureWorker worker (1);
+    const auto caller = std::this_thread::get_id ();
+    std::thread::id initialized, polled, cleaned;
+    std::promise<void> firstPoll;
+    worker.start ([&] (std::stop_token) { initialized = std::this_thread::get_id (); }, [&] {
+        polled = std::this_thread::get_id ();
+        firstPoll.set_value ();
+    }, [&] { cleaned = std::this_thread::get_id (); }, [] (std::exception_ptr) {});
+    REQUIRE (firstPoll.get_future ().wait_for (1s) == std::future_status::ready);
+    const auto stopping = std::chrono::steady_clock::now ();
+    worker.stop ();
+    REQUIRE (std::chrono::steady_clock::now () - stopping < 500ms);
+    REQUIRE (initialized != caller);
+    REQUIRE (initialized == polled);
+    REQUIRE (initialized == cleaned);
+    worker.stop (); // repeated stop is harmless
+
+    CaptureWorker failing (30);
+    bool reported = false;
+    bool cleanup = false;
+    bool ranPoll = false;
+    std::promise<void> finished;
+    failing.start ([] (std::stop_token) { throw std::runtime_error ("controlled initialization failure"); },
+                   [&] { ranPoll = true; }, [&] { cleanup = true; finished.set_value (); },
+                   [&] (std::exception_ptr) { reported = true; });
+    REQUIRE (finished.get_future ().wait_for (1s) == std::future_status::ready);
+    failing.stop ();
+    REQUIRE (reported);
+    REQUIRE (cleanup);
+    REQUIRE_FALSE (ranPoll);
+}
+
+TEST_CASE ("Capture keeps publishing without render updates and hands off untorn banks", "[audio][capture-worker][lifecycle]") {
+    using namespace WallpaperEngine::Audio::Drivers::Recorders;
+    using namespace std::chrono_literals;
+    CaptureWorker worker (144);
+    std::promise<void> captured;
+    unsigned generation = 0;
+    worker.start ([] (std::stop_token) {}, [&] {
+        StereoSpectrum::Bands bands {};
+        ++generation;
+        for (auto& channel : bands.audio64) channel.fill (static_cast<float> (generation));
+        bands = StereoSpectrum::from64 (bands.audio64[0], bands.audio64[1]);
+        worker.publish (bands, generation == 1);
+        if (generation == 4) captured.set_value ();
+    }, [] {}, [] (std::exception_ptr) {});
+    // No frame/snapshot calls occur while four capture polls complete.
+    REQUIRE (captured.get_future ().wait_for (1s) == std::future_status::ready);
+    bool untorn = true;
+    for (int read = 0; read < 5000; ++read) {
+        const auto snapshot = worker.snapshot ();
+        const float value = snapshot.bands.audio64[0][0];
+        for (const auto& channel : snapshot.bands.audio64)
+            for (float band : channel) untorn &= band == value;
+        for (float band : snapshot.bands.combined16) untorn &= band == value;
+        untorn &= snapshot.resetGeneration == 1;
+    }
+    worker.stop ();
+    REQUIRE (untorn);
+    REQUIRE (worker.snapshot ().bands.audio64[0][0] >= 4.0f);
+}
+
+TEST_CASE ("Capture destruction waits for its active callback before owner cleanup", "[audio][capture-worker][lifecycle]") {
+    using namespace WallpaperEngine::Audio::Drivers::Recorders;
+    using namespace std::chrono_literals;
+    std::promise<void> entered, release;
+    auto released = release.get_future ().share ();
+    std::atomic_bool cleaned = false;
+    auto worker = std::make_unique<CaptureWorker> (30);
+    worker->start ([] (std::stop_token) {}, [&] { entered.set_value (); released.wait (); },
+                  [&] { cleaned = true; }, [] (std::exception_ptr) {});
+    REQUIRE (entered.get_future ().wait_for (1s) == std::future_status::ready);
+    auto destroyed = std::async (std::launch::async, [&] { worker.reset (); });
+    const bool stillOwned = !cleaned.load ();
+    release.set_value ();
+    REQUIRE (destroyed.wait_for (1s) == std::future_status::ready);
+    REQUIRE (stillOwned);
+    REQUIRE (cleaned.load ());
+}
+
+TEST_CASE ("Pulse capture wiring survives an absent server and rapid destruction", "[audio][capture-worker][lifecycle]") {
+    using WallpaperEngine::Audio::Drivers::Recorders::PulseAudioPlaybackRecorder;
+    std::optional<std::string> previous;
+    if (const char* value = std::getenv ("PULSE_SERVER")) previous = value;
+    struct RestoreServer {
+        std::optional<std::string>& previous;
+        ~RestoreServer () {
+            if (previous) setenv ("PULSE_SERVER", previous->c_str (), 1);
+            else unsetenv ("PULSE_SERVER");
+        }
+    } restore {previous};
+    setenv ("PULSE_SERVER", "unix:/tmp/wallpaperengine-controlled-absent-pulse-server", 1);
+    const auto start = std::chrono::steady_clock::now ();
+    for (int lifetime = 0; lifetime < 10; ++lifetime) {
+        PulseAudioPlaybackRecorder recorder (30);
+        recorder.update ();
+        REQUIRE (std::all_of (std::begin (recorder.audio64RawLeft), std::end (recorder.audio64RawLeft),
+                             [] (float value) { return value == 0.0f; }));
+        REQUIRE (std::all_of (std::begin (recorder.audio64RawRight), std::end (recorder.audio64RawRight),
+                             [] (float value) { return value == 0.0f; }));
+    }
+    REQUIRE (std::chrono::steady_clock::now () - start < std::chrono::seconds (2));
 }
