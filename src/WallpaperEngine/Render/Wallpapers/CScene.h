@@ -62,6 +62,8 @@ public:
                                                    const glm::vec2& depth) const;
 
     [[nodiscard]] const std::vector<CObject*>& getObjectsByRenderOrder () const;
+    /** Public layer order excludes removals immediately; physical deletion waits for callback completion. */
+    [[nodiscard]] std::vector<CObject*> getScriptLayers () const;
     [[nodiscard]] std::mt19937& getParticleRandom ();
     [[nodiscard]] const CObject* getObject (int id) const;
     [[nodiscard]] int getPointLightCount () const;

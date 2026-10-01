@@ -46,6 +46,8 @@ struct ObjectData {
     UserSettingUniquePtr groupScale;
     UserSettingUniquePtr groupAngles;
     UserSettingUniquePtr groupVisible;
+    /** Detached authored configuration for SceneScript cloning; excludes only the layer ID. */
+    std::string initialConfiguration;
 };
 
 /**

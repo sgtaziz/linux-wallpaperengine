@@ -187,3 +187,52 @@ TEST_CASE ("Invalid dependency branches leave unrelated scene objects available"
     REQUIRE (report.rejected.at (3).find ("invalid object 2") != std::string::npos);
     REQUIRE (report.rejected.at (6).find ("cycle") != std::string::npos);
 }
+
+TEST_CASE ("SceneScript initial configuration survives live edits and excludes only the layer ID", "[scene][parser][script]") {
+    using WallpaperEngine::Data::JSON::JSON;
+    using WallpaperEngine::Data::Model::Project;
+    using WallpaperEngine::Data::Parsers::ObjectParser;
+    Project project {};
+    auto authored = JSON::parse (R"({"id":17,"name":"source","origin":"120 480 0",
+        "scale":"1 1 1","angles":"0 0 0","visible":true,
+        "custom":{"deep":[7,{"answer":42}]},
+        "effects":[{"id":201,"passes":[{"constantshadervalues":{"color":"0.2 0.6 0.9"}}]}]})");
+    auto parsed = ObjectParser::parse (authored, project);
+    parsed->origin->value->update (glm::vec3 (400.0f, 420.0f, 0.0f),
+        WallpaperEngine::Data::Model::DynamicValue::Script);
+    parsed->groupVisible->value->update (false, WallpaperEngine::Data::Model::DynamicValue::Script);
+    authored["custom"]["deep"][1]["answer"] = 99;
+    auto initial = JSON::parse (parsed->initialConfiguration);
+    REQUIRE_FALSE (initial.contains ("id"));
+    REQUIRE (initial["name"] == "source");
+    REQUIRE (initial["origin"] == "120 480 0");
+    REQUIRE (initial["visible"] == true);
+    REQUIRE (initial["custom"]["deep"][1]["answer"] == 42);
+    REQUIRE (initial["effects"][0]["id"] == 201);
+    initial["effects"][0]["passes"][0]["constantshadervalues"]["color"] = "0 1 0";
+    REQUIRE (JSON::parse (parsed->initialConfiguration)["effects"][0]["passes"][0]
+        ["constantshadervalues"]["color"] == "0.2 0.6 0.9");
+    REQUIRE (parsed->origin->value->getVec3 () == glm::vec3 (400.0f, 420.0f, 0.0f));
+}
+
+TEST_CASE ("SceneScript cloned configuration preserves nested IDs without colliding with its source", "[scene][parser][script]") {
+    using WallpaperEngine::Data::JSON::JSON;
+    using WallpaperEngine::Data::Model::Project;
+    using WallpaperEngine::Data::Parsers::ObjectParser;
+    Project project {};
+    auto source = ObjectParser::parse (JSON::parse (R"({"id":17,"name":"source",
+        "origin":"120 480 0","custom":{"id":91,"children":[{"id":92}]}})"), project);
+    auto cloneConfig = JSON::parse (source->initialConfiguration);
+    cloneConfig["id"] = 1000;
+    cloneConfig["name"] = "cloned";
+    auto clone = ObjectParser::parse (cloneConfig, project);
+    REQUIRE (source->id == 17);
+    REQUIRE (clone->id == 1000);
+    const auto cloneInitial = JSON::parse (clone->initialConfiguration);
+    REQUIRE_FALSE (cloneInitial.contains ("id"));
+    REQUIRE (cloneInitial["name"] == "cloned");
+    REQUIRE (cloneInitial["origin"] == "120 480 0");
+    REQUIRE (cloneInitial["custom"]["id"] == 91);
+    REQUIRE (cloneInitial["custom"]["children"][0]["id"] == 92);
+    REQUIRE (JSON::parse (source->initialConfiguration)["name"] == "source");
+}

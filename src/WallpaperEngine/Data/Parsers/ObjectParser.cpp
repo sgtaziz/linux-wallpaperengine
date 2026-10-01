@@ -150,6 +150,10 @@ ObjectUniquePtr ObjectParser::parse (const JSON& it, const Project& project) {
 	};
     }
 
+    auto initialConfiguration = it;
+    initialConfiguration.erase ("id");
+    basedata.initialConfiguration = initialConfiguration.dump ();
+
     for (const auto& dependency : basedata.typedDependencies) {
 	if (dependency.type == "emitterimage") continue;
 	sLog.error ("Typed scene dependency is not bound at runtime: object_id=", basedata.id,
