@@ -4,6 +4,7 @@
 #include "WallpaperEngine/Render/Objects/TextCodepoints.h"
 #include "WallpaperEngine/Render/Objects/TextRaster.h"
 #include "WallpaperEngine/Render/Objects/TextShaping.h"
+#include "WallpaperEngine/Render/Objects/TextLayout.h"
 
 #include <filesystem>
 #include <algorithm>
@@ -15,6 +16,103 @@ using WallpaperEngine::Render::Objects::compositeTextRgba;
 using WallpaperEngine::Render::Objects::compositeTextOffscreenRgba;
 using WallpaperEngine::Render::Objects::shapeTextRun;
 using WallpaperEngine::Render::Objects::shapeTextRow;
+using WallpaperEngine::Render::Objects::TextLayoutRange;
+using WallpaperEngine::Render::Objects::textGlyphPixelBounds;
+using WallpaperEngine::Render::Objects::textRowAlignmentOffset;
+using WallpaperEngine::Render::Objects::textHorizontalAnchorOffset;
+using WallpaperEngine::Render::Objects::textVerticalAnchorOffset;
+
+TEST_CASE ("Text anchors recover the raw baseline across different ink and raster extents", "[text][layout]") {
+    const float ascender = 48, descender = -12, lineHeight = 60;
+    // H-like ink above the baseline and g-like ink with a descender must
+    // share one metric anchor; neither ink center is the native center.
+    for (const auto [originY, height] : {std::pair {-36.0f, 36.0f}, std::pair {-27.0f, 38.0f},
+                                       std::pair {-48.0f, 120.0f}}) {
+        const float rasterCenterUp = -(originY + height * .5f);
+        for (int rows : {1, 2}) {
+            const float preceding = (rows - 1) * lineHeight;
+            for (const auto alignment : {"top", "center", "bottom"}) {
+                const float offset = textVerticalAnchorOffset (rasterCenterUp, ascender, descender,
+                                                               rows, lineHeight, alignment);
+                const float baselineInCenteredRaster = -rasterCenterUp;
+                const float expected = alignment == std::string_view ("top") ? -ascender
+                    : alignment == std::string_view ("bottom") ? -descender + preceding
+                    : (-ascender + preceding) * .5f;
+                REQUIRE (baselineInCenteredRaster + offset == expected);
+                // Moving to another row retains the native negative-up
+                // line advance, including overlapping/reverse-order rows.
+                REQUIRE (baselineInCenteredRaster - lineHeight + offset == expected - lineHeight);
+            }
+        }
+    }
+    REQUIRE (textVerticalAnchorOffset (0, 48, -12, 3, -10, "center") == -34);
+}
+
+TEST_CASE ("Unequal text rows align their positioned glyph bounds independently of advance", "[text][layout]") {
+    const TextLayoutRange wide {-2, 78}, narrow {0, 26};
+    for (const auto alignment : {"left", "center", "right"}) {
+        const float wideShift = textRowAlignmentOffset (wide.width (), wide.width (), alignment);
+        const float narrowShift = textRowAlignmentOffset (narrow.width (), wide.width (), alignment);
+        REQUIRE (wideShift == 0);
+        REQUIRE (narrowShift == (alignment == std::string_view ("left") ? 0.0f
+            : alignment == std::string_view ("right") ? 54.0f : 27.0f));
+        TextLayoutRange layout;
+        layout.include (wide.min, wide.max);
+        layout.include (narrow.min, narrow.max);
+        REQUIRE (layout.width () == 80);
+        if (alignment == std::string_view ("right")) {
+            // Recomputing global bounds after moving rows would incorrectly
+            // expand this layout to 82 and shift the right anchor by two.
+            REQUIRE (narrow.max + narrowShift > layout.max);
+        }
+        // Raster widths may retain extra logical space after the ink. The
+        // native positioned glyph anchor must not move with that margin.
+        for (const float rasterCenter : {40.0f, 50.0f}) {
+            const float offset = textHorizontalAnchorOffset (rasterCenter, layout, alignment);
+            const float rawGlyph = 5.0f;
+            const float expected = alignment == std::string_view ("left") ? 7.0f
+                : alignment == std::string_view ("right") ? -73.0f : -33.0f;
+            REQUIRE (rawGlyph - rasterCenter + offset == expected);
+        }
+    }
+}
+
+TEST_CASE ("FreeType text layout uses pixel glyph boxes without the final pen advance", "[text][layout]") {
+    const char* font = nullptr;
+    for (const auto* candidate : {"/usr/share/fonts/TTF/DejaVuSans.ttf",
+                                  "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"}) {
+        if (std::filesystem::exists (candidate)) { font = candidate; break; }
+    }
+    REQUIRE (font != nullptr);
+    FT_Library library = nullptr;
+    REQUIRE (FT_Init_FreeType (&library) == 0);
+    FT_Face face = nullptr;
+    REQUIRE (FT_New_Face (library, font, 0, &face) == 0);
+    REQUIRE (FT_Set_Char_Size (face, 0, 12 * 64, 300, 300) == 0);
+    const std::vector<char32_t> row {'H', 'H', 'H'};
+    const auto shaped = shapeTextRun (face, row);
+    TextLayoutRange bounds;
+    float advance = 0;
+    for (const auto& glyph : shaped.glyphs) {
+        FT_BBox box {};
+        REQUIRE (textGlyphPixelBounds (face, glyph.glyphIndex, box));
+        bounds.include (advance + (glyph.xOffset26_6 >> 6) + box.xMin,
+                        advance + (glyph.xOffset26_6 >> 6) + box.xMax);
+        advance += glyph.xAdvance26_6 >> 6;
+    }
+    REQUIRE (bounds.min == 0);
+    REQUIRE (bounds.max > 0);
+    REQUIRE (bounds.max < advance);
+    FT_BBox descender {};
+    REQUIRE (textGlyphPixelBounds (face, FT_Get_Char_Index (face, 'g'), descender));
+    REQUIRE (descender.yMin < 0);
+    REQUIRE (descender.yMax > 0);
+    FT_BBox negativeBearing {};
+    REQUIRE (textGlyphPixelBounds (face, FT_Get_Char_Index (face, 'j'), negativeBearing));
+    REQUIRE (negativeBearing.xMin < 0);
+    FT_Done_Face (face);
+    FT_Done_FreeType (library);
+}
 
 TEST_CASE ("HDR monochrome RGB survives coverage while brightness leaves alpha independent", "[text][raster][hdr]") {
     float bright[] {0, 0, 0, 0}, dark[] {0, 0, 0, 0};
