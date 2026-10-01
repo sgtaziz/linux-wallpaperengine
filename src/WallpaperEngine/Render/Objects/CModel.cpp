@@ -3,6 +3,7 @@
 #include "CRenderable.h"
 #include "ModelNormalMatrix.h"
 #include "PuppetMeshParser.h"
+#include "StaticModelTail.h"
 #include "WallpaperEngine/Data/Parsers/MaterialParser.h"
 #include "WallpaperEngine/Render/Objects/Effects/CPass.h"
 #include "WallpaperEngine/Render/Wallpapers/SceneTransform.h"
@@ -203,8 +204,8 @@ void CModel::setup () {
     const auto stream = getAssetLocator ().read (m_model.path);
     std::vector<char> data {std::istreambuf_iterator<char> (*stream), std::istreambuf_iterator<char> ()};
     const auto meshes = parsePuppetMeshes ({reinterpret_cast<const uint8_t*> (data.data ()), data.size ()});
-    const bool terminalNul = meshes.sectionEndOffset + 1 == data.size () && data.back () == '\0';
-    if (meshes.sectionEndOffset != data.size () && !terminalNul)
+    if (!staticModelHasOnlyPadding (
+            {reinterpret_cast<const uint8_t*> (data.data ()), data.size ()}, meshes.sectionEndOffset))
         throw std::runtime_error ("Static MDLV has unsupported skeletal or tail sections");
     m_materials.reserve (meshes.meshes.size ());
     m_meshes.reserve (meshes.meshes.size ());
