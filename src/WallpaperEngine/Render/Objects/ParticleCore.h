@@ -766,6 +766,12 @@ struct ScalarRemapRange {
 enum class RemapOperation { Set, Multiply, Add, Subtract };
 enum class RemapVectorComponent { All, X, Y, Z, Sum, Average, Max, Min };
 
+inline float remapBirthControlPointClamp01 (float value) {
+    // 1401d8360 MAXSS/MINSS use value as the second operand, retaining NaN
+    // and signed zero. Its decompiled conditional NaN-to-zero is inaccurate.
+    return value < 0.0f ? 0.0f : value > 1.0f ? 1.0f : value;
+}
+
 inline float reduceRemapVector (float x, float y, float z,
                                 RemapVectorComponent component) {
     switch (component) {
@@ -779,6 +785,15 @@ inline float reduceRemapVector (float x, float y, float z,
     case RemapVectorComponent::Min: return std::min (std::min (x, y), z);
     }
     return x;
+}
+
+inline float reduceBirthControlPointVector (float x, float y, float z,
+                                            RemapVectorComponent component) {
+    // 14023d605..63f reduces Y/Z first, then X; MAXSS/MINSS helpers
+    // choose the first argument for equal/unordered operands.
+    if (component == RemapVectorComponent::Max) return std::max (x, std::max (y, z));
+    if (component == RemapVectorComponent::Min) return std::min (x, std::min (y, z));
+    return reduceRemapVector (x, y, z, component);
 }
 
 inline float remapVectorInput (glm::vec3 value, RemapVectorComponent component,
@@ -830,17 +845,26 @@ inline float gatedAngularSpeed (float angularSpeedZ, bool hasRotationRandom,
 inline float remapScalarValue (float currentValue, float inputValue,
                                float normalizedAge, RemapOperation operation,
                                std::optional<BlendEnvelope> envelope = std::nullopt,
-                               ScalarRemapRange range = {}) {
-    if (!std::isfinite (currentValue) || !std::isfinite (inputValue)
+                               ScalarRemapRange range = {},
+                               bool birthControlPointIEEE = false) {
+    // Only birth CP inputs 16..18 use native unchecked IEEE arithmetic.
+    // Keep the existing finite policy for every other birth/runtime path.
+    if (!birthControlPointIEEE && (!std::isfinite (currentValue) || !std::isfinite (inputValue)
         || !std::isfinite (normalizedAge)
         || !std::isfinite (range.inputMin) || !std::isfinite (range.inputMax)
         || !std::isfinite (range.outputMin) || !std::isfinite (range.outputMax)
-        || !std::isfinite (range.transformScale))
+        || !std::isfinite (range.transformScale)))
         return currentValue;
     const float span = range.inputMax - range.inputMin;
     const float safeSpan = span == 0.0f ? 0x1p-23f : span;
     float normalized = (inputValue - range.inputMin) / safeSpan;
-    if ((range.flags & 1) != 0) normalized = std::clamp (normalized, 0.0f, 1.0f);
+    if ((range.flags & 1) != 0) normalized = birthControlPointIEEE
+        ? remapBirthControlPointClamp01 (normalized) : std::clamp (normalized, 0.0f, 1.0f);
+    // Native nonfinite noise lattice conversion is not recovered. Preserve
+    // the safe evaluation guard after the consequential birth CP mutation.
+    if (birthControlPointIEEE
+        && (range.transform == RemapTransform::SimplexNoise || range.transform == RemapTransform::FBMNoise)
+        && !std::isfinite (normalized * range.transformScale)) return currentValue;
     if (range.transform == RemapTransform::Sine) {
         const float packedScale = range.transformScale * 3.1415927f;
         normalized = (std::sin (normalized * packedScale - 1.5707964f) + 1.0f) * 0.5f;
@@ -849,8 +873,9 @@ inline float remapScalarValue (float currentValue, float inputValue,
         const float fraction = scaled - std::trunc (scaled);
         // Native ROUNDPS immediate 8 rounds the fraction to nearest-even,
         // independent of the process floating-point rounding mode.
-        normalized = (fraction > 0.5f ? 1.0f : fraction < -0.5f ? -1.0f : 0.0f)
-                   + (scaled < 0.0f ? 1.0f : 0.0f);
+        normalized = birthControlPointIEEE && !std::isfinite (fraction) ? fraction
+            : (fraction > 0.5f ? 1.0f : fraction < -0.5f ? -1.0f : 0.0f)
+                + (scaled < 0.0f ? 1.0f : 0.0f);
     } else if (range.transform == RemapTransform::Saw) {
         const float scaled = normalized * range.transformScale;
         normalized = scaled - std::trunc (scaled)
@@ -866,7 +891,8 @@ inline float remapScalarValue (float currentValue, float inputValue,
             normalized * range.transformScale, range.noiseOctaves) * 0.5f + 0.5f;
     }
     float mapped = range.outputMin + normalized * (range.outputMax - range.outputMin);
-    if ((range.flags & 2) != 0) mapped = std::clamp (mapped, 0.0f, 1.0f);
+    if ((range.flags & 2) != 0) mapped = birthControlPointIEEE
+        ? remapBirthControlPointClamp01 (mapped) : std::clamp (mapped, 0.0f, 1.0f);
     float target = currentValue;
     switch (operation) {
     case RemapOperation::Set: target = mapped; break;
@@ -890,13 +916,19 @@ inline float remapScalarMultiply (float currentValue, float inputValue,
 // rotationrandom alone allocates only bit 1 (native 1401c5490).
 inline float remapBirthAngularSpeed (float current, float input, RemapOperation operation,
                                     ScalarRemapRange range, bool angularVelocityRandom,
-                                    bool angularMovement) {
+                                    bool angularMovement, bool birthControlPointIEEE = false) {
     if (!(angularVelocityRandom || angularMovement)) return current;
-    return remapScalarValue (current, input, 0.0f, operation, std::nullopt, range);
+    return remapScalarValue (current, input, 0.0f, operation, std::nullopt, range,
+                             birthControlPointIEEE);
 }
 
-inline glm::vec3 remapSpeedOutput (glm::vec3 velocity, float mappedSpeed) {
+inline glm::vec3 remapSpeedOutput (glm::vec3 velocity, float mappedSpeed,
+                                  bool birthControlPointIEEE = false) {
     const float currentSpeed = glm::length (velocity);
+    // Birth output 4 divides only for nonzero current speed; both branches
+    // multiply every component, retaining 0*NaN and other IEEE outcomes.
+    if (birthControlPointIEEE)
+        return velocity * (currentSpeed != 0.0f ? mappedSpeed / currentSpeed : mappedSpeed);
     return currentSpeed > 0.0f && std::isfinite (currentSpeed)
         && std::isfinite (mappedSpeed)
         ? velocity * (mappedSpeed / currentSpeed) : velocity;
@@ -912,7 +944,8 @@ inline glm::vec3 remapVectorValue (glm::vec3 current, glm::vec3 input,
                                     float transformScale = 2.0f,
                                     uint32_t noiseSeedBits = 0u,
                                     bool vectorNoiseInput = false,
-                                    int noiseOctaves = 3) {
+                                    int noiseOctaves = 3,
+                                    bool birthControlPointIEEE = false) {
     for (int axis = 0; axis < 3; ++axis) {
         if (outputComponent != 0 && outputComponent != axis + 1) continue;
         uint32_t axisSeed = noiseSeedBits;
@@ -926,7 +959,7 @@ inline glm::vec3 remapVectorValue (glm::vec3 current, glm::vec3 input,
             operation, envelope, ScalarRemapRange { inputMin[axis], inputMax[axis],
                                                     outputMin[axis], outputMax[axis], flags,
                                                     transform, transformScale, axisSeed,
-                                                    noiseOctaves });
+                                                    noiseOctaves }, birthControlPointIEEE);
     }
     return current;
 }

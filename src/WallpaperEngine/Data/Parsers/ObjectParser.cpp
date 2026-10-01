@@ -1264,10 +1264,6 @@ ParticleOperatorUniquePtr ObjectParser::parseParticleOperator (
 	const int outputControlPoint = controlPointOutput ? static_cast<int> (std::min (
 	    static_cast<uint32_t> (it.optional<int> ("outputcontrolpoint0", 0)), 7u)) : 0;
 	const auto input = it.optional<std::string> ("input", "lifetimefraction");
-	// Native birth inputs 16..18 overwrite their source CP before mapping.
-	// Do not expose those unrepresented mutations through the new CP output mode.
-	if (controlPointOutput && (input == "controlpoint" || input == "deltatocontrolpoint"
-	    || input == "directiontocontrolpoint")) return nullptr;
 	const auto inputComponent = it.optional<std::string> ("inputcomponent", "all");
 	const auto operation = it.optional<std::string> ("operation", "multiply");
 	const bool controlPointInput = input == "distancetocontrolpoint"

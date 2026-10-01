@@ -223,16 +223,19 @@ TEST_CASE ("Birth CP output bounds literal targets while runtime and unsupported
     ]}})");
     const auto object = ObjectParser::parse (data, project);
     const auto& particle = *object->as<Particle> ();
-    REQUIRE (particle.initializers.size () == 3);
-    const std::array<int, 3> targets { 0, 7, 7 };
+    REQUIRE (particle.initializers.size () == 6);
+    const std::array<int, 6> targets { 0, 7, 7, 2, 3, 4 };
     for (size_t index = 0; index < targets.size (); ++index) {
         const auto& remap = *particle.initializers[index]->as<RemapInitialValueInitializer> ()
             ->remap->as<VectorRemapValueOperator> ();
         REQUIRE (remap.outputControlPoint0 == targets[index]);
     }
-    REQUIRE (particle.controlPoints.size () == 2); // rejected input mutation does not claim ownership
+    REQUIRE (particle.controlPoints.size () == 5); // rejected ranges/targets do not claim ownership
     REQUIRE (particle.controlPoints[0].id == 0);
     REQUIRE (particle.controlPoints[1].id == 7);
+    REQUIRE (particle.controlPoints[2].id == 2);
+    REQUIRE (particle.controlPoints[3].id == 3);
+    REQUIRE (particle.controlPoints[4].id == 4);
     REQUIRE (particle.operators.size () == 1);
     REQUIRE (particle.operators[0]->as<VectorRemapValueOperator> ()->output
         == VectorRemapValueOperator::Output::Position);
