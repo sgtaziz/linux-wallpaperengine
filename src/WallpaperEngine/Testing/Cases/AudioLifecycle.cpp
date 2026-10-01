@@ -895,33 +895,38 @@ TEST_CASE ("Production complex analyzer places an exact-bin tone at its numeric 
 TEST_CASE ("Per-scene native spectrum filter retains independent histories before reduction", "[audio][spectrum]") {
     using WallpaperEngine::Audio::Drivers::Recorders::NativeSpectrumSmoother;
     using WallpaperEngine::Audio::Drivers::Recorders::StereoSpectrum;
+#if defined(__SSE__)
+    constexpr float normalizedUnity = 0.999755859375f; // Native RCPPS(1).
+#else
+    constexpr float normalizedUnity = 1.0f;
+#endif
     NativeSpectrumSmoother firstScene;
     StereoSpectrum::Bands raw {};
     raw.audio64[0][0] = 1.0f;
     auto first = firstScene.update (raw, 0.01f, 1.0f, 1.0f);
-    REQUIRE (std::abs (first.audio64[0][0] - 0.2f) < 0.000001f);
+    REQUIRE (std::abs (first.audio64[0][0] - 0.2f * normalizedUnity) < 0.000001f);
     REQUIRE (first.audio64[1][0] == 0.0f);
-    REQUIRE (std::abs (first.combined32[0] - 0.1f) < 0.000001f);
+    REQUIRE (std::abs (first.combined32[0] - 0.1f * normalizedUnity) < 0.000001f);
 
     raw.audio64[0][0] = 0.0f;
     raw.audio64[0][1] = 1.0f;
     const auto crossed = firstScene.update (raw, 0.01f, 1.0f, 1.0f);
-    REQUIRE (std::abs (crossed.audio64[0][0] - 0.16f) < 0.000001f);
-    REQUIRE (std::abs (crossed.audio64[0][1] - 0.2f) < 0.000001f);
-    REQUIRE (std::abs (crossed.audio32[0][0] - 0.2f) < 0.000001f);
-    REQUIRE (std::abs (crossed.combined32[0] - 0.1f) < 0.000001f);
+    REQUIRE (std::abs (crossed.audio64[0][0] - 0.16f * normalizedUnity) < 0.000001f);
+    REQUIRE (std::abs (crossed.audio64[0][1] - 0.2f * normalizedUnity) < 0.000001f);
+    REQUIRE (std::abs (crossed.audio32[0][0] - 0.2f * normalizedUnity) < 0.000001f);
+    REQUIRE (std::abs (crossed.combined32[0] - 0.1f * normalizedUnity) < 0.000001f);
 
     NativeSpectrumSmoother secondScene;
     StereoSpectrum::Bands otherRaw {};
     otherRaw.audio64[1][7] = 1.0f;
     const auto second = secondScene.update (otherRaw, 0.01f, 0.5f, 1.0f);
     REQUIRE (second.audio64[0][0] == 0.0f);
-    REQUIRE (std::abs (second.audio64[1][7] - 0.1f) < 0.000001f);
+    REQUIRE (std::abs (second.audio64[1][7] - 0.1f * normalizedUnity) < 0.000001f);
     const auto silent = firstScene.update (StereoSpectrum::Bands {}, 0.01f, 1.0f, 1.0f);
     REQUIRE (silent.audio64[0][0] == 0.0f);
     REQUIRE (silent.audio64[0][1] == 0.0f);
     const auto resumed = firstScene.update (raw, 0.01f, 1.0f, 1.0f);
-    REQUIRE (std::abs (resumed.audio64[0][1] - 0.36f) < 0.000001f);
+    REQUIRE (std::abs (resumed.audio64[0][1] - 0.36f * normalizedUnity) < 0.000001f);
 
     NativeSpectrumSmoother normalizedScene;
     StereoSpectrum::Bands loud {};
@@ -934,9 +939,59 @@ TEST_CASE ("Per-scene native spectrum filter retains independent histories befor
     REQUIRE (normalized.audio64[0][0] < 0.4f);
 }
 
+#if defined(__SSE__)
+TEST_CASE ("Native spectrum normalization preserves reciprocal estimate through history", "[audio][spectrum][native-rcp]") {
+    using WallpaperEngine::Audio::Drivers::Recorders::NativeSpectrumSmoother;
+    using WallpaperEngine::Audio::Drivers::Recorders::StereoSpectrum;
+    // Original v2.8.42 bytes at 0x1401122d2 (RCPPS) and
+    // 0x14011246f..0x14011247b (MULPS/SUBPS/MULPS/ADDPS), executed
+    // independently with controlled registers and the native 0.01*20 step.
+    // These words discriminate DIV even when the coefficient is exactly one.
+    NativeSpectrumSmoother scene;
+    StereoSpectrum::Bands raw {};
+    raw.audio64[0][0] = 1.0f;
+    const auto activated = scene.update (raw, 0.01f, 1.0f, 1.0f);
+    REQUIRE (std::bit_cast<uint32_t> (activated.audio64[0][0]) == 1045217279u);
+    REQUIRE (activated.audio64[1][0] == 0.0f);
+
+    // Keep the group's peak at one while the former band decays.
+    raw.audio64[0][0] = 0.0f;
+    raw.audio64[0][1] = 1.0f;
+    const auto crossed = scene.update (raw, 0.01f, 1.0f, 1.0f);
+    REQUIRE (std::bit_cast<uint32_t> (crossed.audio64[0][0]) == 1042533580u);
+    REQUIRE (std::bit_cast<uint32_t> (crossed.audio64[0][1]) == 1045217279u);
+    REQUIRE (std::bit_cast<uint32_t> (crossed.audio32[0][0]) == 1045217279u);
+
+    REQUIRE (scene.update ({}, 0.01f, 1.0f, 1.0f).audio64[0][0] == 0.0f);
+    raw.audio64[0][0] = 1.0f;
+    raw.audio64[0][1] = 0.0f;
+    const auto resumed = scene.update (raw, 0.01f, 1.0f, 1.0f);
+    REQUIRE (std::bit_cast<uint32_t> (resumed.audio64[0][0]) == 1051190558u);
+
+    NativeSpectrumSmoother loudScene;
+    raw = {};
+    raw.audio64[0][0] = 2.0f;
+    const auto loud = loudScene.update (raw, 0.01f, 1.0f, 1.0f);
+    REQUIRE (std::bit_cast<uint32_t> (loud.audio64[0][0]) == 1053478092u);
+    REQUIRE (loud.audio64[0][0] < 0.4f); // Remains below the publication cap.
+    // Recompute after both a full-speed coefficient rise (1.01 -> 1.02)
+    // and a half-speed fall (1.02 -> 1.015); a stale reciprocal fails.
+    const auto rising = loudScene.update (raw, 0.01f, 1.0f, 1.0f);
+    REQUIRE (std::bit_cast<uint32_t> (rising.audio64[0][0]) == 1060472094u);
+    raw.audio64[0][0] = 0.5f;
+    const auto falling = loudScene.update (raw, 0.01f, 1.0f, 1.0f);
+    REQUIRE (std::bit_cast<uint32_t> (falling.audio64[0][0]) == 1059745816u);
+}
+#endif
+
 TEST_CASE ("Scene spectrum handoff retains stable shader and particle arrays across viewports", "[audio][spectrum]") {
     using WallpaperEngine::Audio::Drivers::Recorders::SceneSpectrumState;
     using WallpaperEngine::Audio::Drivers::Recorders::StereoSpectrum;
+#if defined(__SSE__)
+    constexpr float normalizedUnity = 0.999755859375f; // Native RCPPS(1).
+#else
+    constexpr float normalizedUnity = 1.0f;
+#endif
     SceneSpectrumState firstScene;
     SceneSpectrumState secondScene;
     StereoSpectrum::Bands leftRaw {};
@@ -953,8 +1008,8 @@ TEST_CASE ("Scene spectrum handoff retains stable shader and particle arrays acr
     REQUIRE (secondScene.advance (rightRaw, 1, firstFrame, 0.5f, 1.0f));
     REQUIRE (firstScene.bands ().audio64[0].data () == shaderLeft);
     REQUIRE (secondScene.bands ().audio64[1].data () == shaderRight);
-    REQUIRE (std::abs (shaderLeft[0] - 0.2f) < 0.000001f);
-    REQUIRE (std::abs (shaderRight[7] - 0.1f) < 0.000001f);
+    REQUIRE (std::abs (shaderLeft[0] - 0.2f * normalizedUnity) < 0.000001f);
+    REQUIRE (std::abs (shaderRight[7] - 0.1f * normalizedUnity) < 0.000001f);
 
     WallpaperEngine::Audio::ParticleAudioSettings response {
         .mode = 1, .lowerBound = 0.0f, .upperBound = 1.0f,
@@ -967,12 +1022,12 @@ TEST_CASE ("Scene spectrum handoff retains stable shader and particle arrays acr
     // Repeated viewports at the same time and a paused scene do not advance
     // either filter, even if the shared recorder receives a different window.
     REQUIRE_FALSE (firstScene.advance (rightRaw, 1, firstFrame, 1.0f, 1.0f));
-    REQUIRE (std::abs (firstScene.bands ().audio64[0][0] - 0.2f) < 0.000001f);
-    REQUIRE (std::abs (secondScene.bands ().audio64[1][7] - 0.1f) < 0.000001f);
+    REQUIRE (std::abs (firstScene.bands ().audio64[0][0] - 0.2f * normalizedUnity) < 0.000001f);
+    REQUIRE (std::abs (secondScene.bands ().audio64[1][7] - 0.1f * normalizedUnity) < 0.000001f);
     REQUIRE (firstScene.advance (StereoSpectrum::Bands {}, 2,
                                  firstFrame + std::chrono::milliseconds (10), 1.0f, 1.0f));
     REQUIRE (firstScene.bands ().audio64[0][0] == 0.0f);
-    REQUIRE (std::abs (secondScene.bands ().audio64[1][7] - 0.1f) < 0.000001f);
+    REQUIRE (std::abs (secondScene.bands ().audio64[1][7] - 0.1f * normalizedUnity) < 0.000001f);
     REQUIRE (firstScene.advance (leftRaw, 3,
                                  firstFrame + std::chrono::milliseconds (20), 1.0f, 1.0f));
     REQUIRE (firstScene.bands ().audio64[0][0] > 0.2f);

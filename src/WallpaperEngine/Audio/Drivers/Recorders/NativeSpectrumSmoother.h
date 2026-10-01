@@ -7,6 +7,10 @@
 #include <cmath>
 #include <cstddef>
 
+#if defined(__SSE__)
+#include <xmmintrin.h>
+#endif
+
 namespace WallpaperEngine::Audio::Drivers::Recorders {
 
 // Recovered per-scene host filter from wallpaper64.exe v2.8.42
@@ -53,13 +57,26 @@ public:
         if (globalPeak < 0.0001f) return {};
         const float intermediateStep = std::min (delta * 20.0f, 1.0f);
         const float publishedStep = std::min (delta * 40.0f, 1.0f);
+#if defined(__SSE__)
+        std::array<float, 16> reciprocals {};
+        for (size_t group = 0; group < reciprocals.size (); ++group) {
+            const float coefficient = std::max (m_coefficients[group], 0.001f);
+            // v2.8.42 0x1401122d2 onward broadcasts each coefficient and
+            // applies RCPPS once per group before the history vector loop.
+            reciprocals[group] = _mm_cvtss_f32 (_mm_rcp_ps (_mm_set1_ps (coefficient)));
+        }
+#endif
         for (size_t i = 0; i < current.size (); ++i) {
-            const float coefficient = std::max (m_coefficients[i / 8], 0.001f);
             const float source = std::isfinite (current[i]) ? current[i] : 0.0f;
-            // Native forms an approximate reciprocal with rcpps before the
-            // vector loop. Division preserves the recovered normalization;
-            // exact rcpps rounding is a separate numeric-parity limit.
-            m_intermediate[i] += (source / coefficient - m_intermediate[i]) * intermediateStep;
+#if defined(__SSE__)
+            const float normalized = source * reciprocals[i / 8];
+#else
+            // Preserve the portable normalization policy where the native
+            // x86 reciprocal estimate is unavailable.
+            const float coefficient = std::max (m_coefficients[i / 8], 0.001f);
+            const float normalized = source / coefficient;
+#endif
+            m_intermediate[i] += (normalized - m_intermediate[i]) * intermediateStep;
             const float change = m_intermediate[i] - m_published[i];
             m_published[i] += std::clamp (change, -publishedStep, publishedStep);
         }
