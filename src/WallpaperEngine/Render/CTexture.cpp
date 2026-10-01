@@ -13,6 +13,8 @@ using namespace WallpaperEngine::Render;
 
 CTexture::CTexture (RenderContext& context, TextureUniquePtr header, std::string assetName) :
     Helpers::ContextAware (context), m_header (std::move (header)), m_assetName (std::move (assetName)) {
+    if (m_header->isAnimated ())
+        m_animationPlayback = std::make_shared<SharedTextureAnimation> (m_header->frames);
     // ensure the header is parsed
     this->setupResolution ();
     const GLint internalFormat = storageFormat (*this->m_header);

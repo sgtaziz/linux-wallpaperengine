@@ -11,6 +11,7 @@
 #include "MediaEventPayloads.h"
 #include "ScriptPropertiesObject.h"
 #include "ScriptableObject.h"
+#include "TextureAnimationObject.h"
 #include "WallpaperEngine/Audio/AudioContext.h"
 #include "WallpaperEngine/Audio/Drivers/Recorders/PlaybackRecorder.h"
 #include "WallpaperEngine/Data/Utils/ScopeGuard.h"
@@ -264,6 +265,7 @@ ScriptEngine::ScriptEngine (Wallpapers::CScene& scene, Media::MediaSource& media
 	.vec2 = std::unique_ptr<Adapters::VectorAdapter<2>> (new Adapters::VectorAdapter<2> (*this)),
 	.object
 	= std::unique_ptr<Adapters::ScriptableObjectAdapter> (new Adapters::ScriptableObjectAdapter (*this, "ILayer")),
+        .textureAnimation = std::make_unique<TextureAnimationObject> (this->m_context),
     };
 
     this->m_engineObject = std::make_unique<EngineObject> (*this, scene);
@@ -323,6 +325,7 @@ ScriptEngine::~ScriptEngine () {
     // context or runtime destruction. Release retained JS handles now, but
     // keep their C++ adapters alive through all QuickJS finalization.
     this->m_adapters.object->releaseInstances ();
+    this->m_adapters.textureAnimation->releaseInstances ();
     this->m_adapters.vec4->releasePrototype ();
     this->m_adapters.vec3->releasePrototype ();
     this->m_adapters.vec2->releasePrototype ();
@@ -338,6 +341,7 @@ ScriptEngine::~ScriptEngine () {
     this->m_adapters.vec3.reset ();
     this->m_adapters.vec2.reset ();
     this->m_adapters.object.reset ();
+    this->m_adapters.textureAnimation.reset ();
 }
 
 void ScriptEngine::shutdown () {
@@ -391,6 +395,7 @@ void ScriptEngine::unregisterObject (const ScriptableObject& object) {
     if (removedActiveObject)
 	JS_SetPropertyStr (this->m_context, this->m_globalThis, "thisObject", JS_UNDEFINED);
     this->m_adapters.object->forgetInstance (object);
+    this->m_adapters.textureAnimation->forgetInstance (&object);
 }
 
 void ScriptEngine::destroyObjectModules (const ScriptableObject& object) {

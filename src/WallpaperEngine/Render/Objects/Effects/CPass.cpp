@@ -9,6 +9,7 @@
 #include "WallpaperEngine/Data/Model/Material.h"
 
 #include "WallpaperEngine/Render/CFBO.h"
+#include "WallpaperEngine/Render/CTexture.h"
 #include "WallpaperEngine/Render/TextureAnimation.h"
 #include "WallpaperEngine/Render/UserTextureSelection.h"
 #include "WallpaperEngine/Render/Objects/CImage.h"
@@ -316,7 +317,20 @@ CPass::resolveTextureAnimationState (const std::shared_ptr<const TextureProvider
     }
 
     const auto& frames = texture->getFrames ();
-    const auto* frame = m_textureFrameOverride && texture == m_renderable.getTexture ()
+    const auto* image = dynamic_cast<const CImage*> (&m_renderable);
+    const auto imageFrame = image ? image->textureAnimationFrameOverride () : std::nullopt;
+    const auto* sharedTexture = image && !imageFrame
+        ? dynamic_cast<const CTexture*> (texture.get ()) : nullptr;
+    const auto& sharedAnimation = sharedTexture ? sharedTexture->getAnimationPlayback ()
+        : std::shared_ptr<SharedTextureAnimation> {};
+    if (sharedAnimation)
+        sharedAnimation->sample (m_renderable.getScene ().getDeltaTime (),
+                                 getContext ().getDriver ().getFrameCounter ());
+    const auto* frame = imageFrame && !frames.empty ()
+        ? frames[*imageFrame < frames.size () ? *imageFrame : 0].get ()
+        : sharedAnimation && sharedAnimation->getFrame () < frames.size ()
+            ? frames[sharedAnimation->getFrame ()].get ()
+        : m_textureFrameOverride && texture == m_renderable.getTexture ()
         && *m_textureFrameOverride < frames.size ()
             ? frames[*m_textureFrameOverride].get ()
             : frameAtTime (frames,

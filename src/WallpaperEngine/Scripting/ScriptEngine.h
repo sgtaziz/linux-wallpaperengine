@@ -35,6 +35,7 @@ class CScene;
 }
 
 namespace WallpaperEngine::Scripting {
+class TextureAnimationObject;
 class ScriptPropertiesObject;
 class ScriptableObject;
 namespace Adapters {
@@ -65,6 +66,7 @@ public:
 	std::unique_ptr<Adapters::VectorAdapter<3>> vec3;
 	std::unique_ptr<Adapters::VectorAdapter<2>> vec2;
 	std::unique_ptr<Adapters::ScriptableObjectAdapter> object;
+        std::unique_ptr<TextureAnimationObject> textureAnimation;
     };
 
     ~ScriptEngine ();

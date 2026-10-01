@@ -2,6 +2,7 @@
 
 #include "Helpers/ContextAware.h"
 #include "TextureProvider.h"
+#include "TextureAnimation.h"
 #include "WallpaperEngine/Data/Assets/Texture.h"
 #include "WallpaperEngine/VideoPlayback/MPV/GLPlayer.h"
 
@@ -40,6 +41,9 @@ public:
     [[nodiscard]] uint32_t getSpritesheetRows () const override;
     [[nodiscard]] uint32_t getSpritesheetFrames () const override;
     [[nodiscard]] float getSpritesheetDuration () const override;
+    [[nodiscard]] const std::shared_ptr<SharedTextureAnimation>& getAnimationPlayback () const {
+        return m_animationPlayback;
+    }
 
     /**
      * Increments the usage count of the texture
@@ -85,6 +89,7 @@ private:
 
     /** The texture header */
     TextureUniquePtr m_header;
+    std::shared_ptr<SharedTextureAnimation> m_animationPlayback;
     /** OpenGL's texture ID */
     GLuint* m_textureID = nullptr;
     /** Resolution vector of the texture */
