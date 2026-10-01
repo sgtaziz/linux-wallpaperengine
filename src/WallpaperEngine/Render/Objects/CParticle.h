@@ -4,6 +4,7 @@
 #include "ParticleCore.h"
 #include "ParticleEventInheritance.h"
 #include "ParticleInstancePatch.h"
+#include "ParticleChildPool.h"
 #include "ParticleSlotStreams.h"
 #include "WallpaperEngine/Data/Model/Object.h"
 #include "WallpaperEngine/Render/Objects/Effects/CPass.h"
@@ -219,6 +220,7 @@ protected:
     void refreshNativeLiveView ();
     void resetPeriodicChildren ();
     void resetStaticEmitterTree ();
+    void warmup ();
     void resetSequenceCounters (bool periodicOnly);
     void patchInstanceSequenceSteps ();
     void updateOrdinaryControlPoints ();
@@ -300,6 +302,7 @@ private:
         std::unique_ptr<CParticle> runtime;
     };
     std::vector<ChildNode> m_childNodes;
+    ParticleCore::RetainedChildPool<ChildNode> m_retainedChildNodes;
     uint32_t m_particleCount { 0 };
     uint32_t m_maxParticles { 0 };
 
