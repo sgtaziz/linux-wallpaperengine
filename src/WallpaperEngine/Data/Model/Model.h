@@ -20,6 +20,8 @@ struct ModelStruct {
     bool passthrough;
     /** Whether this models's size should be determined automatically or not */
     bool autosize;
+    /** Autosize against the scene projection rather than source pixels. */
+    bool projectlayer = false;
     /** Whether this models's padding should be disabled or not */
     bool nopadding;
     /** Not sure what's used for */

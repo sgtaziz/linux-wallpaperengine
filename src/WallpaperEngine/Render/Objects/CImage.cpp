@@ -2,6 +2,7 @@
 
 #include "CRenderable.h"
 #include "ImageDeviceColor.h"
+#include "ImageDimensions.h"
 #include "ModelNormalMatrix.h"
 #include "PuppetMeshParser.h"
 
@@ -203,38 +204,46 @@ CImage::CImage (Wallpapers::CScene& scene, const Image& image) :
 
     this->detectTexture ();
 
+    m_hasSourceTexture = this->m_texture != nullptr;
+    const auto dimensions = loadedImageDimensions (
+        size, {.autosize = m_image.model->autosize,
+               .fullscreen = m_image.model->fullscreen,
+               .solidlayer = m_image.model->solidlayer,
+               .passthrough = m_image.model->passthrough,
+               .animated = m_hasSourceTexture && m_texture->isAnimated (),
+               .projectlayer = m_image.model->projectlayer},
+        m_hasSourceTexture ? std::optional<glm::vec2> (glm::vec2 (
+            m_texture->getRealWidth (), m_texture->getRealHeight ())) : std::nullopt,
+        {scene_width, scene_height});
+    if (dimensions.logical != size)
+        m_image.size->value->update (dimensions.logical, DynamicValue::Script);
+    m_loadedTargetSize = dimensions.backing;
+    m_loadedLogicalSize = dimensions.logical;
+    if (m_hasSourceTexture)
+        m_loadedSourceSize = {m_texture->getRealWidth (), m_texture->getRealHeight ()};
+    size = dimensions.geometry;
+
     // detect texture (if any)
     if (this->m_texture == nullptr) {
-	if (this->m_image.model->solidlayer && size.x == 0.0f && size.y == 0.0f) {
-	    size.x = scene_width;
-	    size.y = scene_height;
-	}
 	// if (this->m_image->isSolid ()) // layer receives cursor events:
 	// https://docs.wallpaperengine.io/en/scene/scenescript/reference/event/cursor.html same applies to effects
 	// TODO: create a dummy texture of correct size, fbo constructors should be enough, but this should be properly
 	// handled
+	const glm::vec2 backing = imageBackingDimensions (size);
 	this->m_texture = std::make_shared<CFBO> (
-	    "", TextureFormat_ARGB8888, TextureFlags_NoFlags, 1, size.x, size.y, size.x, size.y
-	);
+	    "", TextureFormat_ARGB8888, TextureFlags_NoFlags, 1,
+            backing.x, backing.y, backing.x, backing.y);
     }
 
-    // Explicit authored dimensions define the layer quad even when its input
-    // texture is a full-scene framebuffer. Fill only missing axes.
-    size = this->getSize ();
-    if (size.x <= 0.0f && this->getImage ().model->width)
-	size.x = static_cast<float> (*this->getImage ().model->width);
-    if (size.y <= 0.0f && this->getImage ().model->height)
-	size.y = static_cast<float> (*this->getImage ().model->height);
-
     // fullscreen layers should use the whole projection's size
-    // TODO: WHAT SHOULD AUTOSIZE DO?
-    if (this->getImage ().model->fullscreen) {
-	size = { scene_width, scene_height };
+    if (this->getImage ().model->fullscreen && m_hasSourceTexture) {
 	origin = { scene_width / 2, scene_height / 2, 0 };
 
 	// TODO: CHANGE ALIGNMENT TOO?
     }
     this->m_size = size;
+    const glm::vec2 backingSize = m_loadedTargetSize;
+    const glm::vec2 quadProjectionSize = imageBackingDimensions (size);
 
     glm::vec2 scaledSize = size * glm::vec2 (scale);
 
@@ -276,12 +285,12 @@ CImage::CImage (Wallpapers::CScene& scene, const Image& image) :
     const auto compositeFormat = scene.getFBO ()->getFormat ();
 
     this->m_currentMainFBO = this->m_mainFBO = scene.create (
-	nameA.str (), compositeFormat, this->m_texture->getFlags (), 1, { size.x, size.y }, { size.x, size.y }
+	nameA.str (), compositeFormat, this->m_texture->getFlags (), 1, backingSize, backingSize
     );
     this->m_currentSubFBO = this->m_subFBO = scene.create (
-	nameB.str (), compositeFormat, this->m_texture->getFlags (), 1, { size.x, size.y }, { size.x, size.y }
+	nameB.str (), compositeFormat, this->m_texture->getFlags (), 1, backingSize, backingSize
     );
-    m_targetBaseSize = size;
+    m_targetBaseSize = backingSize;
 
     // build a list of vertices, these might need some change later (or maybe invert the camera)
     GLfloat sceneSpacePosition[] = { this->m_pos.x, this->m_pos.y, 0.0f, this->m_pos.x, this->m_pos.w, 0.0f,
@@ -404,10 +413,10 @@ CImage::CImage (Wallpapers::CScene& scene, const Image& image) :
     } else if (this->getImage ().model->fullscreen) {
 	this->m_modelViewProjectionCopy = glm::mat4 (1.0f);
     } else {
-	this->m_modelViewProjectionCopy = glm::ortho<float> (0.0, size.x, 0.0, size.y);
+	this->m_modelViewProjectionCopy = glm::ortho<float> (0.0, quadProjectionSize.x, 0.0, quadProjectionSize.y);
     }
     this->m_modelViewProjectionCopyInverse = glm::inverse (this->m_modelViewProjectionCopy);
-    this->m_modelMatrix = glm::ortho<float> (0.0, size.x, 0.0, size.y);
+    this->m_modelMatrix = glm::ortho<float> (0.0, quadProjectionSize.x, 0.0, quadProjectionSize.y);
     this->m_viewProjectionMatrix = glm::mat4 (1.0);
 
     // ensure the input texture is marked as used
@@ -1450,7 +1459,7 @@ glm::vec2 CImage::getCompositeTargetSize () const {
         const glm::vec2 presentation = getScene ().getPresentationTextureSize ();
         if (presentation.x > 0.0f && presentation.y > 0.0f) return presentation;
     }
-    return getSize ();
+    return m_loadedTargetSize;
 }
 
 bool CImage::refreshSizeDependentTargets () {
@@ -1487,6 +1496,29 @@ bool CImage::refreshSizeDependentTargets () {
     }
     m_targetBaseSize = size;
     return true;
+}
+
+void CImage::refreshSourceDimensions () {
+    if (!m_hasSourceTexture) return;
+    const glm::vec2 source (m_texture->getRealWidth (), m_texture->getRealHeight ());
+    if (source == m_loadedSourceSize) return;
+    // Source loading/resizing is distinct from a logical layer.size write.
+    // Root framebuffers can change extent with the output window; preserve
+    // their target and autosize updates without rebuilding from script size.
+    const auto dimensions = loadedImageDimensions (
+        m_loadedLogicalSize, {.autosize = m_image.model->autosize,
+               .fullscreen = m_image.model->fullscreen,
+               .solidlayer = m_image.model->solidlayer,
+               .passthrough = m_image.model->passthrough,
+               .animated = m_texture->isAnimated (),
+               .projectlayer = m_image.model->projectlayer}, source,
+        {getScene ().getWidth (), getScene ().getHeight ()});
+    m_loadedSourceSize = source;
+    m_loadedTargetSize = dimensions.backing;
+    m_loadedLogicalSize = dimensions.logical;
+    m_size = dimensions.geometry;
+    if (m_image.model->autosize || m_image.model->fullscreen)
+        m_image.size->value->update (dimensions.logical, DynamicValue::Script);
 }
 
 bool CImage::hasCompositeConsumer () const {
@@ -1547,6 +1579,12 @@ void CImage::renderWithChildren (const std::function<void (std::shared_ptr<const
     if (!this->m_initialized) {
 	return;
     }
+    refreshSourceDimensions ();
+    // Native size writes change the logical getter, while the ordinary quad
+    // and its targets retain the dimensions built at source load. An initial
+    // zero axis builds a degenerate quad; a later logical zero does not hide
+    // an already built positive quad.
+    if (!m_hasPuppetMesh && (m_size.x == 0.0f || m_size.y == 0.0f)) return;
 
     // A passthrough layer with no runnable effect output has no final
     // composition pass. Leave its descendants in the scene's flat draw path
@@ -1614,14 +1652,9 @@ const glm::vec4& CImage::getColor4 () const { return this->m_effectiveColor4; }
 const glm::vec3& CImage::getCompositeColor () const { return this->m_image.color->value->getVec3 (); }
 
 glm::vec2 CImage::resolveGeometrySize (float sceneWidth, float sceneHeight, glm::vec3& origin) const {
-    glm::vec2 size = this->getSize ();
+    glm::vec2 size = m_size;
 
-    if (size.x <= 0.0f && this->getImage ().model->width)
-	size.x = static_cast<float> (*this->getImage ().model->width);
-    if (size.y <= 0.0f && this->getImage ().model->height)
-	size.y = static_cast<float> (*this->getImage ().model->height);
-
-    if (this->getImage ().model->fullscreen) {
+    if (this->getImage ().model->fullscreen && m_hasSourceTexture) {
 	size = { sceneWidth, sceneHeight };
 	origin = { sceneWidth / 2.0f, sceneHeight / 2.0f, 0.0f };
     }
@@ -1743,12 +1776,13 @@ void CImage::uploadGeometryBuffers (const glm::vec2& size) {
     glBindBuffer (GL_ARRAY_BUFFER, this->m_texcoordCopy);
     glBufferData (GL_ARRAY_BUFFER, sizeof (texcoordCopy), texcoordCopy, GL_DYNAMIC_DRAW);
 
+    const glm::vec2 projectionSize = imageBackingDimensions (size);
     this->m_modelViewProjectionCopy = this->getImage ().model->passthrough
 	? this->m_modelViewProjectionScreen
 	: this->getImage ().model->fullscreen ? glm::mat4 (1.0f)
-	                                       : glm::ortho<float> (0.0, size.x, 0.0, size.y);
+	                                       : glm::ortho<float> (0.0, projectionSize.x, 0.0, projectionSize.y);
     this->m_modelViewProjectionCopyInverse = glm::inverse (this->m_modelViewProjectionCopy);
-    this->m_modelMatrix = glm::ortho<float> (0.0, size.x, 0.0, size.y);
+    this->m_modelMatrix = glm::ortho<float> (0.0, projectionSize.x, 0.0, projectionSize.y);
 }
 
 CImage::ResolvedTransform CImage::updateGeometryBuffers () {
@@ -1832,12 +1866,7 @@ bool CImage::executeMaterialFunction (const std::string& name) {
 }
 
 glm::vec2 CImage::getSize () const {
-    glm::vec2 size = this->getImage ().size->value->getVec2 ();
-    if (this->m_texture != nullptr) {
-	if (size.x <= 0.0f) size.x = static_cast<float> (this->m_texture->getRealWidth ());
-	if (size.y <= 0.0f) size.y = static_cast<float> (this->m_texture->getRealHeight ());
-    }
-    return size;
+    return this->getImage ().size->value->getVec2 ();
 }
 
 GLuint CImage::getSceneSpacePosition () const { return this->m_sceneSpacePosition; }

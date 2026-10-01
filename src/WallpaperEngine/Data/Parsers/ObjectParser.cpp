@@ -335,6 +335,10 @@ ObjectParser::parseImage (const JSON& it, const Project& project, ObjectData bas
     const auto& properties = project.properties;
     const auto& effects = it.optional ("effects");
     const auto& animationLayers = it.optional ("animationlayers");
+    auto model = ModelParser::load (project, image);
+    // Native 1401e6980 starts at 1x1; model width/height replace only the
+    // supplied axes (1401fac50). An explicit authored zero remains zero.
+    const glm::vec2 defaultSize (model->width.value_or (1), model->height.value_or (1));
 
     auto result = std::make_unique<Image> (
 	std::move (base),
@@ -346,11 +350,11 @@ ObjectParser::parseImage (const JSON& it, const Project& project, ObjectData bas
 	    .color = it.color ("color", properties, Builders::ColorBuilder::White, true),
 	    .copyBackground = it.user ("copybackground", properties, true),
 	    .alignment = it.optional ("horizontalalign", it.optional ("alignment", std::string ("center"))),
-	    .size = it.user ("size", properties, glm::vec2 (0.0f)),
+	    .size = it.user ("size", properties, defaultSize),
 	    .parallaxDepth = it.user ("parallaxDepth", properties, glm::vec2 (0.0f)),
 	    .colorBlendMode = it.user ("colorBlendMode", properties, 0),
 	    .brightness = it.user ("brightness", properties, 1.0f),
-	    .model = ModelParser::load (project, image),
+	    .model = std::move (model),
 	    .effects = effects.has_value () ? parseEffects (*effects, project) : std::vector<ImageEffectUniquePtr> {},
 	    .animationLayers = animationLayers.has_value () ? parseAnimationLayers (*animationLayers, project)
 							    : std::vector<ImageAnimationLayerUniquePtr> {},

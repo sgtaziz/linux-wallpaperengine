@@ -1,5 +1,6 @@
 #include "SpotLightUniforms.h"
 #include "WallpaperEngine/Render/Objects/CImage.h"
+#include "WallpaperEngine/Render/Objects/ImageDimensions.h"
 #include "WallpaperEngine/Render/Objects/CModel.h"
 #include "WallpaperEngine/Render/Objects/CParticle.h"
 #include "WallpaperEngine/Render/Objects/CSound.h"
@@ -122,10 +123,11 @@ CScene::CScene (
 	    }
 
 	    const glm::vec3 origin = image->origin->value->getVec3 ();
-	    const glm::vec2 halfSize = image->size->value->getVec2 () / 2.0f;
-
-	    maxExtent.x = glm::max (maxExtent.x, glm::abs (origin.x) + halfSize.x);
-	    maxExtent.y = glm::max (maxExtent.y, glm::abs (origin.y) + halfSize.y);
+	    const auto authored = Data::JSON::JSON::parse (image->initialConfiguration);
+	    const std::optional<glm::vec2> authoredSize = authored.contains ("size")
+	        ? std::optional<glm::vec2> (image->size->value->getVec2 ()) : std::nullopt;
+	    maxExtent = glm::max (maxExtent, Objects::imageAutoProjectionExtent (
+	        glm::vec2 (origin), authoredSize));
 	}
 
 	if (maxExtent.x > 0.0f && maxExtent.y > 0.0f) {
