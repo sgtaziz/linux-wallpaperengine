@@ -100,6 +100,7 @@ private:
     void refreshEffectVisibility ();
     ResolvedTransform updateGeometryBuffers ();
     bool refreshSizeDependentTargets ();
+    void refreshSourceDimensions ();
     [[nodiscard]] glm::vec2 getCompositeTargetSize () const;
     [[nodiscard]] glm::vec2 resolveGeometrySize (float sceneWidth, float sceneHeight, glm::vec3& origin) const;
     void updateScenePosition (
@@ -219,6 +220,10 @@ private:
     glm::vec3 m_sceneQuad[4] = {};
     glm::vec3 m_sceneCenter = {};
     glm::vec2 m_size = {};
+    glm::vec2 m_loadedTargetSize = {};
+    glm::vec2 m_loadedLogicalSize = {};
+    glm::vec2 m_loadedSourceSize = {};
+    bool m_hasSourceTexture = false;
 
     bool m_initialized = false;
 
