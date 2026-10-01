@@ -4,6 +4,7 @@
 #include "WallpaperEngine/Data/Model/Project.h"
 #include "WallpaperEngine/Data/Model/Wallpaper.h"
 #include "WallpaperEngine/Data/Parsers/WallpaperParser.h"
+#include "WallpaperEngine/Data/Parsers/ObjectParser.h"
 #include "WallpaperEngine/FileSystem/Container.h"
 #include "WallpaperEngine/Render/Wallpapers/SceneDependencies.h"
 #include "WallpaperEngine/Render/Camera.h"
@@ -19,6 +20,41 @@
 #include <memory>
 #include <string>
 #include <tuple>
+
+TEST_CASE ("Native layer input defaults survive authored configuration cloning",
+           "[scene][parser][script][input]") {
+    using WallpaperEngine::Data::JSON::JSON;
+    using WallpaperEngine::Data::Model::Project;
+    using WallpaperEngine::Data::Parsers::ObjectParser;
+    Project project {};
+    // Native omitted flags are solid=true and disablepropagation=false. The
+    // detached config must preserve omission instead of serializing defaults.
+    auto omitted = ObjectParser::parse (JSON::parse (R"({"id":1,"name":"group"})"), project);
+    REQUIRE (omitted->solid);
+    REQUIRE_FALSE (omitted->disablePropagation);
+    auto config = JSON::parse (omitted->initialConfiguration);
+    REQUIRE_FALSE (config.contains ("solid"));
+    REQUIRE_FALSE (config.contains ("disablepropagation"));
+    config["id"] = 2;
+    auto clone = ObjectParser::parse (config, project);
+    REQUIRE (clone->solid);
+    REQUIRE_FALSE (clone->disablePropagation);
+
+    auto explicitFlags = ObjectParser::parse (JSON::parse (
+        R"({"id":3,"name":"group","solid":false,"disablepropagation":true})"), project);
+    REQUIRE_FALSE (explicitFlags->solid);
+    REQUIRE (explicitFlags->disablePropagation);
+    config = JSON::parse (explicitFlags->initialConfiguration);
+    REQUIRE (config.at ("solid") == false);
+    REQUIRE (config.at ("disablepropagation") == true);
+    config["id"] = 4;
+    clone = ObjectParser::parse (config, project);
+    REQUIRE_FALSE (clone->solid);
+    REQUIRE (clone->disablePropagation);
+    config["solid"] = true;
+    REQUIRE_FALSE (JSON::parse (explicitFlags->initialConfiguration).at ("solid").get<bool> ());
+    REQUIRE_FALSE (clone->solid);
+}
 
 TEST_CASE ("Scene camera projection settings prefer authored general fields", "[scene][parser]") {
     using WallpaperEngine::Assets::AssetLocator;
@@ -296,20 +332,20 @@ TEST_CASE ("Scene cursor converts bottom-left viewport pixels through cropped UV
     const auto crop = cursorWorldPosition ({0.25f, 0.75f}, projection, 100.0f, 80.0f);
     REQUIRE (crop.has_value ());
     REQUIRE (std::abs (crop->x - 25.0f) < 1e-4f);
-    REQUIRE (std::abs (crop->y - 20.0f) < 1e-4f);
+    REQUIRE (std::abs (crop->y - 60.0f) < 1e-4f);
     const auto shifted = Camera::makeOrthogonalProjectionForScene (
         100.0f, 80.0f, 0.0f, 1000.0f, {10.0f, -5.0f, 0.0f});
     const auto moved = cursorWorldPosition ({0.25f, 0.75f}, shifted, 100.0f, 80.0f);
     REQUIRE (moved.has_value ());
     REQUIRE (std::abs (moved->x - 15.0f) < 1e-4f);
-    REQUIRE (std::abs (moved->y - 15.0f) < 1e-4f);
+    REQUIRE (std::abs (moved->y - 65.0f) < 1e-4f);
     const glm::mat4 layer = glm::translate (glm::mat4 (1.0f), {50.0f, 40.0f, 0.0f})
         * glm::rotate (glm::mat4 (1.0f), 0.5f, {0.0f, 0.0f, 1.0f});
     const glm::vec3 point = glm::vec3 (layer * glm::vec4 (8.0f, -3.0f, 0.0f, 1.0f));
     const auto local = cursorHitLocalPosition (point, layer, {40.0f, 20.0f});
     REQUIRE (local.has_value ());
     REQUIRE (std::abs (local->x - 28.0f) < 1e-4f);
-    REQUIRE (std::abs (local->y - 7.0f) < 1e-4f);
+    REQUIRE (std::abs (local->y - 13.0f) < 1e-4f);
     const glm::vec3 outside = glm::vec3 (layer * glm::vec4 (22.0f, 0.0f, 0.0f, 1.0f));
     REQUIRE_FALSE (cursorHitLocalPosition (outside, layer, {40.0f, 20.0f}).has_value ());
     const auto leave = cursorLocalPosition (outside, layer, {40.0f, 20.0f});
@@ -327,6 +363,67 @@ TEST_CASE ("Scene cursor converts bottom-left viewport pixels through cropped UV
     REQUIRE (largeCenter.has_value ());
     REQUIRE (std::abs (largeCenter->x - 50000.0f) < 0.1f);
     REQUIRE (std::abs (largeCenter->y - 40000.0f) < 0.1f);
+}
+
+TEST_CASE ("Scene cursor world coordinates retain the native authored canvas across viewport and crop",
+           "[scene][input][solid]") {
+    using WallpaperEngine::Render::Camera;
+    using WallpaperEngine::Render::Wallpapers::cursorScreenPosition;
+    using WallpaperEngine::Render::Wallpapers::cursorWorldPosition;
+    const auto projection = Camera::makeOrthogonalProjectionForScene (
+        1024.0f, 576.0f, 0.0f, 1000.0f, {0.0f, 0.0f, 0.0f});
+    // Independent native real-pointer readouts on the 1280x720 viewport.
+    for (const glm::vec4 landmark : {glm::vec4 (1186, 70, 948.8f, 520),
+                                    glm::vec4 (501, 182, 400.8f, 430.4f)}) {
+        const glm::vec2 uv (landmark.x / 1280, 1 - landmark.y / 720);
+        const auto world = cursorWorldPosition (uv, projection, 1024, 576);
+        REQUIRE (world.has_value ());
+        REQUIRE (std::abs (world->x - landmark.z) < 1e-3f);
+        REQUIRE (std::abs (world->y - landmark.w) < 1e-3f);
+    }
+    for (const glm::vec2 uv : {glm::vec2 (0, 0), glm::vec2 (1, 0), glm::vec2 (0, 1),
+                              glm::vec2 (1, 1), glm::vec2 (.5f, .5f)}) {
+        const auto world = cursorWorldPosition (uv, projection, 1024, 576);
+        REQUIRE (world.has_value ());
+        REQUIRE (std::abs (world->x - uv.x * 1024) < 1e-4f);
+        REQUIRE (std::abs (world->y - uv.y * 576) < 1e-4f);
+    }
+    // Native positive non-square real-pointer gate: screen1187.5,70 maps
+    // to authored950,520. Offset viewport changes screen origin, not world.
+    const glm::ivec4 viewport (100, 50, 1280, 720);
+    const glm::dvec2 pixel (1287.5, 700);
+    const auto screen = cursorScreenPosition (pixel, viewport);
+    REQUIRE (screen.x == 1187.5f);
+    REQUIRE (screen.y == 70.0f);
+    const glm::vec2 uv ((pixel.x - viewport.x) / viewport.z,
+                       (pixel.y - viewport.y) / viewport.w);
+    const auto world = cursorWorldPosition (uv, projection, 1024, 576);
+    REQUIRE (world.has_value ());
+    REQUIRE (std::abs (world->x - 950.0f) < 1e-4f);
+    REQUIRE (std::abs (world->y - 520.0f) < 1e-4f);
+    // Captured native asymmetric event payloads: the authored canvas is
+    // bottom-left, while each layer's localPosition has a top-left origin.
+    const glm::mat4 top = glm::translate (glm::mat4 (1.0f), {430.0f, 430.0f, 0.0f});
+    const auto upper = WallpaperEngine::Render::Wallpapers::cursorHitLocalPosition (
+        {400.0f, 480.0f, 0.0f}, top, {300.0f, 180.0f});
+    REQUIRE (upper.has_value ());
+    REQUIRE (std::abs (upper->x - 120.0f) < 1e-4f);
+    REQUIRE (std::abs (upper->y - 40.0f) < 1e-4f);
+    const glm::mat4 bottom = glm::translate (glm::mat4 (1.0f), {330.0f, 430.0f, 0.0f});
+    const auto lower = WallpaperEngine::Render::Wallpapers::cursorHitLocalPosition (
+        {400.0f, 380.8f, 0.0f}, bottom, {300.0f, 180.0f});
+    REQUIRE (lower.has_value ());
+    REQUIRE (std::abs (lower->x - 220.0f) < 1e-4f);
+    REQUIRE (std::abs (lower->y - 139.2f) < 1e-3f);
+    // A cropped/reversed presentation supplies its actual UV window. Keep
+    // that mapping instead of another unconditional flip inside the query.
+    const glm::vec4 window (.2f, .8f, .9f, .1f);
+    const glm::vec2 cropped (window.x + .25f * (window.y - window.x),
+                            window.z + .75f * (window.w - window.z));
+    const auto crop = cursorWorldPosition (cropped, projection, 1024, 576);
+    REQUIRE (crop.has_value ());
+    REQUIRE (std::abs (crop->x - .35f * 1024) < 1e-4f);
+    REQUIRE (std::abs (crop->y - .3f * 576) < 1e-4f);
 }
 
 TEST_CASE ("Malformed object parsing leaves unrelated scene layers intact", "[scene][parser]") {

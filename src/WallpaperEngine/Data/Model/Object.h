@@ -39,7 +39,9 @@ struct ObjectData {
     /** Named attachment on the parent puppet, when authored. */
     std::optional<std::string> attachment;
     /** Authored hit-test participation for SceneScript cursor events. */
-    bool solid = false;
+    bool solid = true;
+    /** Authored stop flag for overlapping SceneScript cursor targets. */
+    bool disablePropagation = false;
     /** The point of origin of the object */
     UserSettingUniquePtr origin;
     /** Transform fields for generic scene/group objects. Typed objects keep their own transform fields. */
