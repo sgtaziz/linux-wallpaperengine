@@ -7,6 +7,8 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/catch_approx.hpp>
 
+#include <array>
+
 using namespace WallpaperEngine::Data::Model;
 using WallpaperEngine::Data::JSON::JSON;
 using WallpaperEngine::Data::Parsers::ObjectParser;
@@ -148,6 +150,92 @@ TEST_CASE ("New birth settings retain scripts for component lifecycle dispatch",
     REQUIRE (scripts.at ("initializer1_count") == "countScript");
     REQUIRE (scripts.at ("initializer2_valueMin") == "valueScript");
     REQUIRE (scripts.at ("initializer3_hueNoise") == "noiseScript");
+}
+
+TEST_CASE ("Birth remap CP translation outputs compile ownership for every native slot",
+           "[particle][birth][parser][remap][controlpoint]") {
+    Project project {};
+    auto data = JSON::parse (R"({"id":1,"particle":{"controlpoint":[
+        {"id":90,"offset":"7 11 13"},
+        {"id":91,"offset":"17 19 23","flags":7,"angles":"30 40 50"}
+    ],"initializer":[]}})");
+    for (int index = 0; index < 8; ++index) {
+        data["particle"]["initializer"].push_back (JSON {
+            {"name", "remapinitialvalue"}, {"output", "controlpoint"},
+            {"outputcontrolpoint0", index}, {"input", "size"},
+            {"operation", "add"}, {"outputcomponent", "y"},
+            {"outputrangemin", "2 3 5"}, {"outputrangemax", "7 11 13"}});
+    }
+    const auto object = ObjectParser::parse (data, project);
+    const auto& particle = *object->as<Particle> ();
+    REQUIRE (particle.initializers.size () == 8);
+    REQUIRE (particle.controlPoints.size () == 8);
+    for (int index = 0; index < 8; ++index) {
+        const auto& remap = *particle.initializers[index]->as<RemapInitialValueInitializer> ()
+            ->remap->as<VectorRemapValueOperator> ();
+        REQUIRE (remap.output == VectorRemapValueOperator::Output::ControlPoint);
+        REQUIRE (remap.outputControlPoint0 == index);
+        REQUIRE (remap.operation == VectorRemapValueOperator::Operation::Add);
+        REQUIRE (remap.outputComponent == VectorRemapValueOperator::OutputComponent::Y);
+        REQUIRE (remap.outputMin == glm::vec3 (2.0f, 3.0f, 5.0f));
+        REQUIRE (remap.outputMax == glm::vec3 (7.0f, 11.0f, 13.0f));
+        const auto& cp = particle.controlPoints[index];
+        REQUIRE (cp.id == index); // authored IDs do not select runtime slots
+        REQUIRE ((cp.flags & 0x10000u) != 0);
+        if (index > 1) REQUIRE (cp.offset == glm::vec3 (0.0f));
+    }
+    REQUIRE (particle.controlPoints[0].offset == glm::vec3 (7.0f, 11.0f, 13.0f));
+    REQUIRE (particle.controlPoints[1].offset == glm::vec3 (17.0f, 19.0f, 23.0f));
+    REQUIRE (particle.controlPoints[1].flags == 0x10007u);
+    REQUIRE (particle.controlPoints[1].angles == glm::vec3 (30.0f, 40.0f, 50.0f));
+}
+
+TEST_CASE ("Birth CP output bounds literal targets while runtime and unsupported outputs stay gated",
+           "[particle][birth][parser][remap][controlpoint]") {
+    Project project {};
+    const auto data = JSON::parse (R"({"id":1,"particle":{"initializer":[
+        {"name":"remapinitialvalue","output":"controlpoint"},
+        {"name":"remapinitialvalue","output":"controlpoint","outputcontrolpoint0":-1},
+        {"name":"remapinitialvalue","output":"controlpoint","outputcontrolpoint0":8},
+        {"name":"remapinitialvalue","output":"controlpoint","outputcontrolpoint0":2,
+         "input":"controlpoint","inputcontrolpoint0":2,"operation":"multiply"},
+        {"name":"remapinitialvalue","output":"controlpoint","outputcontrolpoint0":3,
+         "input":"deltatocontrolpoint","inputcontrolpoint0":3},
+        {"name":"remapinitialvalue","output":"controlpoint","outputcontrolpoint0":4,
+         "input":"directiontocontrolpoint","inputcontrolpoint0":4},
+        {"name":"remapinitialvalue","output":"controlpoint","outputcontrolpoint0":{"value":2}},
+        {"name":"remapinitialvalue","output":"controlpoint","outputcontrolpoint0":5,
+         "outputrangemin":[1,2,3]},
+        {"name":"remapinitialvalue","output":"controlpoint","outputcontrolpoint0":6,
+         "inputrangemax":[1,2,3]},
+        {"name":"remapinitialvalue","output":"controlpoint","outputcontrolpoint0":3,
+         "outputrangemax":{"value":"1 2 3","script":"rangeScript"}},
+        {"name":"remapinitialvalue","output":"controlpoint","outputcontrolpoint1":2},
+        {"name":"remapinitialvalue","output":"deltatocontrolpoint"},
+        {"name":"remapinitialvalue","output":"directiontocontrolpoint"},
+        {"name":"remapinitialvalue","output":"controlpoint","outputcomponent":"sum"},
+        {"name":"remapinitialvalue","output":"size","outputcontrolpoint0":3}
+    ],"operator":[
+        {"name":"remapvalue","output":"controlpoint"},
+        {"name":"remapvalue","output":"controlpoint","outputcontrolpoint0":5},
+        {"name":"remapvalue","output":"color","outputcontrolpoint0":5},
+        {"name":"remapvalue","input":"controlpoint","inputcontrolpoint0":2,"output":"position"}
+    ]}})");
+    const auto object = ObjectParser::parse (data, project);
+    const auto& particle = *object->as<Particle> ();
+    REQUIRE (particle.initializers.size () == 3);
+    const std::array<int, 3> targets { 0, 7, 7 };
+    for (size_t index = 0; index < targets.size (); ++index) {
+        const auto& remap = *particle.initializers[index]->as<RemapInitialValueInitializer> ()
+            ->remap->as<VectorRemapValueOperator> ();
+        REQUIRE (remap.outputControlPoint0 == targets[index]);
+    }
+    REQUIRE (particle.controlPoints.size () == 2); // rejected input mutation does not claim ownership
+    REQUIRE (particle.controlPoints[0].id == 0);
+    REQUIRE (particle.controlPoints[1].id == 7);
+    REQUIRE (particle.operators.size () == 1);
+    REQUIRE (particle.operators[0]->as<VectorRemapValueOperator> ()->output
+        == VectorRemapValueOperator::Output::Position);
 }
 
 TEST_CASE ("Sequence instance-count patch retains authored flag and node suppression",

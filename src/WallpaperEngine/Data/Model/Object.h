@@ -539,9 +539,8 @@ public:
     bool useSceneDefault;
 };
 
-// Native remapvalue opcode 0x13 has many selector/transform branches. This
-// typed record represents scalar lifetimefraction→size/opacity multiply;
-// vector selectors and transform functions still require separate paths.
+// Typed remap records retain the supported native stream selectors and
+// literal range/transform settings shared by birth and operator opcodes.
 class ScalarRemapValueOperator : public ParticleOperatorBase {
 public:
     enum class Input { LifetimeFraction, MaxLifetime, Size, Opacity, Speed,
@@ -589,7 +588,7 @@ public:
     using InputComponent = ScalarRemapValueOperator::InputComponent;
     using Operation = ScalarRemapValueOperator::Operation;
     using Transform = ScalarRemapValueOperator::Transform;
-    enum class Output { Color, Position, Velocity };
+    enum class Output { Color, Position, Velocity, ControlPoint };
     enum class OutputComponent { All, X, Y, Z };
 
     VectorRemapValueOperator (Input input, InputComponent inputComponent,
@@ -598,13 +597,13 @@ public:
         glm::vec3 outputMin, glm::vec3 outputMax,
         Transform transform = Transform::Identity, float transformScale = 2.0f,
         int inputControlPoint0 = 0, int transformOctaves = 3,
-        int inputControlPoint1 = 1) :
+        int inputControlPoint1 = 1, int outputControlPoint0 = 0) :
         input (input), inputComponent (inputComponent), output (output),
         outputComponent (outputComponent), operation (operation), flags (flags),
         inputMin (inputMin), inputMax (inputMax), outputMin (outputMin),
         outputMax (outputMax), transform (transform), transformScale (transformScale),
         inputControlPoint0 (inputControlPoint0), transformOctaves (transformOctaves),
-        inputControlPoint1 (inputControlPoint1) { }
+        inputControlPoint1 (inputControlPoint1), outputControlPoint0 (outputControlPoint0) { }
     Input input;
     InputComponent inputComponent;
     Output output;
@@ -620,6 +619,9 @@ public:
     int inputControlPoint0;
     int transformOctaves;
     int inputControlPoint1;
+    // Direct CP translation output is supported at birth only. The operator
+    // opcode writes sparse SIMD lane-zero state, which needs a separate path.
+    int outputControlPoint0;
 };
 
 // Birth opcode 0x0f shares the remap record/selectors with operator 0x13,
