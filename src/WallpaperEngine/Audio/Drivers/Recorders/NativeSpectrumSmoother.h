@@ -13,6 +13,17 @@
 
 namespace WallpaperEngine::Audio::Drivers::Recorders {
 
+// Native host 0x140111355 and 0x1401114c3: elapsed is bounded before the
+// rate/fade product, then the resulting filter delta is bounded once more.
+[[nodiscard]] inline float nativeSpectrumFilterDelta (float elapsedSeconds, float sceneRate,
+                                                      float visibilityFade) {
+    if (!std::isfinite (elapsedSeconds)) elapsedSeconds = 0.0001f;
+    const float elapsed = std::clamp (elapsedSeconds, 0.0001f, 0.25f);
+    float delta = (sceneRate * visibilityFade) * elapsed;
+    if (!std::isfinite (delta)) delta = 0.0001f;
+    return std::clamp (delta, 0.0001f, 0.25f);
+}
+
 // Recovered per-scene host filter from wallpaper64.exe v2.8.42
 // FUN_140110630:759–1900. Kept separate from the global PulseAudio recorder
 // CScene owns one history through SceneSpectrumState. Scene rate and faded
@@ -23,9 +34,7 @@ public:
     [[nodiscard]] StereoSpectrum::Bands update (const StereoSpectrum::Bands& raw,
                                                 float elapsedSeconds, float sceneRate,
                                                 float visibilityFade) {
-        float delta = elapsedSeconds * sceneRate * visibilityFade;
-        if (!std::isfinite (delta)) delta = 0.0001f;
-        delta = std::clamp (delta, 0.0001f, 0.25f);
+        const float delta = nativeSpectrumFilterDelta (elapsedSeconds, sceneRate, visibilityFade);
 
         std::array<float, 128> current {};
         std::copy (raw.audio64[0].begin (), raw.audio64[0].end (), current.begin ());

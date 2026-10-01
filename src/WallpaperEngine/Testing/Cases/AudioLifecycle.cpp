@@ -1047,6 +1047,42 @@ TEST_CASE ("Scene spectrum rate follows native percent floor", "[audio][spectrum
     REQUIRE (sceneSpectrumRate (std::numeric_limits<float>::infinity ()) == 1.0f);
 }
 
+TEST_CASE ("Native spectrum bounds host elapsed before applying rate and fade", "[audio][spectrum][host-delta]") {
+    using WallpaperEngine::Audio::Drivers::Recorders::nativeSpectrumFilterDelta;
+    // Original v2.8.42 instruction windows 0x140111355..372,
+    // 0x1401114c3..4d5, 4ec..4f1 and 4f7..518 executed with controlled
+    // host fields/registers. These discriminate a single clamp after scaling.
+    REQUIRE (nativeSpectrumFilterDelta (1.0f, 0.5f, 1.0f) == 0.125f);
+    REQUIRE (nativeSpectrumFilterDelta (2.0f, 1.0f, 0.25f) == 0.0625f);
+    REQUIRE (std::bit_cast<uint32_t> (nativeSpectrumFilterDelta (0.00001f, 10.0f, 1.0f)) == 981668462u);
+    REQUIRE (nativeSpectrumFilterDelta (0.5f, 1.0f, 1.0f) == 0.25f);
+    REQUIRE (nativeSpectrumFilterDelta (0.01f, 1.0f, 1.0f) == 0.01f);
+    // Native multiplies rate*fade before elapsed. Reassociation differs by
+    // one ULP even when neither clamp is active.
+    REQUIRE (std::bit_cast<uint32_t> (nativeSpectrumFilterDelta (
+        std::bit_cast<float> (1046349214u), std::bit_cast<float> (1040238641u),
+        std::bit_cast<float> (1046781144u))) == 1002928928u);
+
+    using WallpaperEngine::Audio::Drivers::Recorders::NativeSpectrumSmoother;
+    using WallpaperEngine::Audio::Drivers::Recorders::StereoSpectrum;
+    NativeSpectrumSmoother delayed;
+    NativeSpectrumSmoother bounded;
+    StereoSpectrum::Bands raw {};
+    raw.audio64[0][0] = 1.0f;
+    // At 10% host rate, a long stalled frame advances as a bounded .25s
+    // frame. It must not snap the complete filter history to the new raw bank.
+    const auto afterGap = delayed.update (raw, 2.0f, 0.1f, 1.0f);
+    const auto afterBound = bounded.update (raw, 0.25f, 0.1f, 1.0f);
+    REQUIRE (afterGap.audio64 == afterBound.audio64);
+    REQUIRE (afterGap.audio64[0][0] > 0.49f);
+    REQUIRE (afterGap.audio64[0][0] < 0.51f);
+    // Consequential retained history matches on the next ordinary frame too.
+    raw.audio64[0][0] = 0.0f;
+    raw.audio64[0][1] = 1.0f;
+    REQUIRE (delayed.update (raw, 0.01f, 0.1f, 1.0f).audio64
+             == bounded.update (raw, 0.01f, 0.1f, 1.0f).audio64);
+}
+
 TEST_CASE ("Particle audio response selects stereo mode and shapes peak once", "[audio][particle]") {
     using WallpaperEngine::Audio::ParticleAudioSettings;
     using WallpaperEngine::Audio::particleAudioResponse;
