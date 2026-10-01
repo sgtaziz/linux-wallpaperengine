@@ -1,5 +1,6 @@
 #include "WallpaperEngine/Render/Objects/ParticleCore.h"
 #include "WallpaperEngine/Render/Objects/CParticle.h"
+#include "WallpaperEngine/Render/Objects/ParticleRemapOperators.h"
 #include "WallpaperEngine/Render/Shaders/ParticleRopeShader.h"
 #include "WallpaperEngine/Render/Utils/NoiseUtils.h"
 #include "WallpaperEngine/Render/Utils/NativeParticleGradientNoise.h"
@@ -1457,6 +1458,109 @@ TEST_CASE ("Vector remap parser retains authored ranges and output components", 
     REQUIRE (distance->inputMax == glm::vec3 (200.0f));
     REQUIRE (particle->operators[4]->as<VectorRemapValueOperator> ()->inputControlPoint0 == 7);
     REQUIRE (particle->operators[5]->as<VectorRemapValueOperator> ()->inputControlPoint0 == 7);
+}
+
+TEST_CASE ("Production birth remap writes ordered CP components and preserves the basis",
+           "[particle][birth][remap][controlpoint]") {
+    using namespace WallpaperEngine::Data::Model;
+    using namespace WallpaperEngine::Render::Objects;
+    using WallpaperEngine::Data::JSON::JSON;
+    using WallpaperEngine::Data::Parsers::ObjectParser;
+    Project project {};
+    const auto object = ObjectParser::parse (JSON::parse (R"({"id":1,"particle":{"initializer":[
+        {"name":"remapinitialvalue","output":"controlpoint","outputcontrolpoint0":2,
+         "operation":"remap","outputrangemin":"40 50 60","outputrangemax":"40 50 60"},
+        {"name":"remapinitialvalue","output":"controlpoint","outputcontrolpoint0":2,
+         "operation":"add","outputcomponent":"x",
+         "outputrangemin":"2 99 99","outputrangemax":"2 99 99"},
+        {"name":"remapinitialvalue","output":"controlpoint","outputcontrolpoint0":2,
+         "operation":"subtract","outputcomponent":"y",
+         "outputrangemin":"99 3 99","outputrangemax":"99 3 99"},
+        {"name":"remapinitialvalue","output":"controlpoint","outputcontrolpoint0":2,
+         "operation":"multiply","outputcomponent":"z",
+         "outputrangemin":"99 99 0.5","outputrangemax":"99 99 0.5"}
+    ],"operator":[
+        {"name":"remapvalue","input":"controlpoint","inputcontrolpoint0":2,
+         "output":"position","operation":"remap","flags":0}
+    ]}})"), project);
+    const auto& model = *object->as<Particle> ();
+    std::vector<ControlPointData> cps (8);
+    cps[2].position = toSimulationVector ({ 10.0f, 20.0f, 30.0f });
+    cps[2].basis = glm::mat3 (glm::rotate (glm::mat4 (1.0f), 0.5f, glm::vec3 (0.0f, 0.0f, 1.0f)));
+    const auto initialBasis = cps[2].basis;
+    std::vector<ParticleInstance> particles (1);
+    particles[0].alive = true;
+    particles[0].lifetime = 1.0f;
+    std::vector<OperatorFunc> writers;
+    for (const auto& initializer : model.initializers) {
+        const auto& remap = *initializer->as<RemapInitialValueInitializer> ()
+            ->remap->as<VectorRemapValueOperator> ();
+        writers.push_back (createVectorRemapOperator (remap, true, false, false, false));
+        REQUIRE (writers.back ());
+    }
+    writers.push_back (createVectorRemapOperator (
+        *model.operators[0]->as<VectorRemapValueOperator> (), false, false, false, false));
+    REQUIRE (writers.back ());
+    const std::array<glm::vec3, 4> ordered {
+        glm::vec3 (40.0f, 50.0f, 60.0f), glm::vec3 (42.0f, 50.0f, 60.0f),
+        glm::vec3 (42.0f, 47.0f, 60.0f), glm::vec3 (42.0f, 47.0f, 30.0f) };
+    for (size_t index = 0; index < ordered.size (); ++index) {
+        writers[index] (particles, 1, cps, 0.0f, MovementTime { 0.0f, 0.0f });
+        REQUIRE (toAuthoredVector (cps[2].position) == ordered[index]);
+        REQUIRE (cps[2].basis == initialBasis);
+        REQUIRE (cps[1].position == glm::vec3 (0.0f));
+    }
+    writers[4] (particles, 1, cps, 0.0f, MovementTime { 0.0f, 0.0f });
+    REQUIRE (toAuthoredVector (particles[0].position) == ordered[3]);
+    // The retained translation is the next birth's current value. It is not
+    // an initial-particle stream and must accumulate across separate births.
+    for (int birth = 1; birth <= 4; ++birth) {
+        particles[0].position = glm::vec3 (0.0f);
+        writers[1] (particles, 1, cps, 0.0f, MovementTime { 0.0f, 0.0f });
+        writers[4] (particles, 1, cps, 0.0f, MovementTime { 0.0f, 0.0f });
+        REQUIRE (toAuthoredVector (particles[0].position)
+            == glm::vec3 (42.0f + birth * 2.0f, 47.0f, 30.0f));
+        REQUIRE (cps[2].basis == initialBasis);
+    }
+    const auto& cpWriter = *model.initializers[0]->as<RemapInitialValueInitializer> ()
+        ->remap->as<VectorRemapValueOperator> ();
+    REQUIRE_FALSE (createVectorRemapOperator (cpWriter, false, false, false, false));
+    VectorRemapValueOperator destructiveInput (
+        VectorRemapValueOperator::Input::ControlPoint, VectorRemapValueOperator::InputComponent::All,
+        VectorRemapValueOperator::Output::ControlPoint, VectorRemapValueOperator::OutputComponent::All,
+        VectorRemapValueOperator::Operation::Set, 1,
+        glm::vec3 (0.0f), glm::vec3 (1.0f), glm::vec3 (0.0f), glm::vec3 (1.0f));
+    for (const auto input : { VectorRemapValueOperator::Input::ControlPoint,
+                             VectorRemapValueOperator::Input::DeltaToControlPoint,
+                             VectorRemapValueOperator::Input::DirectionToControlPoint }) {
+        destructiveInput.input = input;
+        destructiveInput.output = VectorRemapValueOperator::Output::ControlPoint;
+        REQUIRE_FALSE (createVectorRemapOperator (destructiveInput, true, false, false, false));
+        destructiveInput.output = VectorRemapValueOperator::Output::Position;
+        REQUIRE (createVectorRemapOperator (destructiveInput, true, false, false, false));
+    }
+    particles[0].position = glm::vec3 (0.0f);
+    writers[4] (particles, 1, cps, 0.0f, MovementTime { 0.0f, 0.0f });
+    REQUIRE (toAuthoredVector (particles[0].position) == glm::vec3 (50.0f, 47.0f, 30.0f));
+
+    for (int authoredTarget = -1; authoredTarget <= 8; ++authoredTarget) {
+        JSON data = JSON::parse (R"({"id":1,"particle":{"initializer":[
+            {"name":"remapinitialvalue","output":"controlpoint","operation":"remap",
+             "outputrangemin":"3 5 7","outputrangemax":"3 5 7"}
+        ]}})");
+        data["particle"]["initializer"][0]["outputcontrolpoint0"] = authoredTarget;
+        const auto targetObject = ObjectParser::parse (data, project);
+        const auto& targetRemap = *targetObject->as<Particle> ()->initializers[0]
+            ->as<RemapInitialValueInitializer> ()->remap->as<VectorRemapValueOperator> ();
+        auto writeTarget = createVectorRemapOperator (targetRemap, true, false, false, false);
+        std::vector<ControlPointData> targetCps (8);
+        writeTarget (particles, 1, targetCps, 0.0f, MovementTime { 0.0f, 0.0f });
+        const int target = authoredTarget < 0 || authoredTarget > 7 ? 7 : authoredTarget;
+        for (int index = 0; index < 8; ++index) {
+            REQUIRE (toAuthoredVector (targetCps[index].position)
+                == (index == target ? glm::vec3 (3.0f, 5.0f, 7.0f) : glm::vec3 (0.0f)));
+        }
+    }
 }
 
 TEST_CASE ("Each parsed turbulence record retains its own blend envelope", "[particle][envelope][parser]") {
