@@ -3,6 +3,7 @@
 #include "CRenderable.h"
 #include "ImageDeviceColor.h"
 #include "ImageDimensions.h"
+#include "ImagePrelighting.h"
 #include "ModelNormalMatrix.h"
 #include "PuppetMeshParser.h"
 
@@ -450,6 +451,7 @@ CImage::~CImage () {
     // free any gl resources
     glDeleteBuffers (1, &this->m_sceneSpacePosition);
     if (m_lightingLocalPosition != GL_NONE) glDeleteBuffers (1, &m_lightingLocalPosition);
+    if (m_prelightingLocalPosition != GL_NONE) glDeleteBuffers (1, &m_prelightingLocalPosition);
     glDeleteBuffers (1, &this->m_copySpacePosition);
     glDeleteBuffers (1, &this->m_passSpacePosition);
     glDeleteBuffers (1, &this->m_texcoordCopy);
@@ -946,6 +948,7 @@ void CImage::setup () {
 	return;
     }
     m_hasCompositeConsumerAtSetup = hasCompositeConsumer ();
+    m_prelightingPasses.clear ();
     m_compositePresentationPass = nullptr;
     m_effectVisibilityAtSetup.clear ();
     m_effectVisibilityAtSetup.reserve (m_image.effects.size ());
@@ -986,11 +989,32 @@ void CImage::setup () {
 
     const auto& debug = this->getScene ().getContext ().getApp ().getContext ().settings.render.debug;
 
-    // copy pass to the composite layer
+    const bool ordinaryGeometry = !m_hasPuppetMesh
+        && !m_image.model->fullscreen && !m_image.model->passthrough;
+    const bool offscreenBase = m_hasCompositeConsumerAtSetup
+        || (!debug.baseOnly && std::ranges::any_of (m_image.effects, [] (const auto& effect) {
+            return effect->visible->value->getBool ();
+        }));
+
+    // Native 140209540 builds a PRELIGHTING variant for a lit image whose
+    // base draw precedes effects or a required composite presentation.
     for (const auto& cur : this->getImage ().model->material->passes) {
-	this->m_passes.push_back (
-	    new CPass (*this, std::make_shared<FBOProvider> (this), *cur, std::nullopt, std::nullopt, std::nullopt)
-	);
+	std::optional<std::reference_wrapper<const ImageEffectPassOverride>> variant;
+	const bool lit = std::ranges::any_of (std::array {"LIGHTING", "REFLECTION"}, [&] (const char* name) {
+	    const auto value = cur->combos.find (name);
+	    return value != cur->combos.end () && value->second != 0;
+	});
+	if (ordinaryGeometry && offscreenBase && lit) {
+	    auto& override = m_materials.compatibilityOverrides.emplace_back (
+	        std::make_unique<ImageEffectPassOverride> ());
+	    override->combos.insert_or_assign ("PRELIGHTING", 1);
+	    variant = std::cref (*override);
+	}
+	auto* pass = new CPass (*this, std::make_shared<FBOProvider> (this), *cur, variant, std::nullopt, std::nullopt);
+	this->m_passes.push_back (pass);
+	// Shader::getCombos exposes authored pass combos, while this variant is
+	// compiled from the separate override map. Retain its native draw stage.
+	if (variant) m_prelightingPasses.insert (pass);
     }
     m_basePassCount = m_passes.size ();
 
@@ -1130,8 +1154,9 @@ void CImage::setup () {
     // Native 1401e8aa0 runs every effect step offscreen for required images
     // (flag 0x10), then presents the completed texture with device color unity.
     // The plain passthrough shader preserves straight RGBA and applies neither
-    // the image color nor alpha a second time. Lit and puppet prepasses need
-    // their separate native geometry/matrix contracts and retain their route.
+    // the image color nor alpha a second time. Ordinary lit base draws use
+    // the separate native PRELIGHTING source-pixel and alternate matrix route.
+    // Puppet and lit fullscreen/passthrough geometry retain their own routes.
     const bool unlit = std::ranges::none_of (m_passes, [] (const CPass* pass) {
         const auto& combos = pass->getShader ()->getCombos ();
         return std::ranges::any_of (std::array {"LIGHTING", "REFLECTION"}, [&] (const char* name) {
@@ -1139,7 +1164,7 @@ void CImage::setup () {
             return value != combos.end () && value->second != 0;
         });
     });
-    if (m_hasCompositeConsumerAtSetup && !m_hasPuppetMesh && unlit && !m_passes.empty ()
+    if (m_hasCompositeConsumerAtSetup && !m_hasPuppetMesh && (unlit || ordinaryGeometry) && !m_passes.empty ()
         && !m_passes.back ()->getTarget ().has_value ()) {
         auto material = std::make_unique<MaterialPass> (MaterialPass {
             .blending = BlendingMode_Normal,
@@ -1213,6 +1238,11 @@ void CImage::setup () {
         };
         if (enabled ("LIGHTING") || enabled ("REFLECTION"))
             pass->addUniform ("g_EyePosition", &m_lightingEye);
+        if (m_prelightingPasses.contains (pass)) {
+            pass->addUniform ("g_AltModelMatrix", &m_prelightingWorld);
+            pass->addUniform ("g_AltNormalModelMatrix", &m_prelightingNormal);
+            pass->addUniform ("g_AltViewProjectionMatrix", &m_lightingViewProjection);
+        }
     }
 
     this->m_initialized = true;
@@ -1312,7 +1342,17 @@ void CImage::setupPasses (const std::function<void (std::shared_ptr<const CFBO>)
             const auto entry = combos.find (name);
             return entry != combos.end () && entry->second != 0;
         };
-        if (projection == &m_modelViewProjectionScreen && !m_hasPuppetMesh
+        if (passIndex < m_basePassCount && m_prelightingPasses.contains (pass)
+            && !m_hasPuppetMesh && !getImage ().model->fullscreen && !getImage ().model->passthrough) {
+            // Native 140207b50 rasterizes centered source pixels into the
+            // local image target while its alternate matrices retain the
+            // authored lighting coordinates. This must not use the scene
+            // projection for gl_Position, nor a logical-size quad for a
+            // shared material's world-space lighting.
+            spacePosition = m_prelightingLocalPosition;
+            projection = &m_prelightingProjection;
+            inverseProjection = &m_prelightingProjectionInverse;
+        } else if (projection == &m_modelViewProjectionScreen && !m_hasPuppetMesh
             && !getImage ().model->fullscreen && !getImage ().model->passthrough
             && (enabled ("LIGHTING") || enabled ("REFLECTION"))) {
             // Native 1401e8aa0 pushes the authored node model before final
@@ -1546,6 +1586,7 @@ void CImage::refreshEffectVisibility () {
     // Visibility changes alter the pass graph, its named targets and the
     // choice of the final scene pass. Rebuild from the same per-instance
     // DynamicValues; the script modules and source objects remain alive.
+    m_prelightingPasses.clear ();
     for (auto* pass : m_passes) delete pass;
     m_passes.clear ();
     m_compositePresentationPass = nullptr;
@@ -1673,6 +1714,15 @@ void CImage::updateScenePosition (
 
     m_lightingWorld = glm::translate (transform.authoredMatrix, glm::vec3 (alignment, 0.0f));
     m_lightingNormal = modelNormalMatrix (m_lightingWorld).value_or (glm::mat3 (1.0f));
+    const glm::vec2 sourceSize = m_hasSourceTexture
+        ? glm::vec2 (m_texture->getRealWidth (), m_texture->getRealHeight ())
+        : imageBackingDimensions (size);
+    const auto prelighting = imagePrelightingBasis (
+        m_lightingWorld, size, sourceSize, m_image.model->instanced);
+    m_prelightingWorld = prelighting.world;
+    m_prelightingNormal = modelNormalMatrix (m_prelightingWorld).value_or (glm::mat3 (1.0f));
+    m_prelightingProjection = prelighting.targetProjection;
+    m_prelightingProjectionInverse = glm::inverse (m_prelightingProjection);
 
     const glm::vec2 half = size * 0.5f;
     const glm::vec2 corners[4] = {
@@ -1711,6 +1761,16 @@ void CImage::uploadGeometryBuffers (const glm::vec2& size) {
     if (m_lightingLocalPosition == GL_NONE) glGenBuffers (1, &m_lightingLocalPosition);
     glBindBuffer (GL_ARRAY_BUFFER, m_lightingLocalPosition);
     glBufferData (GL_ARRAY_BUFFER, sizeof (localPosition), localPosition, GL_DYNAMIC_DRAW);
+    const glm::vec2 sourceHalf = (m_hasSourceTexture
+        ? glm::vec2 (m_texture->getRealWidth (), m_texture->getRealHeight ())
+        : imageBackingDimensions (size)) * 0.5f;
+    const GLfloat prelightingPosition[] {
+        -sourceHalf.x, -sourceHalf.y, 0, -sourceHalf.x, sourceHalf.y, 0, sourceHalf.x, -sourceHalf.y, 0,
+        sourceHalf.x, -sourceHalf.y, 0, -sourceHalf.x, sourceHalf.y, 0, sourceHalf.x, sourceHalf.y, 0,
+    };
+    if (m_prelightingLocalPosition == GL_NONE) glGenBuffers (1, &m_prelightingLocalPosition);
+    glBindBuffer (GL_ARRAY_BUFFER, m_prelightingLocalPosition);
+    glBufferData (GL_ARRAY_BUFFER, sizeof (prelightingPosition), prelightingPosition, GL_DYNAMIC_DRAW);
     GLfloat sceneSpacePosition[] = {
         m_sceneQuad[0].x, m_sceneQuad[0].y, m_sceneQuad[0].z,
         m_sceneQuad[1].x, m_sceneQuad[1].y, m_sceneQuad[1].z,

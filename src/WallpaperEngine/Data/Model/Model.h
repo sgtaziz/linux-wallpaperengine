@@ -30,5 +30,7 @@ struct ModelStruct {
     std::optional<int> height;
     /** Model file for puppet */
     std::optional<std::string> puppet;
+    /** Native per-image material instance; scales prelighting source pixels. */
+    bool instanced = false;
 };
 } // namespace WallpaperEngine::Data::Model

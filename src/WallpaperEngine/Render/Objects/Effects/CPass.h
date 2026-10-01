@@ -66,6 +66,7 @@ public:
     void addUniform (const std::string& name, const float* value, int count = 1);
     void addUniform (const std::string& name, const glm::vec3* value, int count = 1);
     void addUniform (const std::string& name, const glm::vec4* value, int count = 1);
+    void addUniform (const std::string& name, const glm::mat3* value, int count = 1);
     void addUniform (const std::string& name, const glm::mat4* value, int count = 1);
 
 private:
@@ -152,7 +153,6 @@ private:
     void addUniform (const std::string& name, const int* value, int count = 1);
     void addUniform (const std::string& name, const double* value, int count = 1);
     void addUniform (const std::string& name, const glm::vec2* value, int count = 1);
-    void addUniform (const std::string& name, const glm::mat3* value, int count = 1);
     void addUniform (const std::string& name, const int** value);
     void addUniform (const std::string& name, const double** value);
     void addUniform (const std::string& name, const float** value);
