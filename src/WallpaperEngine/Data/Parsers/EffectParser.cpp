@@ -136,6 +136,7 @@ std::vector<EffectPassUniquePtr> EffectParser::parseEffectPasses (const JSON& it
 	const auto binds = cur.optional ("bind");
 	const auto command = cur.optional ("command");
 	const auto material = cur.optional ("material");
+	const auto compose = cur.optional ("compose");
 	if (command.has_value ()) {
 	    if (!command->is_string ()) throw std::invalid_argument ("Effect pass command must be a string");
 	    if (*command != "copy" && *command != "swap")
@@ -157,6 +158,7 @@ std::vector<EffectPassUniquePtr> EffectParser::parseEffectPasses (const JSON& it
 		.target = command.has_value ()
 		    ? cur.require<std::string> ("target", "Effect command must have a target")
 		    : cur.optional<std::string> ("target"),
+		.compose = compose && compose->is_boolean () && compose->get<bool> (),
 	    })
 	);
     }

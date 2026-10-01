@@ -7,6 +7,7 @@
 #include "WallpaperEngine/Render/Objects/Effects/UniformArrayUpload.h"
 #include "WallpaperEngine/Render/UserTextureSelection.h"
 #include "WallpaperEngine/Data/Parsers/EffectParser.h"
+#include "WallpaperEngine/Render/Objects/ImageCompositeSteps.h"
 #include "WallpaperEngine/Data/Model/Project.h"
 #include "WallpaperEngine/Data/Model/Wallpaper.h"
 #include "WallpaperEngine/Data/Model/Material.h"
@@ -787,6 +788,59 @@ TEST_CASE ("Effect parser retains typed target dimensions and rejects unknown co
                        std::invalid_argument);
     REQUIRE_THROWS_AS (parse (R"({"passes":[],"fbos":[{"name":"a","clear":"1 2 3 4 5"}]})"),
                        std::invalid_argument);
+}
+
+TEST_CASE ("Effect main steps follow compose boundaries rather than target or draw counts",
+           "[render][fbo][composite]") {
+    using WallpaperEngine::Render::Objects::ImageCompositeStepEnd;
+    using WallpaperEngine::Render::Objects::imageEffectCompositeStepEnds;
+    using WallpaperEngine::Render::Objects::imageEffectMainStepCount;
+    Project project {};
+    const auto parse = [&] (const char* source) {
+        return EffectParser::parse (WallpaperEngine::Data::JSON::parseAuthoringJson (source, "main step fixture"),
+                                    project);
+    };
+    // Native's boolean-only compose field defaults false; strings/numbers
+    // do not request a main step. A named output alone never requests one.
+    const auto effect = parse (R"({"passes":[
+        {"command":"copy","source":"previous","target":"scratch"},
+        {"command":"copy","source":"previous","target":"scratch","compose":false},
+        {"command":"copy","source":"previous","target":"scratch","compose":1},
+        {"command":"copy","source":"previous","target":"scratch","compose":"true"},
+        {"command":"swap","source":"scratch","target":"other","compose":true}
+    ]})");
+    for (size_t index = 0; index < 4; ++index) REQUIRE_FALSE (effect->passes[index]->compose);
+    REQUIRE (effect->passes[4]->compose);
+    REQUIRE (imageEffectMainStepCount (*effect) == 2);
+    // Expanded material draws and zero-draw swaps do not change the count.
+    const std::array<ImageCompositeStepEnd, 5> descriptorEnds {{
+        {2, 0}, {3, 0}, {5, 0}, {6, 0}, {6, 1},
+    }};
+    REQUIRE (imageEffectCompositeStepEnds (*effect, descriptorEnds)
+             == std::vector<ImageCompositeStepEnd> {{6, 1}, {6, 1}});
+    REQUIRE_THROWS_AS (imageEffectCompositeStepEnds (*effect, std::span (descriptorEnds).first (4)),
+                       std::invalid_argument);
+    const auto empty = parse (R"({"passes":[]})");
+    REQUIRE (imageEffectMainStepCount (*empty) == 1);
+    REQUIRE (imageEffectCompositeStepEnds (*empty, {}).empty ());
+
+    // Native explicit-ending contract: one effect contributes one step;
+    // two separate effects or a compose:true descriptor contribute two.
+    const auto sameEffect = parse (R"({"passes":[
+        {"source":"previous"}, {"source":"previous","target":"scratch"}
+    ]})");
+    const std::array<ImageCompositeStepEnd, 2> twoDraws {{{2, 0}, {3, 0}}};
+    REQUIRE (imageEffectCompositeStepEnds (*sameEffect, twoDraws)
+             == std::vector<ImageCompositeStepEnd> {{3, 0}});
+    REQUIRE (imageEffectMainStepCount (*sameEffect) == 1);
+    sameEffect->passes[0]->compose = true;
+    REQUIRE (imageEffectCompositeStepEnds (*sameEffect, twoDraws)
+             == std::vector<ImageCompositeStepEnd> {{2, 0}, {3, 0}});
+    REQUIRE (imageEffectMainStepCount (*sameEffect) == 2);
+    const auto oneEffect = parse (R"({"passes":[{"target":"scratch"}]})");
+    const std::array<ImageCompositeStepEnd, 1> oneDraw {{{3, 0}}};
+    REQUIRE (imageEffectCompositeStepEnds (*oneEffect, oneDraw)
+             == std::vector<ImageCompositeStepEnd> {{3, 0}});
 }
 
 TEST_CASE ("Named effect clear actions use current logical targets and restore framebuffer bindings", "[render][fbo]") {

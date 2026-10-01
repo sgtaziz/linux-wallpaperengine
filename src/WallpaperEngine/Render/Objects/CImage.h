@@ -4,6 +4,7 @@
 #include "WallpaperEngine/Render/CObject.h"
 #include "WallpaperEngine/Render/Objects/Effects/CPass.h"
 #include "WallpaperEngine/Render/Objects/PuppetSkinning.h"
+#include "WallpaperEngine/Render/Objects/ImageCompositeSteps.h"
 #include "WallpaperEngine/Render/Wallpapers/CScene.h"
 #include "WallpaperEngine/Render/Wallpapers/SceneTransform.h"
 #include "WallpaperEngine/Render/TextureAnimation.h"
@@ -196,6 +197,8 @@ private:
 
     std::vector<Effects::CPass*> m_passes = {};
     Effects::CPass* m_compositePresentationPass = nullptr;
+    std::vector<ImageCompositeStepEnd> m_compositeStepEnds;
+    size_t m_compositeMainStepCount = 0;
     bool m_hasCompositeConsumerAtSetup = false;
     [[nodiscard]] bool hasCompositeConsumer () const;
     size_t m_basePassCount = 0;

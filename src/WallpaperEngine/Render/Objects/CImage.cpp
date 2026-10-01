@@ -950,6 +950,8 @@ void CImage::setup () {
     m_hasCompositeConsumerAtSetup = hasCompositeConsumer ();
     m_prelightingPasses.clear ();
     m_compositePresentationPass = nullptr;
+    m_compositeStepEnds.clear ();
+    m_compositeMainStepCount = 1;
     m_effectVisibilityAtSetup.clear ();
     m_effectVisibilityAtSetup.reserve (m_image.effects.size ());
     for (const auto& effect : m_image.effects)
@@ -1017,6 +1019,7 @@ void CImage::setup () {
 	if (variant) m_prelightingPasses.insert (pass);
     }
     m_basePassCount = m_passes.size ();
+    m_compositeStepEnds.push_back ({m_basePassCount, m_resourceSwaps.size ()});
 
     // prepare the passes list
     if (!debug.baseOnly && !this->getImage ().effects.empty ()) {
@@ -1055,8 +1058,10 @@ void CImage::setup () {
 	    auto endEffect = cur->effect->passes.end ();
 	    auto curOverride = cur->passOverrides.begin ();
 	    auto endOverride = cur->passOverrides.end ();
+	    std::vector<ImageCompositeStepEnd> descriptorEnds;
 
 	    for (; curEffect != endEffect; ++curEffect) {
+		descriptorEnds.push_back ({m_passes.size (), m_resourceSwaps.size ()});
 		if (!(*curEffect)->material.has_value ()) {
 		    if (!(*curEffect)->command.has_value ()) {
 			sLog.error ("Pass without material and command not supported");
@@ -1076,6 +1081,7 @@ void CImage::setup () {
 		    if ((*curEffect)->command != Command_Copy) {
 			this->m_resourceSwaps.push_back ({this->m_passes.size (), fboProvider,
 			                                  *(*curEffect)->source, *(*curEffect)->target});
+			descriptorEnds.back ().swaps = m_resourceSwaps.size ();
 			continue;
 		    }
 
@@ -1113,7 +1119,11 @@ void CImage::setup () {
 			++curOverride;
 		    }
 		}
+		descriptorEnds.back () = {m_passes.size (), m_resourceSwaps.size ()};
 	    }
+	    const auto boundaries = imageEffectCompositeStepEnds (*cur->effect, descriptorEnds);
+	    m_compositeStepEnds.insert (m_compositeStepEnds.end (), boundaries.begin (), boundaries.end ());
+	    m_compositeMainStepCount += imageEffectMainStepCount (*cur->effect);
 	}
     }
 
@@ -1134,6 +1144,8 @@ void CImage::setup () {
 	    *this, std::make_shared<FBOProvider> (this), **this->m_materials.colorBlending.material->passes.begin (),
 	    *this->m_materials.colorBlending.override, std::nullopt, std::nullopt
 	));
+	m_compositeStepEnds.push_back ({m_passes.size (), m_resourceSwaps.size ()});
+	++m_compositeMainStepCount;
     }
 
     // Native 1401e8aa0 runs effect steps on quads, then 140208c80 draws the
@@ -1164,8 +1176,7 @@ void CImage::setup () {
             return value != combos.end () && value->second != 0;
         });
     });
-    if (m_hasCompositeConsumerAtSetup && !m_hasPuppetMesh && (unlit || ordinaryGeometry) && !m_passes.empty ()
-        && !m_passes.back ()->getTarget ().has_value ()) {
+    if (m_hasCompositeConsumerAtSetup && !m_hasPuppetMesh && (unlit || ordinaryGeometry) && !m_passes.empty ()) {
         auto material = std::make_unique<MaterialPass> (MaterialPass {
             .blending = BlendingMode_Normal,
             .cullmode = CullingMode_Disable,
@@ -1253,12 +1264,9 @@ void CImage::setupPasses (const std::function<void (std::shared_ptr<const CFBO>)
     this->m_currentMainFBO = this->m_mainFBO;
     this->m_currentSubFBO = this->m_subFBO;
     if (m_compositePresentationPass) {
-        // Native 1401e8aa0 starts on the parity-selected scratch target so
-        // the full offscreen chain always finishes in public composite A.
-        const auto count = std::ranges::count_if (m_passes, [this] (const CPass* pass) {
-            return pass != m_compositePresentationPass && !pass->getTarget ().has_value ();
-        });
-        if (count % 2 == 0)
+        // Native counts main steps at compose and visible effect boundaries,
+        // including a step whose material draws into an explicit target.
+        if (m_compositeMainStepCount % 2 == 0)
             std::swap (m_currentMainFBO, m_currentSubFBO);
     }
     std::shared_ptr<const CFBO> drawTo = this->m_currentMainFBO;
@@ -1274,6 +1282,20 @@ void CImage::setupPasses (const std::function<void (std::shared_ptr<const CFBO>)
     bool inTargetEffectSequence = false;
     std::shared_ptr<const TextureProvider> effectInput = nullptr;
     auto nextSwap = this->m_resourceSwaps.begin ();
+    auto nextCompositeStep = m_compositeStepEnds.begin ();
+    const auto advanceCompositeSteps = [&] (size_t completedDraws) {
+        if (!m_compositePresentationPass) return;
+        const auto completedSwaps = static_cast<size_t> (
+            std::distance (m_resourceSwaps.begin (), nextSwap));
+        while (nextCompositeStep != m_compositeStepEnds.end ()
+               && nextCompositeStep->draws <= completedDraws
+               && nextCompositeStep->swaps <= completedSwaps) {
+            pinpongFramebuffer (&drawTo, &asInput);
+            inTargetEffectSequence = false;
+            effectInput = nullptr;
+            ++nextCompositeStep;
+        }
+    };
     size_t passIndex = 0;
 
     for (; cur != end; ++cur, ++passIndex) {
@@ -1286,11 +1308,18 @@ void CImage::setupPasses (const std::function<void (std::shared_ptr<const CFBO>)
 	    nextSwap->provider->swap (nextSwap->source, nextSwap->target);
 	    ++nextSwap;
 	}
+	advanceCompositeSteps (passIndex);
 	// TODO: PROPERLY CHECK EFFECT'S VISIBILITY AND TAKE IT INTO ACCOUNT
 	// TODO: THIS REQUIRES ON-THE-FLY EVALUATION OF EFFECTS VISIBILITY TO FIGURE OUT
 	// TODO: WHICH ONE IS THE LAST + A FEW OTHER THINGS
 	Effects::CPass* pass = *cur;
 	if (pass == m_compositePresentationPass && !shouldRenderFinalPass (true)) continue;
+	if (pass == m_compositePresentationPass) {
+	    // Boundary advancement selects the retained main texture even when
+	    // the last material drew into an explicit scratch target.
+	    inTargetEffectSequence = false;
+	    effectInput = nullptr;
+	}
 	if (this->m_hasPuppetMesh)
 	    pass->setGeometryCallback ({}, {}, {});
 	std::shared_ptr<const CFBO> prevDrawTo = drawTo;
@@ -1417,7 +1446,13 @@ void CImage::setupPasses (const std::function<void (std::shared_ptr<const CFBO>)
 
 	texcoord = this->getTexCoordPass ();
 
-	if (writesToTarget) {
+	if (m_compositePresentationPass) {
+	    if (pass != m_compositePresentationPass) {
+		if (writesToTarget) asInput = drawTo;
+		drawTo = prevDrawTo;
+		advanceCompositeSteps (passIndex + 1);
+	    }
+	} else if (writesToTarget) {
 	    asInput = drawTo;
 	    drawTo = prevDrawTo;
 	} else {
@@ -1431,6 +1466,7 @@ void CImage::setupPasses (const std::function<void (std::shared_ptr<const CFBO>)
 	nextSwap->provider->swap (nextSwap->source, nextSwap->target);
 	++nextSwap;
     }
+    advanceCompositeSteps (m_passes.size ());
 }
 
 bool CImage::shouldRenderFinalPass (bool isLastPass) const {
@@ -1590,6 +1626,8 @@ void CImage::refreshEffectVisibility () {
     for (auto* pass : m_passes) delete pass;
     m_passes.clear ();
     m_compositePresentationPass = nullptr;
+    m_compositeStepEnds.clear ();
+    m_compositeMainStepCount = 0;
     delete m_puppetChannelBasePass;
     delete m_puppetChannelPass;
     m_puppetChannelBasePass = nullptr;
