@@ -6,6 +6,7 @@
 #include "WallpaperEngine/Render/Objects/PuppetSkinning.h"
 #include "WallpaperEngine/Render/Wallpapers/CScene.h"
 #include "WallpaperEngine/Render/Wallpapers/SceneTransform.h"
+#include "WallpaperEngine/Render/TextureAnimation.h"
 
 #include "WallpaperEngine/Render/Shaders/Shader.h"
 
@@ -49,6 +50,9 @@ public:
     [[nodiscard]] glm::vec2 getSize () const;
     /** Execute a named authored material function on this image's effect targets. */
     bool executeMaterialFunction (const std::string& name);
+    [[nodiscard]] std::shared_ptr<ImageTextureAnimation> getTextureAnimation ();
+    [[nodiscard]] std::optional<uint32_t> textureAnimationFrameOverride () const;
+    void advanceTextureAnimation (float delta, uint32_t frame);
 
     [[nodiscard]] GLuint getSceneSpacePosition () const;
     [[nodiscard]] GLuint getCopySpacePosition () const;
@@ -177,6 +181,8 @@ private:
     std::shared_ptr<const CFBO> m_currentSubFBO = nullptr;
 
     const Image& m_image;
+    std::shared_ptr<ImageTextureAnimation> m_textureAnimation;
+    std::optional<uint32_t> m_textureAnimationTick;
     std::string m_alignment;
     glm::vec4 m_effectiveColor4 = {};
 

@@ -569,6 +569,8 @@ set(COMMON_SOURCES
     src/WallpaperEngine/Scripting/ScriptEngine.cpp
     src/WallpaperEngine/Scripting/ScriptableObject.h
     src/WallpaperEngine/Scripting/ScriptableObject.cpp
+    src/WallpaperEngine/Scripting/TextureAnimationObject.h
+    src/WallpaperEngine/Scripting/TextureAnimationObject.cpp
 
     src/WallpaperEngine/Maths.h
     src/WallpaperEngine/Maths.cpp)
@@ -605,6 +607,7 @@ if(BUILD_TESTING)
     target_sources(tests PRIVATE src/WallpaperEngine/Testing/Cases/LocalStorage.cpp)
     target_sources(tests PRIVATE src/WallpaperEngine/Testing/Cases/ScriptObjectIdentity.cpp)
     target_sources(tests PRIVATE src/WallpaperEngine/Testing/Cases/ScriptVectorSubtraction.cpp)
+    target_sources(tests PRIVATE src/WallpaperEngine/Testing/Cases/ScriptTextureAnimation.cpp)
     target_sources(tests PRIVATE src/WallpaperEngine/Testing/Cases/MediaTimeline.cpp)
     target_sources(tests PRIVATE src/WallpaperEngine/Testing/Cases/MediaArtwork.cpp)
     target_sources(tests PRIVATE src/WallpaperEngine/Testing/Cases/AlbumArtworkUpload.cpp)

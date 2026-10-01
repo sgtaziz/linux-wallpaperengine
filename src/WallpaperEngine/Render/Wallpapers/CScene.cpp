@@ -508,6 +508,13 @@ void CScene::renderFrame (const glm::ivec4& viewport) {
 	    = glm::mix (this->m_parallaxDisplacement, (centeredMouse * amount) * influence, delay);
     }
 
+    // Native updates image controls before SceneScript callbacks (1401891a0
+    // before 140171440 in 14017fa70). Joined handles observe the cached
+    // texture's last sampled cursor without advancing it.
+    for (const auto& object : m_objectsByRenderOrder)
+        if (object->is<Objects::CImage> ())
+            object->as<Objects::CImage> ()->advanceTextureAnimation (
+                getDeltaTime (), getContext ().getDriver ().getFrameCounter ());
     // run a tick in the javascript logic
     this->getScriptEngine ().tick ();
     if (m_hdrPostprocessing) {

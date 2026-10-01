@@ -26,6 +26,7 @@
 #include "WallpaperEngine/Data/Model/UserSetting.h"
 #include "WallpaperEngine/Data/Parsers/MaterialParser.h"
 #include "WallpaperEngine/Render/EffectClearAction.h"
+#include "WallpaperEngine/Render/CTexture.h"
 #include "WallpaperEngine/Logging/Log.h"
 #include "WallpaperEngine/Scripting/ScriptEngine.h"
 #include "WallpaperEngine/Scripting/ScriptPropertyBindings.h"
@@ -96,6 +97,34 @@ std::optional<glm::mat4> CImage::puppetEmissionBoneTransform (uint8_t boneIndex)
 }
 
 bool CImage::hasPuppetEmissionDeformation () const { return m_hasPuppetMesh; }
+
+std::shared_ptr<ImageTextureAnimation> CImage::getTextureAnimation () {
+    // Native 14020e670 uses the initial image texture's animated flag. It
+    // caches one control state per layer, independent of cached texture data.
+    if (!m_textureAnimation && m_texture && m_texture->isAnimated ()) {
+        const auto* texture = dynamic_cast<const CTexture*> (m_texture.get ());
+        if (texture)
+            m_textureAnimation = std::make_shared<ImageTextureAnimation> (
+                m_texture->getFrames (), texture->getAnimationPlayback ());
+    }
+    return m_textureAnimation;
+}
+
+void CImage::advanceTextureAnimation (float delta, uint32_t frame) {
+    if (!m_textureAnimation || m_textureAnimationTick == frame) return;
+    m_textureAnimationTick = frame;
+    m_textureAnimation->advance (delta);
+}
+
+std::optional<uint32_t> CImage::textureAnimationFrameOverride () const {
+    // Native 140206430 forwards the image frame to every animated texture
+    // sampled during this image's material/effect passes. Negative signed
+    // seeks disable that renderer override (14015f0d0), while retaining the
+    // value on the script control itself.
+    if (!m_textureAnimation || !m_textureAnimation->hasOverride ()) return std::nullopt;
+    const uint32_t frame = m_textureAnimation->getFrame ();
+    return std::bit_cast<int32_t> (frame) >= 0 ? std::optional<uint32_t> (frame) : std::nullopt;
+}
 
 void CImage::preparePuppetAnimation () {
     if (!m_hasPuppetMesh || !m_puppetAnimation || m_image.animationLayers.empty ()) return;
