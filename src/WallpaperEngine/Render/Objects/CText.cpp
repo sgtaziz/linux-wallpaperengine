@@ -421,11 +421,15 @@ void CText::resizeEffectTargets () {
     const auto width = static_cast<uint32_t> (size.x);
     const auto height = static_cast<uint32_t> (size.y);
     if (!m_textTarget) {
-	m_textTarget = std::make_shared<CFBO> ("_text_base", TextureFormat_ARGB8888,
+        // Native 1401ea500 selects enum14 (RGBA16_FLOAT) for the text's
+        // retained/effect targets when the rendering context is HDR-active.
+        const auto format = getScene ().isHdrPostprocessingActive ()
+            ? TextureFormat_RGBA16161616f : TextureFormat_ARGB8888;
+	m_textTarget = std::make_shared<CFBO> ("_text_base", format,
 	    TextureFlags_NoFlags, 1.0f, width, height, width, height);
-	m_effectMain = std::make_shared<CFBO> ("_text_main", TextureFormat_ARGB8888,
+	m_effectMain = std::make_shared<CFBO> ("_text_main", format,
 	    TextureFlags_NoFlags, 1.0f, width, height, width, height);
-	m_effectSub = std::make_shared<CFBO> ("_text_sub", TextureFormat_ARGB8888,
+	m_effectSub = std::make_shared<CFBO> ("_text_sub", format,
 	    TextureFlags_NoFlags, 1.0f, width, height, width, height);
     } else {
 	m_textTarget->resize (width, height, width, height);
@@ -783,8 +787,20 @@ void CText::rebuildTextureFrom (const std::string& text) {
         : hasInk ? maxInkY : 1;
     const int height = std::max (1, bottomY - originY);
     std::vector<uint8_t> pixels (static_cast<size_t> (width) * height * 4, 0);
+    const float brightness = getScene ().isHdrPostprocessingActive ()
+        ? m_text.brightness->value->getFloat () : 1.0f;
+    const float backgroundBrightness = getScene ().isHdrPostprocessingActive ()
+        ? m_text.backgroundBrightness->value->getFloat () : 1.0f;
+    // Keep accepted unit/LDR rasterization byte-identical. Nonunit native HDR
+    // factors apply to the separate fill/background inputs before composition,
+    // with a floating target so RGB > 1 reaches coverage and later effects.
+    const bool floatRaster = brightness != 1.0f
+        || (m_text.opaqueBackground->value->getBool () && backgroundBrightness != 1.0f);
+    std::vector<float> floatPixels;
+    if (floatRaster) floatPixels.assign (pixels.size (), 0.0f);
     const glm::vec3 rasterColor = glm::clamp (m_text.color->value->getVec3 (),
                                               glm::vec3 (0.0f), glm::vec3 (1.0f));
+    const glm::vec3 monoFloatColor = rasterColor * brightness;
     const uint8_t monoRed = static_cast<uint8_t> (std::lround (rasterColor.r * 255.0f));
     const uint8_t monoGreen = static_cast<uint8_t> (std::lround (rasterColor.g * 255.0f));
     const uint8_t monoBlue = static_cast<uint8_t> (std::lround (rasterColor.b * 255.0f));
@@ -812,11 +828,23 @@ void CText::rebuildTextureFrom (const std::string& text) {
         };
         for (size_t index = 0; index < pixels.size (); index += 4)
             std::copy (std::begin (channels), std::end (channels), pixels.begin () + index);
+        if (floatRaster)
+            for (size_t index = 0; index < floatPixels.size (); index += 4) {
+                floatPixels[index] = background.r * backgroundBrightness;
+                floatPixels[index + 1] = background.g * backgroundBrightness;
+                floatPixels[index + 2] = background.b * backgroundBrightness;
+                floatPixels[index + 3] = channels[3] / 255.0f;
+            }
     } else if (!offscreenGlyphBlend)
         for (size_t index = 0; index < pixels.size (); index += 4) {
             pixels[index] = monoRed;
             pixels[index + 1] = monoGreen;
             pixels[index + 2] = monoBlue;
+            if (floatRaster) {
+                floatPixels[index] = monoFloatColor.r;
+                floatPixels[index + 1] = monoFloatColor.g;
+                floatPixels[index + 2] = monoFloatColor.b;
+            }
         }
 
     // Native layout geometry is submitted as monochrome atlas, then color
@@ -843,6 +871,28 @@ void CText::rebuildTextureFrom (const std::string& text) {
                         auto& remaining = transmittance[static_cast<size_t> (dstY) * width + dstX];
                         remaining = static_cast<uint8_t> (
                             (static_cast<int> (remaining) * (255 - coverage) + 127) / 255);
+                    }
+                    if (floatRaster) {
+                        auto* floatDestination = floatPixels.data ()
+                            + (static_cast<size_t> (dstY) * width + dstX) * 4;
+                        glm::vec3 sourceColor = monoFloatColor;
+                        if (glyph.color) {
+                            // COLORFONT samples the atlas RGB and only the
+                            // node alpha; monochrome brightness never tints it.
+                            if (floatDestination[3] == 0.0f && !opaqueBackground)
+                                floatDestination[0] = floatDestination[1] = floatDestination[2] = 0.0f;
+                            const auto* source = bmp.buffer
+                                + static_cast<std::ptrdiff_t> (row) * bmp.pitch
+                                + static_cast<std::ptrdiff_t> (col) * 4;
+                            sourceColor = glm::vec3 (source[2], source[1], source[0]) / 255.0f;
+                        }
+                        if (offscreenGlyphBlend)
+                            compositeTextOffscreenRgba (floatDestination,
+                                sourceColor.r, sourceColor.g, sourceColor.b, coverage);
+                        else
+                            compositeTextRgba (floatDestination,
+                                sourceColor.r, sourceColor.g, sourceColor.b, coverage);
+                        continue;
                     }
                     if (glyph.color) {
                         if (destination[3] == 0 && !opaqueBackground)
@@ -879,7 +929,10 @@ void CText::rebuildTextureFrom (const std::string& text) {
     glGetIntegerv (GL_UNPACK_ROW_LENGTH, &previousRowLength);
     glPixelStorei (GL_UNPACK_ALIGNMENT, 1);
     glPixelStorei (GL_UNPACK_ROW_LENGTH, 0);
-	glTexImage2D (GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data ());
+    if (floatRaster)
+        glTexImage2D (GL_TEXTURE_2D, 0, GL_RGBA16F, width, height, 0, GL_RGBA, GL_FLOAT, floatPixels.data ());
+    else
+        glTexImage2D (GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data ());
     if (copyBackdrop) {
         if (m_glyphTransmittanceTexture == 0)
             glGenTextures (1, &m_glyphTransmittanceTexture);
@@ -908,6 +961,8 @@ void CText::rebuildTextureFrom (const std::string& text) {
     m_lastRasterColor = m_text.color->value->getVec3 ();
     m_lastRasterBackgroundColor = m_text.backgroundColor->value->getVec3 ();
     m_lastRasterOpacity = rasterOpacity;
+    m_lastRasterBrightness = brightness;
+    m_lastRasterBackgroundBrightness = backgroundBrightness;
     m_lastOpaqueBackground = opaqueBackground;
     m_lastOffscreenGlyphBlend = offscreenGlyphBlend;
     m_lastMaxRows = authoredMaxRows;
@@ -1043,6 +1098,10 @@ void CText::render () {
     const float rasterOpacity = std::clamp (m_text.color->value->getVec4 ().a
         * m_text.alpha->value->getFloat (), 0.0f, 1.0f);
     const bool offscreenGlyphBlend = !m_text.effects.empty () && hasVisibleEffects ();
+    const float brightness = getScene ().isHdrPostprocessingActive ()
+        ? m_text.brightness->value->getFloat () : 1.0f;
+    const float backgroundBrightness = getScene ().isHdrPostprocessingActive ()
+        ? m_text.backgroundBrightness->value->getFloat () : 1.0f;
     if (characterSize != m_lastCharacterSize26_6) {
 	m_lastCharacterSize26_6 = characterSize;
 	FT_Set_Char_Size (m_ftFace, 0, m_lastCharacterSize26_6, 300, 300);
@@ -1055,6 +1114,8 @@ void CText::render () {
 	       || m_text.color->value->getVec3 () != m_lastRasterColor
 	       || m_text.backgroundColor->value->getVec3 () != m_lastRasterBackgroundColor
 	       || rasterOpacity != m_lastRasterOpacity
+	       || brightness != m_lastRasterBrightness
+	       || backgroundBrightness != m_lastRasterBackgroundBrightness
 	       || opaqueBackground != m_lastOpaqueBackground
 	       || offscreenGlyphBlend != m_lastOffscreenGlyphBlend
 	       || m_text.maxRows->value->getInt () != m_lastMaxRows
@@ -1145,7 +1206,8 @@ void CText::render () {
 	drawMvp = drawMvp * glm::scale (glm::mat4 (1.0f),
 	    glm::vec3 (paddedSize / m_quadSize, 1.0f));
 	const glm::vec4 background = m_text.backgroundColor->value->getVec4 ();
-	glUniform4f (m_uBackgroundColor, background.r, background.g, background.b, 1.0f);
+	glUniform4f (m_uBackgroundColor, background.r * backgroundBrightness,
+            background.g * backgroundBrightness, background.b * backgroundBrightness, 1.0f);
 	glUniform2f (m_uGlyphUvOffset, pad.x / paddedSize.x, pad.y / paddedSize.y);
 	glUniform2f (m_uGlyphUvScale, paddedSize.x / m_quadSize.x, paddedSize.y / m_quadSize.y);
     }

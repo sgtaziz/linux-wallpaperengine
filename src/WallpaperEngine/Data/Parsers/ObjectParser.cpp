@@ -9,6 +9,7 @@
 #include "WallpaperEngine/Data/Builders/ColorBuilder.h"
 #include "WallpaperEngine/Data/Model/Object.h"
 #include "WallpaperEngine/Data/Model/Project.h"
+#include "WallpaperEngine/Data/Model/Property.h"
 #include "WallpaperEngine/Logging/Log.h"
 #include "WallpaperEngine/Render/Objects/ParticleInitialColor.h"
 
@@ -25,6 +26,63 @@ using namespace WallpaperEngine::Data::Parsers;
 using namespace WallpaperEngine::Data::Model;
 
 namespace {
+// These text descriptors are native float fields even when their authored or
+// user-property seed is an integer. Keep that authority local to the two new
+// descriptors; unrelated dynamic settings still retain their inferred types.
+class TextFloatValue final : public DynamicValue {
+public:
+    TextFloatValue (DynamicValue& source, float authoredSeed) : DynamicValue (source) {
+        DynamicValue::update (authoredSeed, Initialization);
+        update (source, Initialization);
+        if (source.getScriptSource ()) setScriptSource (*source.getScriptSource ());
+        setProperties (std::move (source.getProperties ()));
+    }
+    using DynamicValue::update;
+    void update (float value, UpdateSource source) override {
+        // Retain the existing scripting API's finite-float validation without
+        // imposing a brightness range or changing generic dynamic values.
+        if (std::isfinite (value)) DynamicValue::update (value, source);
+    }
+    void update (int value, UpdateSource source) override {
+        update (static_cast<float> (value), source);
+    }
+    void update (const DynamicValue& value, UpdateSource source) override {
+        if (value.getType () == Float || value.getType () == Int)
+            update (value.getFloat (), source);
+    }
+    void update (bool, UpdateSource) override { }
+    void update (const glm::vec2&, UpdateSource) override { }
+    void update (const glm::vec3&, UpdateSource) override { }
+    void update (const glm::vec4&, UpdateSource) override { }
+    void update (const std::string&, UpdateSource) override { }
+    void update (const Color&, UpdateSource) override { }
+    void update (UpdateSource) override { }
+};
+
+UserSettingUniquePtr textFloatSetting (const JSON& object, const Project& project, const char* key) {
+    JSON authored = object.optional (key).value_or (JSON (1.0f));
+    const auto number = [] (const JSON& value) {
+        if (!value.is_number ()) return 1.0f;
+        const double scalar = value.get<double> ();
+        return std::isfinite (scalar) && std::abs (scalar) <= std::numeric_limits<float>::max ()
+            ? static_cast<float> (scalar) : 1.0f;
+    };
+    // Native 1401a4b00 accepts numeric literals and numeric object.value;
+    // omitted/nonnumeric values retain the constructor's float-one seed.
+    if (authored.is_object ()) {
+        const auto value = authored.optional ("value");
+        authored["value"] = value ? JSON (number (*value)) : JSON (1.0f);
+    } else {
+        authored = number (authored);
+    }
+    const float authoredSeed = authored.is_object () ? authored["value"].get<float> () : authored.get<float> ();
+    auto setting = UserSettingParser::parse (authored, project.properties);
+    setting->value = std::make_unique<TextFloatValue> (*setting->value, authoredSeed);
+    if (setting->condition) setting->value->attachCondition (*setting->condition);
+    if (setting->property) setting->value->connect (setting->property.get ());
+    return setting;
+}
+
 void mergeAuthoredNonNull (JSON& target, const JSON& overlay) {
     if (overlay.is_null ()) return;
     if (overlay.is_object ()) {
@@ -314,12 +372,14 @@ TextUniquePtr ObjectParser::parseText (const JSON& it, const Project& project, O
 	    .limitUseEllipsis = it.user ("limituseellipsis", project.properties, false),
 	    .opaqueBackground = it.user ("opaquebackground", project.properties, false),
 	    .backgroundColor = it.color ("backgroundcolor", project.properties, Builders::ColorBuilder::Black, true),
+	    .backgroundBrightness = textFloatSetting (it, project, "backgroundbrightness"),
 	    .effects = effects.has_value ()
 	        ? parseEffects (*effects, project)
 	        : std::vector<ImageEffectUniquePtr> {},
 	    .size = it.optional ("size", glm::vec2 (0.0f)),
 	    .scale = it.user ("scale", project.properties, glm::vec3 (1.0f)),
 	    .color = it.color ("color", project.properties, Builders::ColorBuilder::White, true),
+	    .brightness = textFloatSetting (it, project, "brightness"),
 	    .alpha = it.user ("alpha", project.properties, 1.0f),
 	    .visible = it.user ("visible", project.properties, true),
 	    .parallaxDepth = it.user ("parallaxDepth", project.properties, glm::vec2 (0.0f)),

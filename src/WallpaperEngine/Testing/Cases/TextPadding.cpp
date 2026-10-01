@@ -2,11 +2,103 @@
 
 #include "WallpaperEngine/Data/Model/Object.h"
 #include "WallpaperEngine/Data/Model/Project.h"
+#include "WallpaperEngine/Data/Model/Property.h"
 #include "WallpaperEngine/Data/Model/Wallpaper.h"
 #include "WallpaperEngine/Data/Parsers/ObjectParser.h"
+#include "WallpaperEngine/Scripting/ScriptPropertyBindings.h"
 
 #include <stdexcept>
 #include <string>
+#include <algorithm>
+#include <limits>
+
+TEST_CASE ("Text brightness descriptors retain float seeds and unclamped scalar values", "[text][parser][hdr]") {
+    using namespace WallpaperEngine::Data::Model;
+    using WallpaperEngine::Data::JSON::JSON;
+    using WallpaperEngine::Data::Parsers::ObjectParser;
+    Project project {};
+    for (const char* authored : {"1", "4", "0.25", "-2", "null", "true", "\"0.25\"", "{}"}) {
+        const auto object = ObjectParser::parse (JSON::parse (std::string (
+            R"({"id":92,"name":"brightness","text":"H","brightness":)") + authored
+            + R"(,"backgroundbrightness":)" + authored + "}"), project);
+        const auto& text = dynamic_cast<const Text&> (*object);
+        const float expected = std::string (authored) == "4" ? 4.0f
+            : std::string (authored) == "0.25" ? 0.25f : std::string (authored) == "-2" ? -2.0f : 1.0f;
+        REQUIRE (text.brightness->value->getType () == DynamicValue::Float);
+        REQUIRE (text.brightness->value->getFloat () == expected);
+        REQUIRE (text.backgroundBrightness->value->getType () == DynamicValue::Float);
+        REQUIRE (text.backgroundBrightness->value->getFloat () == expected);
+    }
+    const auto object = ObjectParser::parse (JSON::parse (R"({"id":93,"name":"default","text":"H"})"), project);
+    const auto& text = dynamic_cast<const Text&> (*object);
+    REQUIRE (text.brightness->value->getFloat () == 1.0f);
+    REQUIRE (text.backgroundBrightness->value->getFloat () == 1.0f);
+}
+
+TEST_CASE ("Text float brightness retains user listeners and authored script animation metadata", "[text][parser][binding][hdr]") {
+    using namespace WallpaperEngine::Data::Model;
+    using WallpaperEngine::Data::JSON::JSON;
+    using WallpaperEngine::Data::Parsers::ObjectParser;
+    Project project {};
+    auto user = std::make_shared<PropertySlider> (PropertyData {"gain", "gain"}, SliderData {0, 4, .25f}, 1.0f);
+    project.properties["gain"] = user;
+    const auto authored = JSON::parse (R"({"id":94,"name":"live","text":"H",
+      "brightness":{"value":1,"user":"gain","script":"export function update(v) { return v; }",
+        "scriptproperties":{"step":{"value":0.25}},
+        "animation":{"options":{"fps":10,"length":10,"startpaused":true},
+          "c0":[{"frame":0,"value":0},{"frame":10,"value":4}]}},
+      "backgroundbrightness":{"value":1,"user":"gain"}})");
+    auto object = ObjectParser::parse (authored, project);
+    auto& text = dynamic_cast<Text&> (*object);
+    auto& value = *text.brightness->value;
+    REQUIRE (value.getScriptSource ().has_value ());
+    REQUIRE (value.getProperties ().at ("step")->value->getFloat () == .25f);
+    REQUIRE (value.getAnimation () != nullptr);
+    REQUIRE (value.getAnimation ()->sampleFrame (0, 5) == 2.0f);
+    const auto bindings = WallpaperEngine::Scripting::scriptPropertyBindings (text);
+    const auto binding = std::find_if (bindings.begin (), bindings.end (), [] (const auto& item) {
+        return std::string (item.name) == "brightness";
+    });
+    REQUIRE (&binding->value == &value);
+    user->update (4, DynamicValue::User);
+    REQUIRE (value.getType () == DynamicValue::Float);
+    REQUIRE (value.getFloat () == 4.0f);
+    REQUIRE (text.backgroundBrightness->value->getType () == DynamicValue::Float);
+    binding->value.update (.25f, DynamicValue::Script);
+    REQUIRE (value.getFloat () == .25f);
+    value.update (DynamicValue (2), DynamicValue::Script);
+    REQUIRE (value.getType () == DynamicValue::Float);
+    value.update (DynamicValue (std::string ("invalid")), DynamicValue::User);
+    value.update (DynamicValue::User);
+    REQUIRE (value.getFloat () == 2.0f);
+    value.update (std::numeric_limits<float>::infinity (), DynamicValue::Script);
+    value.update (std::numeric_limits<float>::quiet_NaN (), DynamicValue::User);
+    REQUIRE (value.getFloat () == 2.0f);
+    REQUIRE (value.getType () == DynamicValue::Float);
+    // Dynamic layer creation reparses authored JSON and must retain both the
+    // float authority and live property connection, including after teardown.
+    auto clone = ObjectParser::parse (authored, project);
+    auto& cloned = dynamic_cast<Text&> (*clone);
+    REQUIRE (cloned.brightness->value->getType () == DynamicValue::Float);
+    REQUIRE (cloned.brightness->value->getAnimation () != value.getAnimation ());
+    object.reset ();
+    user->update (3, DynamicValue::User);
+    REQUIRE (cloned.brightness->value->getType () == DynamicValue::Float);
+    REQUIRE (cloned.brightness->value->getFloat () == 3.0f);
+    cloned.brightness->value->update (.125f, DynamicValue::Script);
+    REQUIRE (cloned.brightness->value->getFloat () == .125f);
+    // An invalid initial user value cannot erase the authored float seed;
+    // subsequent invalid user updates obey the same retained-value policy.
+    auto invalidUser = std::make_shared<PropertyBoolean> (PropertyData {"invalid", "invalid"}, false);
+    project.properties["invalid"] = invalidUser;
+    auto invalidBinding = ObjectParser::parse (JSON::parse (R"({"id":95,"name":"invalid user","text":"H",
+      "brightness":{"value":0.25,"user":"invalid"}})"), project);
+    const auto& retained = dynamic_cast<Text&> (*invalidBinding);
+    REQUIRE (retained.brightness->value->getType () == DynamicValue::Float);
+    REQUIRE (retained.brightness->value->getFloat () == .25f);
+    invalidUser->update (true, DynamicValue::User);
+    REQUIRE (retained.brightness->value->getFloat () == .25f);
+}
 
 TEST_CASE ("Text padding retains scalar and authored horizontal/vertical forms", "[scene][parser]") {
     using WallpaperEngine::Data::JSON::JSON;

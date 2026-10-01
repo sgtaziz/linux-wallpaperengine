@@ -105,18 +105,20 @@ TEST_CASE ("Particle and text bindings retain prior names with typed authority",
     textData.limitUseEllipsis = UserSettingBuilder::fromValue (false);
     textData.opaqueBackground = UserSettingBuilder::fromValue (false);
     textData.backgroundColor = UserSettingBuilder::fromValue (glm::vec3 (0.0f));
+    textData.backgroundBrightness = UserSettingBuilder::fromValue (1.0f);
     textData.padding = UserSettingBuilder::fromValue (glm::vec2 (32.0f));
     textData.scale = UserSettingBuilder::fromValue (glm::vec3 (1.0f));
     textData.color = UserSettingBuilder::fromValue (glm::vec3 (1.0f));
+    textData.brightness = UserSettingBuilder::fromValue (1.0f);
     textData.alpha = UserSettingBuilder::fromValue (1.0f);
     textData.visible = UserSettingBuilder::fromValue (true);
     textData.parallaxDepth = UserSettingBuilder::fromValue (glm::vec2 (0.0f));
     Text text (baseObject (), std::move (textData));
     const auto textBindings = scriptPropertyBindings (text);
     REQUIRE (names (textBindings) == std::set<std::string> {"origin", "scale", "angles", "visible",
-							   "color", "alpha", "pointSize", "spacing", "limitRows", "maxRows",
+							   "color", "brightness", "alpha", "pointSize", "spacing", "limitRows", "maxRows",
 							   "limitWidth", "maxWidth",
-							   "limitUseEllipsis", "opaqueBackground", "backgroundColor", "padding", "text",
+							   "limitUseEllipsis", "opaqueBackground", "backgroundColor", "backgroundBrightness", "padding", "text",
 							   "parallaxDepth"});
     REQUIRE (binding (textBindings, "parallaxDepth") == text.parallaxDepth->value.get ());
     REQUIRE (binding (textBindings, "scale") == text.scale->value.get ());

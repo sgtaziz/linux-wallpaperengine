@@ -1,10 +1,12 @@
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/catch_approx.hpp>
 
 #include "WallpaperEngine/Render/Objects/TextCodepoints.h"
 #include "WallpaperEngine/Render/Objects/TextRaster.h"
 #include "WallpaperEngine/Render/Objects/TextShaping.h"
 
 #include <filesystem>
+#include <algorithm>
 #include <vector>
 
 using WallpaperEngine::Render::Objects::decodeTextCodepoints;
@@ -13,6 +15,54 @@ using WallpaperEngine::Render::Objects::compositeTextRgba;
 using WallpaperEngine::Render::Objects::compositeTextOffscreenRgba;
 using WallpaperEngine::Render::Objects::shapeTextRun;
 using WallpaperEngine::Render::Objects::shapeTextRow;
+
+TEST_CASE ("HDR monochrome RGB survives coverage while brightness leaves alpha independent", "[text][raster][hdr]") {
+    float bright[] {0, 0, 0, 0}, dark[] {0, 0, 0, 0};
+    compositeTextRgba (bright, 2.0f, 2.0f, 2.0f, 128);
+    compositeTextRgba (dark, 0.0f, 0.0f, 0.0f, 128);
+    REQUIRE (bright[0] == 2.0f);
+    REQUIRE (bright[3] == dark[3]);
+    // Native >1 evidence is carried by antialiased edges even when the
+    // presentation saturates the fully covered glyph core.
+    REQUIRE (bright[0] * bright[3] == Catch::Approx (256.0f / 255.0f));
+    float offscreen[] {0, 0, 0, 0}, unit[] {0, 0, 0, 0};
+    compositeTextOffscreenRgba (offscreen, 2.0f, .5f, .125f, 128);
+    compositeTextOffscreenRgba (unit, 1.0f, .5f, .125f, 128);
+    REQUIRE (offscreen[0] > 1.0f);
+    REQUIRE (offscreen[3] == unit[3]);
+    REQUIRE (offscreen[3] == 64.0f / 255.0f);
+    // A subsequent color-font draw consumes atlas RGB, independently of
+    // the earlier monochrome fill's brightness and without a final multiply.
+    compositeTextRgba (bright, .8f, .3f, .1f, 255);
+    REQUIRE (bright[0] == .8f);
+    REQUIRE (bright[1] == .3f);
+    REQUIRE (bright[2] == .1f);
+}
+
+TEST_CASE ("HDR background and glyph contributions compose before backdrop sampling", "[text][raster][hdr]") {
+    float background[] {.5f, .5f, .5f, 1.0f};
+    compositeTextRgba (background, 0.0f, 0.0f, 0.0f, 128);
+    REQUIRE (background[0] == Catch::Approx (.5f * 127.0f / 255.0f));
+    REQUIRE (background[3] == 1.0f);
+    float glyph[] {0, 0, 0, 0};
+    compositeTextOffscreenRgba (glyph, 2.0f, 2.0f, 2.0f, 128);
+    const float backdrop = .3f, remaining = 127.0f / 255.0f;
+    REQUIRE (glyph[0] + backdrop * remaining == Catch::Approx (256.0f / 255.0f + backdrop * remaining));
+}
+
+TEST_CASE ("HDR text gain-down retains bright target RGB and independent translucent alpha", "[text][raster][hdr][effect]") {
+    // Native positive: brightness4 * authored.5 enters the effect as RGB2;
+    // gain.25 then matches a unit-brightness .5 glyph. Clamping the retained
+    // target to one produces .25 instead and loses this equality.
+    for (uint8_t coverage : {uint8_t (128), uint8_t (255)}) {
+        float bright[] {0, 0, 0, 0}, control[] {0, 0, 0, 0};
+        compositeTextOffscreenRgba (bright, 2.0f, 2.0f, 2.0f, coverage);
+        compositeTextOffscreenRgba (control, .5f, .5f, .5f, coverage);
+        REQUIRE (bright[0] * .25f == control[0]);
+        REQUIRE (bright[3] == control[3]);
+        REQUIRE (std::min (bright[0], 1.0f) * .25f < control[0]);
+    }
+}
 
 TEST_CASE ("Scene text decodes complete Unicode scalar values", "[text][utf8]") {
     const auto codepoints = decodeTextCodepoints ("A\xc3\xa9\xce\xa9\xf0\x9f\x99\x82");
