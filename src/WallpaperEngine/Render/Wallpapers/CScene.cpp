@@ -856,7 +856,8 @@ glm::vec3 CScene::getLayerParallaxOffset (const glm::vec2& depth) const {
     if (!getScene ().camera.parallax.enabled->value->getBool ()
         || getContext ().getApp ().getContext ().settings.mouse.disableparallax)
         return {};
-    return sceneParallaxOffset (depth, m_parallaxDisplacement, static_cast<float> (getWidth ()));
+    return sceneParallaxOffset (depth, m_parallaxDisplacement, static_cast<float> (getWidth ()),
+                                m_camera->isOrthogonal ());
 }
 glm::vec3 CScene::getLayerParallaxOffset (const glm::vec3& origin,
                                          const glm::vec2& depth) const {
@@ -866,7 +867,7 @@ glm::vec3 CScene::getLayerParallaxOffset (const glm::vec3& origin,
     return sceneParticleParallaxOffset (
         origin, m_camera->getEye (), depth, m_parallaxDisplacement,
         static_cast<float> (getWidth ()), static_cast<float> (getHeight ()),
-        getScene ().camera.parallax.amount->value->getFloat ());
+        getScene ().camera.parallax.amount->value->getFloat (), m_camera->isOrthogonal ());
 }
 
 const std::vector<CObject*>& CScene::getObjectsByRenderOrder () const { return this->m_objectsByRenderOrder; }
