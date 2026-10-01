@@ -35,6 +35,8 @@ struct EffectPass {
     std::optional<std::string> source;
     /** The target this material renders to (if specified) */
     std::optional<std::string> target;
+    /** Advance the main image composite after this descriptor. */
+    bool compose = false;
 };
 
 struct Effect {
