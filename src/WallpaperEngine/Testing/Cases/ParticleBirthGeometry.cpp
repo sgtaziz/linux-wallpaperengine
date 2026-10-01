@@ -1,10 +1,51 @@
 #include "WallpaperEngine/Render/Objects/ParticleBirthGeometry.h"
+#include "WallpaperEngine/Render/Objects/ParticleInstancePatch.h"
+#include "WallpaperEngine/Render/Objects/ParticleCore.h"
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/catch_approx.hpp>
 #include <array>
 #include <limits>
 
 using namespace WallpaperEngine::Render::Objects::ParticleCore;
+
+TEST_CASE ("Instance count patch changes spacing without rewinding a mirrored sequence",
+           "[particle][birthgeometry][sequence][instancepatch]") {
+    // Native complete count matrix: authored5 gives5 sites at factor1 and10
+    // sites at factor2, including both CP endpoints. No RNG is consumed.
+    const InstanceSequencePatch patch {5.0f, true};
+    for (const auto [factor, sites] : {std::pair {1.0f, 5}, std::pair {2.0f, 10}}) {
+        BetweenControlPointsState state {};
+        patch.apply (state.step, factor);
+        for (int i = 0; i < sites; ++i) {
+            const auto result = betweenControlPointsBirth ({}, {}, 1, {-90, 0, 0}, {90, 0, 0},
+                state, {0, 1}, false, 16, 0, {}, 1, false);
+            REQUIRE (result.position.x == Catch::Approx (-90.0f + 180.0f * i / (sites - 1)).margin (0.0001f));
+        }
+    }
+    BetweenControlPointsState state {0.75f, -0.25f};
+    patch.apply (state.step, 2.0f);
+    REQUIRE (state.phase == 0.75f);
+    REQUIRE (state.step == Catch::Approx (1.0f / 9.0f));
+    const auto birth = betweenControlPointsBirth ({}, {}, 1, {}, {180, 0, 0},
+        state, {0, 1}, true, 16, 0, {}, 1, false);
+    REQUIRE (birth.position.x == 135.0f);
+    REQUIRE (state.phase == Catch::Approx (0.75f + 1.0f / 9.0f));
+    resetSequencePhase (state.phase, state.step);
+    REQUIRE (state.phase == 0.0f);
+    REQUIRE (state.step == Catch::Approx (1.0f / 9.0f));
+
+    float unpatchedStep = -0.25f;
+    InstanceSequencePatch {5.0f, false}.apply (unpatchedStep, 2.0f);
+    REQUIRE (unpatchedStep == -0.25f); // node0x20/flag0 never receive opcode4
+    REQUIRE (instanceSequenceStep (5.0f, 0.2f) == 10000.0f);
+    REQUIRE (instanceSequenceStep (5.0f, -1.0f) == 10000.0f);
+    REQUIRE (instanceSequenceStep (5.0f, std::numeric_limits<float>::quiet_NaN ()) == 10000.0f);
+    REQUIRE (instanceSequenceStep (5.0f, 1.5f) == Catch::Approx (1.0f / 6.5f));
+    // Separate float32 multiply/subtract gives1; a fused operation gives a
+    // different reciprocal for this exactly representable descriptor payload.
+    REQUIRE (instanceSequenceStep (3.0f, 2.0f / 3.0f) == 1.0f);
+    REQUIRE (instanceSequenceStep (5.0f, std::numeric_limits<float>::infinity ()) == 0.0f);
+}
 
 namespace {
 struct NativeBirth { float phase, nextPhase, time; glm::vec3 position; };
