@@ -5,6 +5,7 @@
 #include "WallpaperEngine/Data/Utils/ScopeGuard.h"
 #include "WallpaperEngine/Scripting/ScriptEngine.h"
 #include "WallpaperEngine/Scripting/ScriptableObject.h"
+#include "WallpaperEngine/Scripting/TextureAnimationObject.h"
 #include "WallpaperEngine/Render/Objects/CSound.h"
 #include "WallpaperEngine/Render/Objects/CImage.h"
 #include "WallpaperEngine/Render/Objects/CText.h"
@@ -335,6 +336,16 @@ static JSValue layer_get_parent (JSContext* ctx, JSValueConst thisValue, int, JS
                       : JS_UNDEFINED;
 }
 
+static JSValue layer_get_texture_animation (JSContext* ctx, JSValueConst thisValue,
+                                           int, JSValueConst*) {
+    auto* container = scriptableContainer (thisValue);
+    auto* layer = container && container->lifetime ? container->lifetime->object : nullptr;
+    auto* image = dynamic_cast<WallpaperEngine::Render::Objects::CImage*> (layer);
+    if (!image) return JS_ThrowTypeError (ctx, "getTextureAnimation requires an image layer");
+    return container->adapter.getEngine ().getAdapters ().textureAnimation->instantiate (
+        layer, image->getTextureAnimation ());
+}
+
 // Native SceneScript Mat4 stores its column-major elements in `m`; authored
 // scripts read indices 12 and 13 for the layer's current world translation.
 // Use the same resolved hierarchy as scene rendering, including attachments,
@@ -389,6 +400,9 @@ JSValue scriptableobject_property_get (JSContext* ctx, JSValueConst obj_val, JSA
         return JS_NewCFunction (ctx, layer_get_parent, name, 0);
     if (std::string_view (name) == "getTransformMatrix")
         return JS_NewCFunction (ctx, layer_get_transform_matrix, name, 0);
+    if (std::string_view (name) == "getTextureAnimation"
+        && dynamic_cast<WallpaperEngine::Render::Objects::CImage*> (container->lifetime->object))
+        return JS_NewCFunction (ctx, layer_get_texture_animation, name, 0);
     if (auto* text = dynamic_cast<WallpaperEngine::Render::Objects::CText*> (
             container->lifetime->object)) {
         const std::string_view field (name);
