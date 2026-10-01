@@ -5,6 +5,7 @@
 #include "ParticleBirthGeometry.h"
 #include "ParticleInitialColor.h"
 #include "ParticleControlPointConstraints.h"
+#include "ParticleChildControlPoints.h"
 #include "ParticleImageEmitterReadback.h"
 #include "CImage.h"
 
@@ -1482,13 +1483,17 @@ bool CParticle::isFinishedForEvent () const {
 void CParticle::inheritControlPointsFromParent (const CParticle& parent,
                                                 const ParticleChild& descriptor) {
     m_inheritedControlPointPositions.fill (std::nullopt);
-    // Native 14022a580 only enters this stream-copy branch for descriptor
-    // flags bit 0. The root world/local flag conversion needs the exact scene
-    // stack mapping; the matching-basis case copies simulation XYZ directly.
+    // Native 14022a580 enters for descriptor bit 0 and converts XYZ using
+    // the parent's stack before the child node is pushed. This is distinct
+    // from the authored parent-CP matrix link handled during child update.
     if ((descriptor.flags & 1) == 0) return;
-    if ((parent.m_particle.flags & 1) != (m_particle.flags & 1)) {
+    const bool parentWorld = (parent.m_particle.flags & 1u) != 0;
+    const bool childWorld = (m_particle.flags & 1u) != 0;
+    const std::optional<glm::mat4> inverseParentStack = parent.m_controlPointTransformInvertible
+        ? std::optional<glm::mat4> (parent.m_controlPointInverse) : std::nullopt;
+    if (parentWorld && !childWorld && !inverseParentStack) {
         if (!m_reportedInheritedCPBasisMismatch) {
-            sLog.error ("Particle child CP basis conversion pending for object ", m_particle.id);
+            sLog.error ("Particle child control-point parent transform is singular: ", m_particle.id);
             m_reportedInheritedCPBasisMismatch = true;
         }
         return;
@@ -1516,7 +1521,9 @@ void CParticle::inheritControlPointsFromParent (const CParticle& parent,
         // destination again for the next live source particle.
         if ((cp.flags & 0x10005u) != 0) continue;
         m_inheritedControlPointPositions[static_cast<size_t> (destination)]
-            = source->position;
+            = ParticleCore::childParticleControlPointPosition (
+                source->position, parentWorld, childWorld,
+                parent.m_simulationModelMatrix, inverseParentStack);
         ++destination;
     }
 }
