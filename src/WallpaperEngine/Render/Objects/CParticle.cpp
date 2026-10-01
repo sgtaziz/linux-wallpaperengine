@@ -341,6 +341,9 @@ CParticle::CParticle (Wallpapers::CScene& scene, const Particle& particle, uint3
     ScriptableObject (scene, particle), m_particle (particle), m_childDepth (childDepth),
     m_childAncestry (std::move (ancestry)), m_parentParticleRuntime (parentRuntime),
     m_rng (scene.getParticleRandom ()) {
+    if (!m_parentParticleRuntime)
+        m_instancePatchWrites = std::make_unique<ParticleCore::InstancePatchWrites> (
+            particle.instanceOverride);
     m_instanceControlPointOverrides.fill (glm::vec3 (std::numeric_limits<float>::max (), 0.0f, 0.0f));
     m_instanceControlPointAngleOverrides.fill (glm::vec3 (std::numeric_limits<float>::max (), 0.0f, 0.0f));
     for (size_t index = 0; index < particle.instanceOverride.controlPoints.size (); ++index) {
@@ -690,6 +693,9 @@ void CParticle::setup () {
 
     for (auto& cp : m_controlPoints) cp.previousPosition = cp.position;
 
+    // Initial/new nodes are patched before pending births and warm-up.
+    if (m_instancePatchWrites) m_instancePatchWrites->consume ();
+    patchInstanceSequenceSteps ();
     m_initialized = true;
     if (m_pendingEmitCount != 0) {
         const uint32_t pending = std::exchange (m_pendingEmitCount, 0u);
@@ -723,6 +729,10 @@ void CParticle::setup () {
 }
 
 void CParticle::render () {
+    // Native outer-root flush precedes visibility, enabled and clock guards.
+    // Inner warm-up/update and explicit emitParticles do not flush writes.
+    if (m_initialized && m_instancePatchWrites && m_instancePatchWrites->consume ())
+        patchInstanceSequenceSteps ();
     if (!m_initialized || !resolveTransform ().visible) {
 	return;
     }
@@ -869,6 +879,15 @@ void CParticle::resetSequenceCounters (bool periodicOnly) {
         if (periodicOnly && (counter->flags & 2u) == 0) continue;
         ParticleCore::resetSequencePhase (counter->phase, counter->step);
     }
+}
+
+void CParticle::patchInstanceSequenceSteps () {
+    const float count = countOverrideValue ()->getFloat ();
+    for (const auto& counter : m_sequenceCounters)
+        counter->instanceCountPatch.apply (counter->step, count);
+    // Native 14022bd40 traverses every retained node. Linux currently retires
+    // completed event runtimes by destruction, so visit all surviving children.
+    for (auto& node : m_childNodes) node.runtime->patchInstanceSequenceSteps ();
 }
 
 void CParticle::emitParticles (int32_t count) {
@@ -1440,6 +1459,7 @@ void CParticle::setInstanceControlPoint (size_t index, const glm::vec3& position
     const auto& authored = m_particle.instanceOverride.controlPoints.at (index);
     if (authored && authored->value) authored->value->update (position, DynamicValue::Script);
     m_instanceControlPointOverrides.at (index) = position;
+    if (!authored && m_instancePatchWrites) m_instancePatchWrites->mark ();
 }
 
 glm::vec3 CParticle::getInstanceControlPointAngle (size_t index) const {
@@ -1452,6 +1472,7 @@ void CParticle::setInstanceControlPointAngle (size_t index, const glm::vec3& ang
     const auto& authored = m_particle.instanceOverride.controlPointAngles.at (index);
     if (authored && authored->value) authored->value->update (angle, DynamicValue::Script);
     m_instanceControlPointAngleOverrides.at (index) = angle;
+    if (!authored && m_instancePatchWrites) m_instancePatchWrites->mark ();
 }
 
 const float& CParticle::getBrightness () const { return m_overbright; }
@@ -2145,6 +2166,8 @@ InitializerFunc CParticle::createMapSequenceBetweenControlPointsInitializer (
     auto counter = std::make_shared<SequenceCounter> ();
     counter->count = init.count->value.get ();
     counter->step = ParticleCore::betweenControlPointsStep (counter->count->getFloat ());
+    counter->instanceCountPatch = { counter->count->getFloat (),
+        (init.flags & 16u) != 0 && (m_particle.flags & 0x20u) == 0 };
     // Native sequence 14 periodic reset uses authored bit 0x20; its bit 2
     // tapers birth velocity and is unrelated to circular sequence reset.
     counter->flags = (init.flags & 0x20u) != 0 ? 2u : 0u;

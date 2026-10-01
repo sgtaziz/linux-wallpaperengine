@@ -2,8 +2,10 @@
 #include "WallpaperEngine/Data/Model/Project.h"
 #include "WallpaperEngine/Data/Model/Wallpaper.h"
 #include "WallpaperEngine/Scripting/ParticleScriptBindings.h"
+#include "WallpaperEngine/Render/Objects/ParticleInstancePatch.h"
 
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/catch_approx.hpp>
 
 using namespace WallpaperEngine::Data::Model;
 using WallpaperEngine::Data::JSON::JSON;
@@ -148,7 +150,7 @@ TEST_CASE ("New birth settings retain scripts for component lifecycle dispatch",
     REQUIRE (scripts.at ("initializer3_hueNoise") == "noiseScript");
 }
 
-TEST_CASE ("Sequence instance-count patch is rejected unless native node flags suppress it",
+TEST_CASE ("Sequence instance-count patch retains authored flag and node suppression",
            "[particle][birth][parser][sequence]") {
     Project project {};
     auto data = JSON::parse (R"({"id":1,"particle":{"initializer":[
@@ -156,12 +158,77 @@ TEST_CASE ("Sequence instance-count patch is rejected unless native node flags s
         {"name":"mapsequencebetweencontrolpoints","flags":8}
     ]}})");
     auto object = ObjectParser::parse (data, project);
-    REQUIRE (object->as<Particle> ()->initializers.size () == 1);
+    REQUIRE (object->as<Particle> ()->initializers.size () == 2);
     REQUIRE (object->as<Particle> ()->initializers[0]
-        ->as<MapSequenceBetweenControlPointsInitializer> ()->flags == 8u);
+        ->as<MapSequenceBetweenControlPointsInitializer> ()->flags == 16u);
     data["particle"]["flags"] = 32;
     object = ObjectParser::parse (data, project);
     REQUIRE (object->as<Particle> ()->initializers.size () == 2);
     REQUIRE (object->as<Particle> ()->initializers[0]
         ->as<MapSequenceBetweenControlPointsInitializer> ()->flags == 16u);
+}
+
+TEST_CASE ("Root instance patch tracks writes rather than numerical changes",
+           "[particle][birth][parser][sequence][instancepatch]") {
+    using WallpaperEngine::Render::Objects::ParticleCore::InstancePatchWrites;
+    using WallpaperEngine::Render::Objects::ParticleCore::InstanceSequencePatch;
+    Project project {};
+    const auto object = ObjectParser::parse (JSON::parse (R"({"id":1,"particle":{},
+        "instanceoverride":{"count":{"value":1,"script":"export function update(v){return v;}"},
+            "controlpoint1":"1 2 3","controlpointangle2":"4 5 6"}})"), project);
+    const auto& instance = object->as<Particle> ()->instanceOverride;
+    auto* count = instance.count->value.get ();
+    REQUIRE (count->getScriptSource ().has_value ());
+    {
+        InstancePatchWrites writes (instance);
+        REQUIRE_FALSE (writes.consume ());
+        // Public instance.count uses update(float), including fractional writes
+        // to an integer-authored seed. Script returns and user writes notify too.
+        count->update (1.0f, DynamicValue::Script);
+        REQUIRE (writes.consume ());
+        REQUIRE_FALSE (writes.consume ());
+        count->update (1.5f, DynamicValue::Script);
+        REQUIRE (count->getFloat () == 1.5f);
+        REQUIRE (writes.consume ());
+        count->update (1.5f, DynamicValue::User);
+        count->update (1.5f, DynamicValue::Script);
+        REQUIRE (writes.consume ());
+        REQUIRE_FALSE (writes.consume ()); // one outer flush batches writes
+
+        for (auto* value : {instance.alpha->value.get (), instance.brightness->value.get (),
+                           instance.size->value.get (), instance.speed->value.get (),
+                           instance.lifetime->value.get ()}) {
+            value->update (value->getFloat (), DynamicValue::Script);
+            REQUIRE (writes.consume ());
+        }
+        instance.colorn->value->update (instance.colorn->value->getVec3 (), DynamicValue::Script);
+        REQUIRE (writes.consume ());
+        instance.controlPoints[1]->value->update (glm::vec3 (1, 2, 3), DynamicValue::Script);
+        REQUIRE (writes.consume ());
+        instance.controlPointAngles[2]->value->update (glm::vec3 (4, 5, 6), DynamicValue::User);
+        REQUIRE (writes.consume ());
+        instance.rate->value->update (2.0f, DynamicValue::Script);
+        instance.enabled->value->update (false, DynamicValue::Script);
+        instance.color->value->update (glm::vec3 (0), DynamicValue::Script);
+        REQUIRE_FALSE (writes.consume ());
+        writes.mark (); // native CP setter when no authored DynamicValue exists
+        REQUIRE (writes.consume ());
+
+        // A dirty write restores the positive step even at unchanged count.
+        // The stream's literal is independent of a later initializer-count write.
+        DynamicValue authored (5.0f);
+        const InstanceSequencePatch patch {authored.getFloat (), true};
+        authored.update (9.0f, DynamicValue::Script);
+        float step = -0.25f;
+        count->update (2.0f, DynamicValue::Script);
+        if (writes.consume ()) patch.apply (step, count->getFloat ());
+        REQUIRE (step == Catch::Approx (1.0f / 9.0f));
+    }
+    // The listener owner can retire while its model still receives updates.
+    count->update (2.25f, DynamicValue::Script);
+    REQUIRE (count->getFloat () == 2.25f);
+    auto temporary = ObjectParser::parse (JSON::parse (R"({"id":2,"particle":{}})"), project);
+    auto writes = std::make_unique<InstancePatchWrites> (temporary->as<Particle> ()->instanceOverride);
+    temporary.reset (); // unsubscribe is safe when a DynamicValue dies first
+    writes.reset ();
 }

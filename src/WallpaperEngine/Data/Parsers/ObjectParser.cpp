@@ -1109,11 +1109,6 @@ ParticleInitializerUniquePtr ObjectParser::parseParticleInitializer (
         result->bounds = it.optional ("bounds", glm::vec2 (0.0f, 1.0f));
         result->limitBehavior = it.optional<std::string> ("limitbehavior", "repeat");
         result->flags = it.optional<uint32_t> ("flags", 0);
-        if ((result->flags & 16u) != 0 && (nodeFlags & 0x20u) == 0) {
-            sLog.error ("Unsupported mapsequencebetweencontrolpoints count patch: initializer flags=16",
-                " requires native instance dirty-write timing; node flags=0x20 suppresses this patch");
-            return nullptr;
-        }
         result->arcAmount = it.optional<float> ("arcamount", 0.3f);
         result->arcDirection = it.optional ("arcdirection", glm::vec3 (0.0f, 1.0f, 0.0f));
         result->sizeReduction = it.optional<float> ("sizereductionamount", 0.9f);
