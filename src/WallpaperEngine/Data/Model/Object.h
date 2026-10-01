@@ -960,6 +960,8 @@ struct TextData {
     UserSettingUniquePtr opaqueBackground;
     /** Authored RGB for the opaque text background */
     UserSettingUniquePtr backgroundColor;
+    /** Native HDR-only background RGB multiplier (independent of alpha) */
+    UserSettingUniquePtr backgroundBrightness;
     /** Material effects applied to the text target before scene composition */
     std::vector<ImageEffectUniquePtr> effects;
     /** Bounding box size */
@@ -968,6 +970,8 @@ struct TextData {
     UserSettingUniquePtr scale;
     /** Text color as linear-space RGB */
     UserSettingUniquePtr color;
+    /** Native HDR-only monochrome fill RGB multiplier */
+    UserSettingUniquePtr brightness;
     /** Alpha multiplier */
     UserSettingUniquePtr alpha;
     /** Whether the text is visible */
