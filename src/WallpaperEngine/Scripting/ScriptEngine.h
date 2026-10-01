@@ -85,6 +85,7 @@ public:
     [[nodiscard]] EngineObject* getEngineObject () const { return m_engineObject.get (); }
     [[nodiscard]] SceneObject* getSceneObject () const { return m_sceneObject.get (); }
     [[nodiscard]] bool isEvaluatingModuleTopLevel () const { return m_evaluatingModuleTopLevel; }
+    [[nodiscard]] bool isInitializingAuthoredLayer () const { return m_initialAuthoredInit; }
     JSValue dynamicToJs (DynamicValue& value, bool detached = false, bool angleProperty = false,
                          bool rgbColorProperty = false) const;
 
@@ -183,6 +184,8 @@ private:
     JSRuntime* m_runtime = nullptr;
     JSContext* m_context = nullptr;
     bool m_evaluatingModuleTopLevel = false;
+    bool m_initialAuthoredInit = false;
+    bool m_initialSceneTickCompleted = false;
     JSValue m_globalThis;
     Render::Wallpapers::CScene& m_scene;
     std::unique_ptr<EngineObject> m_engineObject;

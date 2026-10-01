@@ -11,6 +11,7 @@
 #include "WallpaperEngine/Render/Wallpapers/SceneTransform.h"
 #include "WallpaperEngine/Input/MouseInput.h"
 #include "WallpaperEngine/Render/Shaders/ShaderUnit.h"
+#include "WallpaperEngine/Scripting/SceneCameraTransforms.h"
 
 #include <cmath>
 #include <glm/gtc/matrix_transform.hpp>
@@ -32,7 +33,7 @@ TEST_CASE ("Scene camera projection settings prefer authored general fields", "[
       "camera":{"center":"0 0 0","eye":"0 0 1","up":"0 1 0",
                 "nearz":1,"farz":100,"fov":30},
       "general":{"orthogonalprojection":{"width":100,"height":100},
-                 "nearz":0.25,"farz":250,"fov":75,},
+                 "nearz":0.25,"farz":250,"fov":75,"zoom":1.25,},
       "objects":[],
     })");
     Project project {};
@@ -44,6 +45,7 @@ TEST_CASE ("Scene camera projection settings prefer authored general fields", "[
     REQUIRE (scene->camera.projection.nearz->value->getFloat () == 0.25f);
     REQUIRE (scene->camera.projection.farz->value->getFloat () == 250.0f);
     REQUIRE (scene->camera.projection.fov->value->getFloat () == 75.0f);
+    REQUIRE (scene->camera.projection.zoom->value->getFloat () == 1.25f);
     REQUIRE (scene->camera.projection.perspectiveOverrideFov->value->getFloat () == 95.0f);
 }
 
@@ -454,4 +456,126 @@ TEST_CASE ("Root camera path presence follows parsed resource segments", "[scene
     REQUIRE_FALSE (parse (JSON::array ({"cameras/pose.json"}),
                          JSON::array ({JSON {{"transforms", JSON::array ()}}, segment})));
     REQUIRE_FALSE (parse (JSON::array (), JSON::array ({segment})));
+}
+
+TEST_CASE ("Camera transforms copy partial input and preserve omitted pose fields", "[scene][camera][script]") {
+    using WallpaperEngine::Render::Camera;
+    Camera::Transforms state {{{0, 0, 500}, {0, 0, 0}, {0, 1, 0}}};
+    glm::vec3 eye (80, 40, 500);
+    glm::vec3 center (80, 40, 0);
+    state = Camera::updatedTransforms (state, &eye, &center, nullptr, nullptr);
+    eye.z = 3000;
+    center.z = -100;
+    state = Camera::updatedTransforms (state, nullptr, &center, nullptr, nullptr);
+    REQUIRE (state.pose.eye == glm::vec3 (80, 40, 500));
+    REQUIRE (state.pose.center == glm::vec3 (80, 40, -100));
+    REQUIRE (state.pose.up == glm::vec3 (0, 1, 0));
+    REQUIRE (state.zoom == 1.0f);
+    // Actual 2.8 full/partial runtime fixture gives these projected landmarks;
+    // an init-only call is overwritten by the native loader (script phase gate).
+    const auto vp = Camera::makeProjectionForTransforms (1280, 960, 50, 100, 1000, state, false)
+        * Camera::renderLookAtForTransforms (state.pose, false);
+    const auto screen = [&] (glm::vec3 point) {
+        const auto clip = vp * glm::vec4 (point, 1);
+        return (glm::vec2 (clip) / clip.w * 0.5f + 0.5f) * glm::vec2 (1280, 960);
+    };
+    const auto rectangle = screen ({-80, 60, 0});
+    const auto particle = screen ({-60, -40, 0});
+    REQUIRE (std::abs (rectangle.x - 310.0f) < 1.0f);
+    REQUIRE (std::abs (rectangle.y - 438.5f) < 1.0f);
+    REQUIRE (std::abs (particle.x - 351.3333f) < 1.0f);
+    REQUIRE (std::abs (particle.y - 644.1111f) < 1.0f);
+}
+
+TEST_CASE ("Camera up-only updates rotate the native perspective landmarks", "[scene][camera][script]") {
+    using WallpaperEngine::Render::Camera;
+    Camera::Transforms state {{{0, 0, 500}, {0, 0, 0}, {0, 1, 0}}};
+    const glm::vec3 up (1, 0, 0);
+    state = Camera::updatedTransforms (state, nullptr, nullptr, &up, nullptr);
+    const auto vp = Camera::makeProjectionForTransforms (1280, 960, 50, 100, 1000, state, false)
+        * Camera::renderLookAtForTransforms (state.pose, false);
+    const auto clip = vp * glm::vec4 (-80, 60, 0, 1);
+    const auto screen = (glm::vec2 (clip) / clip.w * 0.5f + 0.5f) * glm::vec2 (1280, 960);
+    // Native rectangle rotates from center (474.5,356) to (516,644.5).
+    REQUIRE (std::abs (screen.x - 516.0f) < 1.0f);
+    REQUIRE (std::abs (screen.y - 644.5f) < 1.0f);
+    const float zoom = 1.5f;
+    const auto zoomed = Camera::updatedTransforms (state, nullptr, nullptr, nullptr, &zoom);
+    REQUIRE (Camera::makeProjectionForTransforms (1280, 960, 50, 100, 1000, state, false)
+        == Camera::makeProjectionForTransforms (1280, 960, 50, 100, 1000, zoomed, false, 1.25f));
+}
+
+TEST_CASE ("Script orthographic camera changes basis and zooms about the canvas center",
+           "[scene][camera][script]") {
+    using WallpaperEngine::Render::Camera;
+    const glm::vec2 output (1280, 960);
+    const glm::vec3 centeredMarker (-80, 50, 0); // Authored marker (80,70), canvas320x240.
+    const auto project = [&] (const Camera::Transforms& state, float authoredZoom = 1.0f) {
+        const auto vp = Camera::makeProjectionForTransforms (
+            320, 240, 50, 0.1f, 1000, state, true, authoredZoom)
+            * Camera::renderLookAtForTransforms (state.pose, true);
+        const auto clip = vp * glm::vec4 (centeredMarker, 1);
+        return (glm::vec2 (clip) / clip.w * 0.5f + 0.5f) * output;
+    };
+    const Camera::Transforms translated {{{20, -10, 0}, {20, -10, -1}, {0, 1, 0}}};
+    const auto translatedScreen = project (translated);
+    // Native translate fixture: (239.5,639.5), not an eye-cancelled view.
+    REQUIRE (std::abs (translatedScreen.x - 239.5f) < 0.6f);
+    REQUIRE (std::abs (translatedScreen.y - 639.5f) < 0.6f);
+    Camera::Transforms zoomed {{{0, 0, 0}, {0, 0, -1}, {0, 1, 0}}, 1.5f};
+    const auto zoomedScreen = project (zoomed);
+    REQUIRE (std::abs (zoomedScreen.x - 159.5f) < 0.6f);
+    REQUIRE (std::abs (zoomedScreen.y - 779.5f) < 0.6f);
+    const auto authoredZoomScreen = project (zoomed, 1.25f);
+    REQUIRE (std::abs (authoredZoomScreen.x - 39.5f) < 0.6f);
+    REQUIRE (std::abs (authoredZoomScreen.y - 854.5f) < 0.6f);
+    const auto projection = Camera::makeProjectionForTransforms (320, 240, 50, 100, 1000, zoomed, true);
+    for (float depth : {-1500.0f, 1500.0f}) {
+        const auto clip = projection * glm::vec4 (0, 0, depth, 1);
+        REQUIRE (std::abs (clip.z / clip.w) < 1.0f);
+    }
+    // Native raw view remains separate from its GL drawing basis.
+    const auto native = glm::lookAt (translated.pose.eye, translated.pose.center, translated.pose.up);
+    const auto flip = glm::scale (glm::mat4 (1), glm::vec3 (1, -1, 1));
+    REQUIRE (Camera::renderLookAtForTransforms (translated.pose, true) == flip * native * flip);
+}
+
+TEST_CASE ("Camera API parser copies permissive vectors without coercing components", "[scene][camera][script]") {
+    using WallpaperEngine::Scripting::readSceneCameraTransforms;
+    JSRuntime* runtime = JS_NewRuntime ();
+    REQUIRE (runtime);
+    JSContext* context = JS_NewContext (runtime);
+    REQUIRE (context);
+    WallpaperEngine::Data::Utils::ScopeGuard cleanup ([&] {
+        JS_FreeContext (context);
+        JS_FreeRuntime (runtime);
+    });
+    const std::string source = "({eye:{x:80,y:'40',z:500},center:17,up:null,zoom:1.5})";
+    JSValue value = JS_Eval (context, source.c_str (), source.size (), "<camera-fields>", JS_EVAL_TYPE_GLOBAL);
+    REQUIRE_FALSE (JS_IsException (value));
+    auto parsed = readSceneCameraTransforms (context, value);
+    REQUIRE (parsed);
+    REQUIRE (parsed->eye == glm::vec3 (80, 0, 500));
+    REQUIRE_FALSE (parsed->center);
+    REQUIRE_FALSE (parsed->up);
+    REQUIRE (parsed->zoom == 1.5f);
+    JS_FreeValue (context, value);
+    REQUIRE (parsed->eye->z == 500.0f); // Result outlives the JS input.
+    const std::string ordered =
+        "(()=>{let eye={x:1,y:2,z:3};return {eye, get center(){eye.x=9;return null;},zoom:'2'};})()";
+    value = JS_Eval (context, ordered.c_str (), ordered.size (), "<camera-getter-order>", JS_EVAL_TYPE_GLOBAL);
+    REQUIRE_FALSE (JS_IsException (value));
+    parsed = readSceneCameraTransforms (context, value);
+    JS_FreeValue (context, value);
+    REQUIRE (parsed);
+    REQUIRE (parsed->eye == glm::vec3 (9, 2, 3));
+    REQUIRE_FALSE (parsed->zoom);
+    const std::string throwing = "({eye:{get x(){throw new Error('field failure');}}})";
+    value = JS_Eval (context, throwing.c_str (), throwing.size (), "<camera-getter-error>", JS_EVAL_TYPE_GLOBAL);
+    REQUIRE_FALSE (JS_IsException (value));
+    REQUIRE_FALSE (readSceneCameraTransforms (context, value));
+    JS_FreeValue (context, value);
+    JSValue exception = JS_GetException (context);
+    REQUIRE_FALSE (JS_IsNull (exception));
+    JS_FreeValue (context, exception);
 }
