@@ -12,6 +12,7 @@ public:
     ~VectorAdapter () override;
 
     int length () { return components; }
+    bool isInstance (JSValueConst value) const { return JS_GetClassID (value) == m_classId; }
     JSValue instantiate (Data::Model::DynamicValue& value) override;
     JSValue instantiate (ScriptableObject& object) override;
     /**

@@ -1,4 +1,5 @@
 #include "VectorAdapter.h"
+#include "VectorSubtraction.h"
 
 #include "../ScriptEngine.h"
 #include "WallpaperEngine/Data/Utils/SFINAE.h"
@@ -625,8 +626,8 @@ template JSValue vector_add<4> (JSContext* ctx, JSValueConst this_val, int argc,
 
 template <int components>
 JSValue vector_subtract (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
-    if (argc != 1) {
-	return JS_UNDEFINED;
+    if (argc == 0) {
+	return JS_ThrowTypeError (ctx, "Vector subtraction requires an argument");
     }
 
     JSClassID classId = 0;
@@ -634,7 +635,18 @@ JSValue vector_subtract (JSContext* ctx, JSValueConst this_val, int argc, JSValu
 
     VEC_MAGIC_CHECK_EXCEPTION (container, components);
 
-    const auto argument = vector_get_script<components> (ctx, argv[0]);
+    // The shipped Vec3 overload accepts a Vec2 without consuming a z field.
+    // Class identity matters: a plain object missing z is not that overload.
+    const auto argument = [&] {
+        if constexpr (components == 3) {
+            if (container->adapter.getEngine ().getAdapters ().vec2->isInstance (argv[0])) {
+                const auto xy = vector_get_script<2> (ctx, argv[0]);
+                if (!xy) return std::optional<glm::vec3> {};
+                return std::optional<glm::vec3> (glm::vec3 (*xy, 0.0f));
+            }
+        }
+        return vector_get_script<components> (ctx, argv[0]);
+    } ();
     if (!argument) return JS_EXCEPTION;
 
     JSValue newVector = container->adapter.instantiate ();
@@ -643,7 +655,7 @@ JSValue vector_subtract (JSContext* ctx, JSValueConst this_val, int argc, JSValu
     VEC_MAGIC_CHECK_EXCEPTION (newContainer, components);
 
     newContainer->value.update (
-	*argument - vector_get<components> (container->value),
+	subtractVectorValue (vector_get<components> (container->value), *argument),
 	DynamicValue::UpdateSource::Initialization
     );
 
