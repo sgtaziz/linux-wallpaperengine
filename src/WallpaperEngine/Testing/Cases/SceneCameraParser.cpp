@@ -1,4 +1,5 @@
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/catch_approx.hpp>
 
 #include "WallpaperEngine/Assets/AssetLocator.h"
 #include "WallpaperEngine/Data/Model/Project.h"
@@ -278,7 +279,8 @@ TEST_CASE ("Orthographic scene projection keeps the z-zero image plane visible",
     }
 
     // CImage uses projection * lookAt. Test the actual composed path with
-    // a translated eye, including positive z, as well as negative near.
+    // a translated eye, including positive z. Native orthographic projection
+    // ignores authored near/far while retaining the existing view convention.
     const glm::vec3 movedEye { 10.0f, -5.0f, 1.0f };
     const glm::mat4 movedView = glm::lookAt (
         movedEye, movedEye + glm::vec3 (0.0f, 0.0f, -1.0f), glm::vec3 (0.0f, 1.0f, 0.0f));
@@ -287,7 +289,7 @@ TEST_CASE ("Orthographic scene projection keeps the z-zero image plane visible",
     const glm::vec4 movedClip = negativeNear * movedView * imagePlane;
     REQUIRE (movedClip.z >= -movedClip.w);
     REQUIRE (movedClip.z <= movedClip.w);
-    REQUIRE (negativeNear[2][2] != baseline[2][2]);
+    REQUIRE (negativeNear[2][2] == baseline[2][2]);
 
     const auto positiveNear = Camera::makeOrthogonalProjectionForScene (
         1920.0f, 1080.0f, 0.1f, 10000.0f, movedEye);
@@ -308,6 +310,43 @@ TEST_CASE ("Orthographic scene projection keeps the z-zero image plane visible",
     const glm::vec4 negativeFarClip = negativeFar * imagePlane;
     REQUIRE (negativeFarClip.z >= -negativeFarClip.w);
     REQUIRE (negativeFarClip.z <= negativeFarClip.w);
+}
+
+TEST_CASE ("Orthographic native clip range preserves XYZ geometry on both sides of z-zero", "[scene][camera][transform]") {
+    using WallpaperEngine::Render::Camera;
+    // Native 140183a70 selects -2000/+2000 for scene bit8, independently
+    // of authored perspective planes. Actual rotated text at z=0 spans
+    // positive and negative Z; a near plane at zero clips its left glyphs.
+    const auto projection = Camera::makeOrthogonalProjectionForScene (
+        3840.0f, 2160.0f, 0.01f, 10000.0f, glm::vec3 (0));
+    for (const float z : {-2000.0f, -1999.0f, -75.89421f, 0.0f, 75.89421f, 1999.0f, 2000.0f}) {
+        const auto clip = projection * glm::vec4 (100, 200, z, 1);
+        REQUIRE (clip.z == Catch::Approx (-z / 2000.0f));
+        REQUIRE (clip.z >= -clip.w);
+        REQUIRE (clip.z <= clip.w);
+        REQUIRE (clip.x == Catch::Approx (100.0f / 1920.0f));
+        REQUIRE (clip.y == Catch::Approx (200.0f / 1080.0f));
+    }
+    for (const float z : {-2001.0f, 2001.0f}) {
+        const auto clip = projection * glm::vec4 (0, 0, z, 1);
+        REQUIRE (std::abs (clip.z) > clip.w);
+    }
+    REQUIRE (Camera::makeOrthogonalProjectionForScene (
+        3840.0f, 2160.0f, -2000.0f, 2000.0f, glm::vec3 (0)) == projection);
+    REQUIRE (Camera::makeOrthogonalProjectionForScene (
+        3840.0f, 2160.0f, 1.0f, 2.0f, glm::vec3 (0)) == projection);
+    // Native 1401dd630's Z row for the actual Clock's X/Y angles and
+    // scale. Its centered quad crosses z=0 even though the layer origin
+    // lies exactly on that plane; retain all four projected corners.
+    for (const float x : {-100.0f, 100.0f}) {
+        for (const float y : {-50.0f, 50.0f}) {
+            const float z = 1.50877f * (-std::sin (0.52709f) * x
+                + std::sin (-0.21384f) * std::cos (0.52709f) * y);
+            const auto clip = projection * glm::vec4 (x, y, z, 1);
+            REQUIRE (clip.z >= -clip.w);
+            REQUIRE (clip.z <= clip.w);
+        }
+    }
 }
 
 TEST_CASE ("Scene cursor converts bottom-left viewport pixels through cropped UV and camera", "[scene][input]") {

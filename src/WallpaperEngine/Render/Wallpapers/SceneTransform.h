@@ -245,11 +245,15 @@ inline ResolvedSceneTransform localSceneTransform (const Data::Model::Object& ob
         result.angle = object.groupAngles->value->getVec3 ().z;
         result.visible = object.groupVisible->value->getBool ();
     }
-    glm::vec3 angles {0.0f, 0.0f, result.angle};
-    if (object.is<Data::Model::Particle> ())
+    // Native 1401dd630 stores the full Rz*Ry*Rx basis for every layer.
+    // 1401850a0 scales those columns before parent composition; text's
+    // 140256e10 uses this same basis for the measured layout offset.
+    glm::vec3 angles;
+    if (object.is<Data::Model::Image> ())
+        angles = object.as<Data::Model::Image> ()->angles->value->getVec3 ();
+    else if (object.is<Data::Model::Particle> ())
         angles = object.as<Data::Model::Particle> ()->angles->value->getVec3 ();
-    else if (object.is<Data::Model::SceneModel> () ||
-             (!object.is<Data::Model::Image> () && !object.is<Data::Model::Text> ()))
+    else
         angles = object.groupAngles->value->getVec3 ();
     result.authoredMatrix = glm::translate (glm::mat4 (1.0f), result.origin);
     result.authoredMatrix = glm::rotate (result.authoredMatrix, angles.z, glm::vec3 (0, 0, 1));

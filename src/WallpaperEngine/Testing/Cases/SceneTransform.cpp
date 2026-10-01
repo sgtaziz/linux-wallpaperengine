@@ -135,6 +135,80 @@ TEST_CASE ("Scene parent matrices preserve rotated nonuniform scale and live vis
     REQUIRE (glm::distance (moved.origin, result.origin) > 1.0f);
 }
 
+TEST_CASE ("Image and text retain native XYZ basis and typed transform values", "[scene][transform][image][text]") {
+    using namespace WallpaperEngine::Data::Model;
+    using WallpaperEngine::Render::Wallpapers::localSceneTransform;
+    const glm::vec3 angles {glm::pi<float> () / 6, glm::pi<float> () / 4, glm::pi<float> () / 3};
+    const glm::vec3 scale {-2.0f, 3.0f, 0.5f};
+    ImageData imageData {};
+    imageData.angles = UserSettingBuilder::fromValue (angles);
+    imageData.scale = UserSettingBuilder::fromValue (scale);
+    imageData.visible = UserSettingBuilder::fromValue (true);
+    Image image (node (1, {}, {4, 5, 6}, {9, 9, 9}, 0), std::move (imageData));
+    TextData textData {};
+    textData.scale = UserSettingBuilder::fromValue (scale);
+    textData.visible = UserSettingBuilder::fromValue (true);
+    auto textBase = node (2, {}, {4, 5, 6}, {9, 9, 9}, 0);
+    textBase.groupAngles = UserSettingBuilder::fromValue (angles);
+    Text text (std::move (textBase), std::move (textData));
+    // Native 1401dd630's coefficients at X=30,Y=45,Z=60 degrees,
+    // then 1401850a0's negative/nonuniform column scaling. These values
+    // distinguish all three rotations, their order and typed scale authority.
+    for (const Object* object : {static_cast<Object*> (&image), static_cast<Object*> (&text)}) {
+        const auto matrix = localSceneTransform (*object).authoredMatrix;
+        REQUIRE (glm::distance (glm::vec3 (matrix[0]), {-0.70710678f, -1.22474487f, 1.41421356f}) < 1e-5f);
+        REQUIRE (glm::distance (glm::vec3 (matrix[1]), {-1.71966991f, 2.21759676f, 1.06066017f}) < 1e-5f);
+        REQUIRE (glm::distance (glm::vec3 (matrix[2]), {0.36959946f, 0.14016504f, 0.30618622f}) < 1e-5f);
+        REQUIRE (glm::vec3 (matrix[3]) == glm::vec3 (4, 5, 6));
+    }
+    image.angles->value->update (glm::vec3 (0, 0, glm::quarter_pi<float> ()), DynamicValue::Script);
+    text.groupAngles->value->update (glm::vec3 (0, 0, glm::quarter_pi<float> ()), DynamicValue::Script);
+    const auto priorZOnly = glm::scale (glm::rotate (glm::translate (glm::mat4 (1), {4, 5, 6}),
+        glm::quarter_pi<float> (), {0, 0, 1}), scale);
+    REQUIRE (localSceneTransform (image).authoredMatrix == priorZOnly);
+    REQUIRE (localSceneTransform (text).authoredMatrix == priorZOnly);
+}
+
+TEST_CASE ("XYZ text basis preserves parent composition and horizontal perspective datum", "[scene][transform][text][perspective]") {
+    using namespace WallpaperEngine::Data::Model;
+    using WallpaperEngine::Render::Wallpapers::localSceneTransform;
+    Object parent (node (1, {}, {8, 5, -2}, {1, 2, 3}, 0));
+    parent.groupAngles->value->update (glm::vec3 (glm::half_pi<float> (), 0, 0), DynamicValue::Script);
+    TextData data {};
+    data.scale = UserSettingBuilder::fromValue (glm::vec3 (2, -0.5f, 1));
+    data.visible = UserSettingBuilder::fromValue (true);
+    auto base = node (2, 1, {1, 2, 3}, {9, 9, 9}, 0);
+    base.groupAngles = UserSettingBuilder::fromValue (glm::vec3 (0, glm::half_pi<float> (), 0));
+    Text child (std::move (base), std::move (data));
+    const auto composed = resolveSceneTransform (child, [&] (int id) -> const Object* {
+        return id == 1 ? &parent : nullptr;
+    });
+    REQUIRE (glm::distance (composed.origin, {9, -4, 2}) < 1e-5f);
+    REQUIRE (glm::distance (glm::vec3 (composed.authoredMatrix[0]), {0, 6, 0}) < 1e-5f);
+    REQUIRE (glm::distance (glm::vec3 (composed.authoredMatrix[1]), {0, 0, -1}) < 1e-5f);
+
+    // The native original perspective datum has horizontal Date text. Its
+    // controlled X/Y-zero derivative becomes diagonal. Project the authored
+    // local baseline to guard that consequence rather than only matrix values.
+    child.parent.reset ();
+    child.origin->value->update (glm::vec3 (3, 3.4f, 3), DynamicValue::Script);
+    child.scale->value->update (glm::vec3 (0.007f, 0.006f, 0.0085f), DynamicValue::Script);
+    child.groupAngles->value->update (glm::vec3 (-glm::pi<float> () / 6, glm::quarter_pi<float> (), 0), DynamicValue::Script);
+    const glm::vec3 eye (10.63064f);
+    const auto vp = glm::perspective (glm::radians (45.0f), 1280.0f / 720.0f, 0.1f, 10000.0f)
+        * glm::lookAt (eye, eye - glm::vec3 (2), glm::vec3 (0, 1, 0));
+    const auto baselineDelta = [&] {
+        const auto matrix = vp * localSceneTransform (child).authoredMatrix;
+        const auto left = matrix * glm::vec4 (-100, 0, 0, 1);
+        const auto right = matrix * glm::vec4 (100, 0, 0, 1);
+        return glm::vec2 (right) / right.w - glm::vec2 (left) / left.w;
+    };
+    REQUIRE (std::abs (baselineDelta ().y) < 1e-6f);
+    REQUIRE (baselineDelta ().x > 0.0f);
+    child.groupAngles->value->update (glm::vec3 (0), DynamicValue::Script);
+    REQUIRE (std::abs (baselineDelta ().y) > 0.05f);
+}
+
 TEST_CASE ("Scene layer parallax keeps zero depth fixed and signed depths symmetric", "[scene][parallax]") {
     // 2902406982 authors both depth-zero triangle/text pairs and a
     // negative-X-depth triangle/text pair. Camera amount is already included

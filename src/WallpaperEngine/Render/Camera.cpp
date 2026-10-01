@@ -184,14 +184,11 @@ glm::mat4 Camera::makePerspectiveProjectionForScene (
 }
 
 glm::mat4 Camera::makeOrthogonalProjectionForScene (
-    float width, float height, float authoredNearZ, float authoredFarZ, const glm::vec3& eye) {
-    // Authored nearz is retained for perspective consumers (notably particles).
-    // The orthographic 2D scene draws image quads on z=0, which a positive near
-    // plane clips. Keep that plane inside the projection until perspective scene
-    // rendering has its own validated camera/depth contract.
-    const float nearZ = std::isfinite (authoredNearZ) ? std::min (authoredNearZ, 0.0f) : 0.0f;
-    const float farZ = std::isfinite (authoredFarZ) && authoredFarZ > 0.0f ? authoredFarZ : 1000.0f;
+    float width, float height, float, float, const glm::vec3& eye) {
+    // Native 140183a70 uses fixed -2000/+2000 planes when scene bit8 is
+    // orthographic. Authored nearz/farz remain available to perspective
+    // consumers; applying them here clips XYZ-rotated quads crossing z=0.
     auto projection = glm::ortho<float> (
-        -width / 2.0f, width / 2.0f, -height / 2.0f, height / 2.0f, nearZ, farZ);
+        -width / 2.0f, width / 2.0f, -height / 2.0f, height / 2.0f, -2000.0f, 2000.0f);
     return glm::translate (projection, eye);
 }
