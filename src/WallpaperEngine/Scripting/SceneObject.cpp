@@ -10,6 +10,7 @@
 #include "WallpaperEngine/Logging/Log.h"
 #include "WallpaperEngine/Render/Wallpapers/CScene.h"
 
+#include <algorithm>
 #include <cmath>
 #include <filesystem>
 #include <iomanip>
@@ -436,7 +437,7 @@ JSValue get_layer (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst
 
 	if (JS_ToInt32 (ctx, &index, layer) < 0) return JS_EXCEPTION;
 
-	const auto& order = container->getScene ().getObjectsByRenderOrder ();
+	const auto& order = container->getScene ().getScriptLayers ();
 	if (index < 0 || static_cast<size_t> (index) >= order.size ()) return JS_UNDEFINED;
 	auto* object = order[index];
 
@@ -462,7 +463,7 @@ JSValue get_layer (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst
 
 	ScopeGuard guard ([=] { JS_FreeCString (ctx, result); });
 
-	for (auto object : container->getScene ().getObjectsByRenderOrder ()) {
+	for (auto object : container->getScene ().getScriptLayers ()) {
 	    if (object->getObject ().name != result) {
 		continue;
 	    }
@@ -488,7 +489,7 @@ static const WallpaperEngine::Render::CObject* resolve_scene_layer (
     if (JS_IsNumber (value)) {
         int index = 0;
         if (JS_ToInt32 (ctx, &index, value) < 0) return nullptr;
-        const auto& order = owner.getScene ().getObjectsByRenderOrder ();
+        const auto& order = owner.getScene ().getScriptLayers ();
         return index >= 0 && static_cast<size_t> (index) < order.size () ? order[index] : nullptr;
     }
     if (JS_IsString (value)) {
@@ -496,10 +497,44 @@ static const WallpaperEngine::Render::CObject* resolve_scene_layer (
         if (!name) return nullptr;
         const std::string requested (name);
         JS_FreeCString (ctx, name);
-        for (const auto* object : owner.getScene ().getObjectsByRenderOrder ())
+        for (const auto* object : owner.getScene ().getScriptLayers ())
             if (object->getObject ().name == requested) return object;
     }
     return nullptr;
+}
+
+JSValue scene_enumerate_layers (JSContext* ctx, JSValueConst thisValue, int, JSValueConst*) {
+    auto* owner = get_opaque (ctx, thisValue);
+    if (!owner) return JS_EXCEPTION;
+    if (owner->getEngine ().isEvaluatingModuleTopLevel ())
+        return JS_ThrowTypeError (ctx, "enumerateLayers cannot be used in global scope");
+    JSValue layers = JS_NewArray (ctx);
+    if (JS_IsException (layers)) return layers;
+    uint32_t index = 0;
+    for (const auto* object : owner->getScene ().getScriptLayers ()) {
+        if (!object || !object->is<ScriptableObject> ()) continue;
+        JSValue layer = owner->getEngine ().getAdapters ().object->instantiate (
+            const_cast<ScriptableObject&> (*object->as<ScriptableObject> ()));
+        if (JS_IsException (layer) || JS_SetPropertyUint32 (ctx, layers, index++, layer) < 0) {
+            JS_FreeValue (ctx, layers);
+            return JS_EXCEPTION;
+        }
+    }
+    return layers;
+}
+
+JSValue scene_get_initial_layer_config (JSContext* ctx, JSValueConst thisValue,
+                                       int argc, JSValueConst* argv) {
+    auto* owner = get_opaque (ctx, thisValue);
+    if (!owner) return JS_EXCEPTION;
+    if (owner->getEngine ().isEvaluatingModuleTopLevel ())
+        return JS_ThrowTypeError (ctx, "getInitialLayerConfig cannot be used in global scope");
+    const auto* layer = argc > 0 ? resolve_scene_layer (ctx, *owner, argv[0]) : nullptr;
+    if (!layer || layer->getObject ().initialConfiguration.empty ()) return JS_NULL;
+    const auto& json = layer->getObject ().initialConfiguration;
+    // Parsing a new object on every call detaches nested effects, settings and
+    // arrays from both the authored snapshot and other callers' copies.
+    return JS_ParseJSON (ctx, json.data (), json.size (), "initial layer configuration");
 }
 
 static std::string vector_config_string (JSContext* ctx, JSValueConst value, int dimensions) {
@@ -676,7 +711,9 @@ JSValue scene_get_layer_index (JSContext* ctx, JSValueConst this_val, int argc, 
     if (!owner) return JS_EXCEPTION;
     if (!owner || argc != 1) return JS_ThrowTypeError (ctx, "getLayerIndex expects a layer");
     const auto* layer = resolve_scene_layer (ctx, *owner, argv[0]);
-    return JS_NewInt32 (ctx, owner->getScene ().getScriptLayerIndex (layer));
+    const auto layers = owner->getScene ().getScriptLayers ();
+    const auto found = std::find (layers.begin (), layers.end (), layer);
+    return JS_NewInt32 (ctx, found == layers.end () ? -1 : static_cast<int> (found - layers.begin ()));
 }
 
 JSValue scene_sort_layer (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
@@ -686,7 +723,11 @@ JSValue scene_sort_layer (JSContext* ctx, JSValueConst this_val, int argc, JSVal
     int index = -1;
     if (JS_ToInt32 (ctx, &index, argv[1]) < 0) return JS_EXCEPTION;
     const auto* layer = resolve_scene_layer (ctx, *owner, argv[0]);
-    return JS_NewBool (ctx, owner->getMutableScene ().sortScriptLayer (layer, index));
+    const auto layers = owner->getScene ().getScriptLayers ();
+    if (!layer || std::find (layers.begin (), layers.end (), layer) == layers.end ()
+        || index < 0 || static_cast<size_t> (index) >= layers.size ()) return JS_FALSE;
+    const int physicalIndex = owner->getScene ().getScriptLayerIndex (layers[index]);
+    return JS_NewBool (ctx, owner->getMutableScene ().sortScriptLayer (layer, physicalIndex));
 }
 
 JSValue scene_destroy_layer (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
@@ -822,6 +863,14 @@ SceneObject::SceneObject (ScriptEngine& engine, Render::Wallpapers::CScene& scen
     JS_DefinePropertyValueStr (
 	this->m_engine.getContext (), this->m_instance, "getLayer",
 	JS_NewCFunction (this->m_engine.getContext (), get_layer, "getLayer", 1), JS_PROP_ENUMERABLE
+    );
+    JS_DefinePropertyValueStr (
+        this->m_engine.getContext (), this->m_instance, "enumerateLayers",
+        JS_NewCFunction (this->m_engine.getContext (), scene_enumerate_layers, "enumerateLayers", 0), JS_PROP_ENUMERABLE
+    );
+    JS_DefinePropertyValueStr (
+        this->m_engine.getContext (), this->m_instance, "getInitialLayerConfig",
+        JS_NewCFunction (this->m_engine.getContext (), scene_get_initial_layer_config, "getInitialLayerConfig", 1), JS_PROP_ENUMERABLE
     );
     JS_DefinePropertyValueStr (
 	this->m_engine.getContext (), this->m_instance, "createLayer",
