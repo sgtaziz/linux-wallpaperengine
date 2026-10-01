@@ -2,6 +2,7 @@
 #include "TextRaster.h"
 #include "TextCodepoints.h"
 #include "TextShaping.h"
+#include "TextLayout.h"
 
 #include <algorithm>
 #include <cmath>
@@ -719,9 +720,13 @@ void CText::rebuildTextureFrom (const std::string& text) {
     struct PlacedGlyph { FT_Face face; FT_UInt index; float x; float baselineY; bool color = false; };
     std::vector<PlacedGlyph> glyphs;
     glyphs.reserve (codepoints.size ());
+    struct LayoutRow { size_t begin; size_t end; TextLayoutRange bounds; };
+    std::vector<LayoutRow> layoutRows;
+    float maxRowWidth = 0.0f;
     std::vector<char32_t> row;
     const auto flushRow = [&] {
 	const auto shaped = shape (row);
+	LayoutRow layoutRow {glyphs.size (), 0, {}};
 	float penX = 0.0f;
 	float penY = 0.0f;
 	for (const auto& faced : shaped) {
@@ -729,10 +734,24 @@ void CText::rebuildTextureFrom (const std::string& text) {
 	    glyphs.push_back ({faced.face, glyph.glyphIndex,
 	        penX + static_cast<float> (glyph.xOffset26_6 >> 6),
 	        line * lineHeight - penY - static_cast<float> (glyph.yOffset26_6 >> 6)});
+	    FT_BBox bounds {};
+	    if (textGlyphPixelBounds (faced.face, glyph.glyphIndex, bounds)) {
+	        layoutRow.bounds.include (glyphs.back ().x + static_cast<float> (bounds.xMin),
+	                                  glyphs.back ().x + static_cast<float> (bounds.xMax));
+	    } else if (FT_Load_Glyph (faced.face, glyph.glyphIndex, FT_LOAD_RENDER | FT_LOAD_COLOR) == 0) {
+	        // Bitmap-only fallback faces have no outline CBox. Keep their
+	        // existing rendered bounds rather than dropping their layout.
+	        const auto slot = faced.face->glyph;
+	        layoutRow.bounds.include (glyphs.back ().x + slot->bitmap_left,
+	            glyphs.back ().x + slot->bitmap_left + slot->bitmap.width);
+	    }
 	    penX += static_cast<float> (glyph.xAdvance26_6 >> 6) + letterSpacing;
 	    penY += static_cast<float> (glyph.yAdvance26_6 >> 6);
 	}
 	maxAdvance = std::max (maxAdvance, penX);
+	layoutRow.end = glyphs.size ();
+	maxRowWidth = std::max (maxRowWidth, layoutRow.bounds.width ());
+	layoutRows.push_back (layoutRow);
 	row.clear ();
     };
     for (size_t index = 0; index < codepoints.size (); ++index) {
@@ -745,6 +764,19 @@ void CText::rebuildTextureFrom (const std::string& text) {
 	row.push_back (codepoint);
     }
     flushRow ();
+    TextLayoutRange layoutBounds;
+    for (const auto& layoutRow : layoutRows) {
+        const float offset = textRowAlignmentOffset (layoutRow.bounds.width (), maxRowWidth,
+                                                     m_horizontalAlign);
+        // Native retains the pre-alignment global bounds; row offsets move
+        // mesh vertices without expanding the measured layout width.
+        layoutBounds.include (layoutRow.bounds.min, layoutRow.bounds.max);
+        for (size_t index = layoutRow.begin; index < layoutRow.end; ++index)
+            glyphs[index].x += offset;
+    }
+    m_layoutMinX = layoutBounds.min;
+    m_layoutMaxX = layoutBounds.max;
+    m_lastRasterHorizontalAlign = m_horizontalAlign;
     for (auto& glyph : glyphs) {
 	if (FT_Load_Glyph (glyph.face, glyph.index, FT_LOAD_RENDER | FT_LOAD_COLOR) != 0)
 	    continue;
@@ -786,6 +818,9 @@ void CText::rebuildTextureFrom (const std::string& text) {
         ? std::max (maxInkY, logicalBottom)
         : hasInk ? maxInkY : 1;
     const int height = std::max (1, bottomY - originY);
+    // Retain the bitmap's baseline datum independently of its padded or
+    // tight extent. Native glyph layout anchors raw baselines, not ink centers.
+    m_rasterCenter = {originX + width * 0.5f, -(originY + height * 0.5f)};
     std::vector<uint8_t> pixels (static_cast<size_t> (width) * height * 4, 0);
     const float brightness = getScene ().isHdrPostprocessingActive ()
         ? m_text.brightness->value->getFloat () : 1.0f;
@@ -1056,18 +1091,14 @@ void CText::uploadQuadVertices () {
 }
 
 glm::vec2 CText::getLayoutOffset () const {
-    float horizontalOffset = 0.0f;
-    if (m_horizontalAlign == "left") horizontalOffset = m_quadSize.x * 0.5f;
-    else if (m_horizontalAlign == "right") horizontalOffset = -m_quadSize.x * 0.5f;
+    const float horizontalOffset = textHorizontalAnchorOffset (m_rasterCenter.x,
+        {m_layoutMinX, m_layoutMaxX}, m_horizontalAlign);
     float verticalOffset = 0.0f;
-    if (m_ftFace && (m_verticalAlign == "top" || m_verticalAlign == "bottom")) {
+    if (m_ftFace) {
         const float ascender = static_cast<float> (m_ftFace->size->metrics.ascender >> 6);
         const float descender = static_cast<float> (m_ftFace->size->metrics.descender >> 6);
-        const float precedingRows = static_cast<float> ((m_layoutRows - 1) * m_layoutLineHeight);
-        const float centerAnchor = (ascender - precedingRows) * 0.5f;
-        const float chosenAnchor = m_verticalAlign == "top"
-            ? ascender : descender - precedingRows;
-        verticalOffset = centerAnchor - chosenAnchor;
+        verticalOffset = textVerticalAnchorOffset (m_rasterCenter.y, ascender, descender,
+            m_layoutRows, m_layoutLineHeight, m_verticalAlign);
     }
     return {horizontalOffset, verticalOffset};
 }
@@ -1110,7 +1141,8 @@ void CText::render () {
 	if (m_bundledEmojiFace)
 	    FT_Set_Char_Size (m_bundledEmojiFace, 0, m_lastCharacterSize26_6, 300, 300);
 	rebuildTextureFrom (renderedText);
-    } else if (renderedText != m_lastRenderedText || m_text.spacing->value->getVec2 () != m_lastSpacing
+    } else if (renderedText != m_lastRenderedText || m_horizontalAlign != m_lastRasterHorizontalAlign
+               || m_text.spacing->value->getVec2 () != m_lastSpacing
 	       || m_text.color->value->getVec3 () != m_lastRasterColor
 	       || m_text.backgroundColor->value->getVec3 () != m_lastRasterBackgroundColor
 	       || rasterOpacity != m_lastRasterOpacity
@@ -1144,14 +1176,9 @@ void CText::render () {
 		glm::vec3 (0.0f), scene_w, scene_h, true))
 	    * flip * transform.authoredMatrix;
     }
-    // Native scene text moves the centered layout by half its measured width
-    // for left/right anchoring. Apply the offset in authored local space so
-    // it follows rotated and scaled parents instead of shifting on screen.
-    // Native enum: bottom=0, center=1, top=2. Its top branch uses the
-    // FreeType size ascender, bottom uses descender minus preceding row
-    // heights, and center uses their shared layout reference. Apply only
-    // the branch difference here; this quad's absolute center still comes
-    // from the Linux raster bounds rather than the native layout object.
+    // Convert this centered bitmap back to the raw glyph baseline, then
+    // apply native layout bounds and font-metric anchors in authored local
+    // space. The full rotated/scaled parent basis carries this translation.
     const glm::vec2 layoutOffset = getLayoutOffset ();
     imageWorld = imageWorld * glm::translate (glm::mat4 (1.0f),
 	glm::vec3 (layoutOffset, 0.0f));

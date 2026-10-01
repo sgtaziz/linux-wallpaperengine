@@ -154,6 +154,10 @@ private:
 
     glm::ivec2 m_textureSize = { 0, 0 };
     glm::vec2 m_quadSize = { 0.0f, 0.0f };
+    glm::vec2 m_rasterCenter = { 0.0f, 0.0f };
+    float m_layoutMinX = 0.0f;
+    float m_layoutMaxX = 0.0f;
+    std::string m_lastRasterHorizontalAlign;
     int m_layoutRows = 1;
     float m_layoutLineHeight = 1.0f;
 
