@@ -515,6 +515,8 @@ void CScene::renderFrame (const glm::ivec4& viewport) {
         if (object->is<Objects::CImage> ())
             object->as<Objects::CImage> ()->advanceTextureAnimation (
                 getDeltaTime (), getContext ().getDriver ().getFrameCounter ());
+    // Native cursor dispatch (140189e10) precedes SceneScript update (140171440).
+    dispatchCursorEvents ();
     // run a tick in the javascript logic
     this->getScriptEngine ().tick ();
     if (m_hdrPostprocessing) {
@@ -528,7 +530,6 @@ void CScene::renderFrame (const glm::ivec4& viewport) {
 	    .tint = bloom.tint->value->getVec3 (),
 	});
     }
-    dispatchCursorEvents ();
     flushDestroyedScriptLayers ();
     refreshPointLights ();
     refreshSpotLights ();
@@ -733,16 +734,13 @@ void CScene::dispatchCursorEvents () {
     if (!world) return; // Cursor events are documented for 2D scene layers.
     const bool moved = !m_cursorInputInitialized
         || m_previousCursorScreenPosition != m_mouseScreenPosition;
-    const bool pressed = m_mouseLeftDown && !m_previousMouseLeftDown;
-    const bool released = !m_mouseLeftDown && m_previousMouseLeftDown;
     m_cursorInputInitialized = true;
     m_previousCursorScreenPosition = m_mouseScreenPosition;
-    m_previousMouseLeftDown = m_mouseLeftDown;
+    m_cursorState.beginFrame (moved, m_mouseLeftDown);
 
-    CObject* hit = nullptr;
-    glm::vec3 hitLocal {};
+    struct LayerLocation { glm::vec3 local; bool inside; bool visible; };
     auto layerLocation = [this, &world] (const CObject& object)
-        -> std::optional<std::pair<glm::vec3, bool>> {
+        -> std::optional<LayerLocation> {
         glm::vec2 size {};
         glm::vec2 alignment {};
         if (object.is<Objects::CImage> ()) {
@@ -768,53 +766,48 @@ void CScene::dispatchCursorEvents () {
             });
         const auto local = cursorLocalPosition (*world, transform.authoredMatrix, size, alignment);
         if (!local) return std::nullopt;
-        const bool inside = transform.visible && local->x >= 0.0f && local->x <= size.x
+        const bool inside = local->x >= 0.0f && local->x <= size.x
             && local->y >= 0.0f && local->y <= size.y;
-        return std::pair {*local, inside};
+        return LayerLocation {*local, inside, transform.visible};
     };
-    // The last visible solid layer in render order receives the pointer.
-    // Alpha masks and puppet hit boxes need a separate native contract.
-    for (auto it = m_objectsByRenderOrder.rbegin (); it != m_objectsByRenderOrder.rend (); ++it) {
-        auto* object = *it;
-        if (!object->getObject ().solid || !object->is<Scripting::ScriptableObject> ()) continue;
-        const auto location = layerLocation (*object);
-        if (!location || !location->second) continue;
-        hit = object;
-        hitLocal = location->first;
-        break;
-    }
-
-    const auto previousHover = m_hoveredCursorLayerId;
-    const auto currentHover = hit ? std::optional<int> (hit->getId ()) : std::nullopt;
-    auto dispatch = [this, &world] (int id, const char* event, const glm::vec3& local) {
-        const auto* object = getObject (id);
-        if (object && object->is<Scripting::ScriptableObject> ())
-            m_scriptEngine->dispatchCursorEvent (*object->as<Scripting::ScriptableObject> (),
-                                                 event, *world, local);
-    };
-    if (previousHover != currentHover) {
-        if (previousHover) {
-            const auto* oldLayer = getObject (*previousHover);
-            const auto oldLocation = oldLayer ? layerLocation (*oldLayer) : std::nullopt;
-            if (oldLocation) dispatch (*previousHover, "cursorLeave", oldLocation->first);
+    // Native visits each solid hit from front to back. A propagation blocker
+    // stops later candidates only when its hit is visible through its parents.
+    // Keep the existing geometry; alpha masks and puppet hit boxes are separate.
+    // Cursor callbacks can create layers and reallocate the draw list. Bound
+    // this dispatch to its initial identities and resolve each live layer again.
+    // Native keeps pending removals eligible for this frame's input; physical
+    // deletion happens after the subsequent script tick and clears their state.
+    std::vector<int> candidates;
+    candidates.reserve (m_objectsByRenderOrder.size ());
+    for (const auto* object : m_objectsByRenderOrder) candidates.push_back (object->getId ());
+    for (auto it = candidates.rbegin (); it != candidates.rend (); ++it) {
+        const int id = *it;
+        auto* object = getObject (id);
+        if (!object) {
+            m_cursorState.forget (id);
+            continue;
         }
-        if (currentHover) dispatch (*currentHover, "cursorEnter", hitLocal);
+        if (!object->is<Scripting::ScriptableObject> ()) continue;
+        auto* scriptable = object->as<Scripting::ScriptableObject> ();
+        if (!scriptable->isSolid ()) continue;
+        const auto location = layerLocation (*object);
+        if (!location) continue;
+        m_cursorState.visit (id, location->inside, [&] (const char* event) {
+            const auto* target = getObject (id);
+            if (!target || !target->is<Scripting::ScriptableObject> ()) return;
+            m_scriptEngine->dispatchCursorEvent (*target->as<Scripting::ScriptableObject> (),
+                                                 event, *world, location->local);
+        });
+        object = getObject (id);
+        if (!object) continue;
+        scriptable = object->as<Scripting::ScriptableObject> ();
+        if (!m_cursorState.hasButtonCapture () && location->inside
+            && scriptable->disablesCursorPropagation ()) {
+            const auto currentLocation = layerLocation (*object);
+            if (currentLocation && currentLocation->visible) break;
+        }
     }
-    const bool localMoved = currentHover && previousHover == currentHover
-        && glm::length (hitLocal - m_hoveredCursorLocalPosition) > 1e-4f;
-    m_hoveredCursorLayerId = currentHover;
-    m_hoveredCursorLocalPosition = hitLocal;
-    if ((moved || localMoved) && currentHover) dispatch (*currentHover, "cursorMove", hitLocal);
-    if (pressed) {
-        m_pressedCursorLayerId = currentHover;
-        if (currentHover) dispatch (*currentHover, "cursorDown", hitLocal);
-    }
-    if (released) {
-        if (currentHover) dispatch (*currentHover, "cursorUp", hitLocal);
-        if (currentHover && m_pressedCursorLayerId == currentHover)
-            dispatch (*currentHover, "cursorClick", hitLocal);
-        m_pressedCursorLayerId.reset ();
-    }
+    m_cursorState.finishFrame ();
 }
 
 const Scene& CScene::getScene () const { return *this->getWallpaperData ().as<Scene> (); }
@@ -1104,10 +1097,7 @@ void CScene::flushDestroyedScriptLayers () {
         }
         m_destroyingScriptLayerIds = ids;
         Data::Utils::ScopeGuard destroyingGuard ([this] { m_destroyingScriptLayerIds.clear (); });
-        if (m_hoveredCursorLayerId && ids.contains (*m_hoveredCursorLayerId))
-            m_hoveredCursorLayerId.reset ();
-        if (m_pressedCursorLayerId && ids.contains (*m_pressedCursorLayerId))
-            m_pressedCursorLayerId.reset ();
+        for (const int id : ids) m_cursorState.forget (id);
         std::vector<CObject*> removed;
         for (const auto id : ids)
             if (const auto found = m_objects.find (id); found != m_objects.end ())

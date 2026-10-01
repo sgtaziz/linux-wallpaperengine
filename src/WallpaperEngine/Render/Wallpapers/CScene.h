@@ -2,6 +2,7 @@
 
 #include "WallpaperEngine/Render/Camera.h"
 #include "ParticleSceneClock.h"
+#include "SceneCursorState.h"
 #include "WallpaperEngine/Audio/Drivers/Recorders/SceneSpectrumState.h"
 
 #include "WallpaperEngine/Render/CWallpaper.h"
@@ -153,12 +154,9 @@ private:
     glm::vec2 m_mousePositionNormalized = {};
     glm::vec2 m_mouseScreenPosition = {};
     bool m_mouseLeftDown = false;
-    bool m_previousMouseLeftDown = false;
     bool m_cursorInputInitialized = false;
     glm::vec2 m_previousCursorScreenPosition = {};
-    std::optional<int> m_hoveredCursorLayerId;
-    glm::vec3 m_hoveredCursorLocalPosition = {};
-    std::optional<int> m_pressedCursorLayerId;
+    SceneCursorState m_cursorState;
     glm::vec2 m_parallaxDisplacement = {};
     std::shared_ptr<CFBO> _rt_4FrameBuffer = nullptr;
     std::shared_ptr<CFBO> _rt_8FrameBuffer = nullptr;

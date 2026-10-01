@@ -8,7 +8,8 @@
 using namespace WallpaperEngine::Render;
 using namespace WallpaperEngine::Scripting;
 
-ScriptableObject::ScriptableObject (Wallpapers::CScene& scene, const Object& object) : CObject (scene, object) {
+ScriptableObject::ScriptableObject (Wallpapers::CScene& scene, const Object& object) :
+    CObject (scene, object), m_solid (object.solid), m_disablePropagation (object.disablePropagation) {
     // Concrete objects register the values their render/simulation paths read.
     // Generic group values can differ from typed values with the same name.
 }

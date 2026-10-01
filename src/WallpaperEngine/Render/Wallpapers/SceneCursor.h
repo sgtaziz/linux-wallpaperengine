@@ -42,7 +42,9 @@ inline std::optional<glm::vec3> cursorWorldPosition (
     const glm::vec3 world = glm::vec3 (projected) / projected.w;
     if (!std::isfinite (world.x) || !std::isfinite (world.y) || !std::isfinite (world.z))
         return std::nullopt;
-    return glm::vec3 (world.x + sceneWidth * 0.5f, sceneHeight * 0.5f - world.y, 0.0f);
+    // Native SceneScript world coordinates retain the authored bottom-left
+    // canvas, unlike the top-left cursorScreenPosition property.
+    return glm::vec3 (world.x + sceneWidth * 0.5f, sceneHeight * 0.5f + world.y, 0.0f);
 }
 
 /** Layer coordinates have their origin at the upper-left of the centered quad. */
@@ -59,7 +61,7 @@ inline std::optional<glm::vec3> cursorLocalPosition (
         || local4.w == 0.0f) return std::nullopt;
     const glm::vec3 local = glm::vec3 (local4) / local4.w;
     return {glm::vec3 (local.x - alignment.x + size.x * 0.5f,
-                       local.y - alignment.y + size.y * 0.5f, local.z)};
+                       size.y * 0.5f - local.y + alignment.y, local.z)};
 }
 
 inline std::optional<glm::vec3> cursorHitLocalPosition (
