@@ -948,7 +948,16 @@ void ScriptEngine::tick () {
 	if (!module.initialized) {
 	    module.initialized = true;
 	    JSValue initArgs[] = {this->dynamicToJs (module.value, true, module.angleProperty, module.rgbColorProperty)};
-	    JSValue initResult = this->call (module.module, 1, initArgs, "init");
+	    JSValue initResult;
+            {
+                // Native initial authored init precedes the loader's camera
+                // pose reset. Later dynamic init and user-properties calls do not.
+                const bool previous = m_initialAuthoredInit;
+                m_initialAuthoredInit = !m_initialSceneTickCompleted
+                    && !m_scene.isScriptCreatedLayer (module.object);
+                ScopeGuard initPhase ([this, previous] { m_initialAuthoredInit = previous; });
+                initResult = this->call (module.module, 1, initArgs, "init");
+            }
 	    if (JS_IsException (initResult))
 	        logJSException (this->m_context, ("tick.init:" + key).c_str ());
 	    else jsToDynamicValue (this->m_context, initResult, module.value, key,
@@ -981,6 +990,8 @@ void ScriptEngine::tick () {
 	    JS_FreeValue (m_context, userArgs[0]);
 	}
     }
+
+    m_initialSceneTickCompleted = true;
 
     // Keep the established update order; only the one-time initialization
     // phase needs authored construction dependencies.

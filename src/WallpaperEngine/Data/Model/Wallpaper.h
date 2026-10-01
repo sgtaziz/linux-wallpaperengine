@@ -116,6 +116,8 @@ struct SceneData {
 	    UserSettingUniquePtr nearz;
 	    UserSettingUniquePtr farz;
 	    UserSettingUniquePtr fov;
+	    /** Authored orthographic zoom factor, separate from scripted root-camera zoom. */
+	    UserSettingUniquePtr zoom;
 	    /** Perspective FOV used to draw flag-4 particles in an orthographic scene. */
 	    UserSettingUniquePtr perspectiveOverrideFov;
 	} projection;

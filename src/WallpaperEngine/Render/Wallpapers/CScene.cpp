@@ -570,7 +570,7 @@ void CScene::renderFrame (const glm::ivec4& viewport) {
 
     m_activeRenderTarget = getFBO ();
     m_activeRenderProjection = m_rootRenderClipTransform
-        * getCamera ().getProjection () * getCamera ().getLookAt ();
+        * getCamera ().getProjection () * getCamera ().getRenderLookAt ();
     m_childCompositionScope = false;
     m_maxAlphaCompositionScope = false;
 
@@ -868,6 +868,10 @@ glm::vec3 CScene::getLayerParallaxOffset (const glm::vec3& origin,
 }
 
 const std::vector<CObject*>& CScene::getObjectsByRenderOrder () const { return this->m_objectsByRenderOrder; }
+
+bool CScene::isScriptCreatedLayer (const CObject& object) const {
+    return m_scriptObjectData.contains (object.getId ());
+}
 
 std::vector<CObject*> CScene::getScriptLayers () const {
     std::vector<CObject*> layers;
