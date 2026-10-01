@@ -1,4 +1,5 @@
 #include "CParticle.h"
+#include "ParticleRemapOperators.h"
 #include "ParticleCore.h"
 #include "ParticleBirthGeometry.h"
 #include "ParticleInitialColor.h"
@@ -666,6 +667,13 @@ void CParticle::setup () {
 	    // Link to mouse if either flags bit 0 is set
 	    m_controlPoints[cp.id].linkMouse = (cp.flags & 1) != 0;
 	    m_controlPoints[cp.id].worldSpace = (cp.flags & 2) != 0;
+            // 14022c3c0 creates generated CPs with identity basis and the
+            // authored offset. Ownership suppresses later matrix writers.
+            if ((cp.flags & 0x10000u) != 0) {
+                m_controlPoints[cp.id].basis = glm::mat3 (1.0f);
+                m_controlPoints[cp.id].position = ParticleCore::localControlPointPosition (cp.offset);
+                continue;
+            }
 	    if (!m_controlPoints[cp.id].worldSpace)
 		m_controlPoints[cp.id].basis = ParticleCore::localControlPointBasis (cp.angles);
 	    if (!m_controlPoints[cp.id].linkMouse && m_controlPoints[cp.id].worldSpace
@@ -1003,7 +1011,7 @@ void CParticle::update (ParticleCore::TickClock clock) {
             camera.getLookAt ());
         if (world) {
             for (auto& cp : m_controlPoints) {
-                if (cp.linkMouse)
+                if (cp.linkMouse && (cp.flags & 0x10000u) == 0)
                     cp.position = Wallpapers::particleMouseControlPoint (
                         *world, (m_particle.flags & 1u) != 0, m_controlPointInverse,
                         m_controlPointTransformInvertible, cp.position);
@@ -1012,7 +1020,7 @@ void CParticle::update (ParticleCore::TickClock clock) {
     }
 
     for (size_t i = 0; i < m_inheritedControlPointPositions.size (); ++i)
-	if (m_inheritedControlPointPositions[i])
+	if (m_inheritedControlPointPositions[i] && (m_controlPoints[i].flags & 0x10000u) == 0)
 	    m_controlPoints[i].position = *m_inheritedControlPointPositions[i];
 
     // CP flag 0x4 selects a CP on this node's parent (14022e3e0:132–145).
@@ -1021,7 +1029,7 @@ void CParticle::update (ParticleCore::TickClock clock) {
     if (m_parentParticleRuntime) {
         for (const auto& authored : m_particle.controlPoints) {
             if (authored.id < 0 || authored.id >= static_cast<int> (m_controlPoints.size ())
-                || (authored.flags & 4u) == 0) continue;
+                || (authored.flags & 4u) == 0 || (authored.flags & 0x10000u) != 0) continue;
             if (authored.parentControlPoint < 0
                 || authored.parentControlPoint
                        >= static_cast<int> (m_parentParticleRuntime->m_controlPoints.size ()))
@@ -2848,61 +2856,6 @@ OperatorFunc CParticle::createScalarRemapValueOperator (const ScalarRemapValueOp
 }
 
 OperatorFunc CParticle::createVectorRemapValueOperator (const VectorRemapValueOperator& op, bool birth) {
-    const auto input = op.input;
-    const auto output = op.output;
-    const int inputControlPoint = op.inputControlPoint0;
-    const int inputControlPoint1 = op.inputControlPoint1;
-    const auto outputComponent = static_cast<int> (op.outputComponent);
-    const auto inputComponent = op.inputComponent;
-    const auto inputMin = op.inputMin;
-    const auto inputMax = op.inputMax;
-    const auto outputMin = op.outputMin;
-    const auto outputMax = op.outputMax;
-    const int flags = op.flags;
-    const auto transform = op.transform == VectorRemapValueOperator::Transform::Sine
-        ? ParticleCore::RemapTransform::Sine
-        : op.transform == VectorRemapValueOperator::Transform::Square
-            ? ParticleCore::RemapTransform::Square
-        : op.transform == VectorRemapValueOperator::Transform::Saw
-            ? ParticleCore::RemapTransform::Saw
-        : op.transform == VectorRemapValueOperator::Transform::Triangle
-            ? ParticleCore::RemapTransform::Triangle
-        : op.transform == VectorRemapValueOperator::Transform::SimplexNoise
-            ? ParticleCore::RemapTransform::SimplexNoise
-        : op.transform == VectorRemapValueOperator::Transform::FBMNoise
-            ? ParticleCore::RemapTransform::FBMNoise : ParticleCore::RemapTransform::Identity;
-    const float transformScale = op.transformScale;
-    const int transformOctaves = op.transformOctaves;
-    const auto* blend = op.blendEnvelope ? &*op.blendEnvelope : nullptr;
-    ParticleCore::RemapOperation operation = ParticleCore::RemapOperation::Multiply;
-    switch (op.operation) {
-    case VectorRemapValueOperator::Operation::Set:
-        operation = ParticleCore::RemapOperation::Set; break;
-    case VectorRemapValueOperator::Operation::Multiply:
-        operation = ParticleCore::RemapOperation::Multiply; break;
-    case VectorRemapValueOperator::Operation::Add:
-        operation = ParticleCore::RemapOperation::Add; break;
-    case VectorRemapValueOperator::Operation::Subtract:
-        operation = ParticleCore::RemapOperation::Subtract; break;
-    }
-    ParticleCore::RemapVectorComponent component = ParticleCore::RemapVectorComponent::All;
-    switch (inputComponent) {
-    case VectorRemapValueOperator::InputComponent::All: break;
-    case VectorRemapValueOperator::InputComponent::X:
-        component = ParticleCore::RemapVectorComponent::X; break;
-    case VectorRemapValueOperator::InputComponent::Y:
-        component = ParticleCore::RemapVectorComponent::Y; break;
-    case VectorRemapValueOperator::InputComponent::Z:
-        component = ParticleCore::RemapVectorComponent::Z; break;
-    case VectorRemapValueOperator::InputComponent::Sum:
-        component = ParticleCore::RemapVectorComponent::Sum; break;
-    case VectorRemapValueOperator::InputComponent::Average:
-        component = ParticleCore::RemapVectorComponent::Average; break;
-    case VectorRemapValueOperator::InputComponent::Max:
-        component = ParticleCore::RemapVectorComponent::Max; break;
-    case VectorRemapValueOperator::InputComponent::Min:
-        component = ParticleCore::RemapVectorComponent::Min; break;
-    }
     const bool hasRotationRandom = std::any_of (
         m_particle.initializers.begin (), m_particle.initializers.end (),
         [] (const auto& init) { return init && init->template is<RotationRandomInitializer> (); });
@@ -2912,85 +2865,8 @@ OperatorFunc CParticle::createVectorRemapValueOperator (const VectorRemapValueOp
     const bool hasAngularVelocityRandom = std::any_of (
         m_particle.initializers.begin (), m_particle.initializers.end (),
         [] (const auto& init) { return init && init->template is<AngularVelocityRandomInitializer> (); });
-    return [input, output, inputControlPoint, inputControlPoint1, outputComponent, component, inputMin, inputMax,
-            outputMin, outputMax, flags, transform, transformScale, transformOctaves,
-            blend, operation,
-            hasRotationRandom, hasAngularMovement, hasAngularVelocityRandom, birth] (
-        std::vector<ParticleInstance>& particles, uint32_t count,
-        const std::vector<ControlPointData>& controlPoints, float, ParticleCore::MovementTime) {
-        const auto envelope = operatorEnvelope (blend);
-        for (uint32_t i = 0; i < count; ++i) {
-            auto& p = particles[i];
-            if (!p.alive || (!birth && (!std::isfinite (p.lifetime) || p.lifetime <= 0.0f))) continue;
-            const float age = birth ? 0.0f : p.age / p.lifetime;
-            glm::vec3 source (age);
-            bool vectorInput = false;
-            switch (input) {
-            case VectorRemapValueOperator::Input::LifetimeFraction: break;
-            case VectorRemapValueOperator::Input::MaxLifetime: source = glm::vec3 (p.lifetime); break;
-            case VectorRemapValueOperator::Input::Size: source = glm::vec3 (p.size); break;
-            case VectorRemapValueOperator::Input::Opacity: source = glm::vec3 (p.alpha); break;
-            case VectorRemapValueOperator::Input::Speed: source = glm::vec3 (glm::length (p.velocity)); break;
-            case VectorRemapValueOperator::Input::Rotation: source = glm::vec3 (p.rotation.z); break;
-            case VectorRemapValueOperator::Input::AngularSpeed:
-                source = glm::vec3 (ParticleCore::gatedAngularSpeed (
-                    p.angularVelocity.z, birth ? hasAngularVelocityRandom : hasRotationRandom, hasAngularMovement));
-                break;
-            case VectorRemapValueOperator::Input::DistanceToControlPoint:
-                source = glm::vec3 (inputControlPoint >= 0
-                    && inputControlPoint < static_cast<int> (controlPoints.size ())
-                    ? ParticleCore::remapControlPointDistance (
-                          p.position, controlPoints[inputControlPoint].position) : 0.0f);
-                break;
-            case VectorRemapValueOperator::Input::PositionBetweenTwoControlPoints:
-                source = glm::vec3 (inputControlPoint >= 0 && inputControlPoint1 >= 0
-                    && inputControlPoint < static_cast<int> (controlPoints.size ())
-                    && inputControlPoint1 < static_cast<int> (controlPoints.size ())
-                    ? ParticleCore::remapPositionBetweenControlPoints (
-                          p.position, controlPoints[inputControlPoint].position,
-                          controlPoints[inputControlPoint1].position) : 0.0f);
-                break;
-            case VectorRemapValueOperator::Input::ControlPoint:
-            case VectorRemapValueOperator::Input::DeltaToControlPoint:
-            case VectorRemapValueOperator::Input::DirectionToControlPoint:
-                if (inputControlPoint >= 0
-                    && inputControlPoint < static_cast<int> (controlPoints.size ())) {
-                    const auto selector = input == VectorRemapValueOperator::Input::ControlPoint
-                        ? ParticleCore::RemapControlPointVector::Position
-                        : input == VectorRemapValueOperator::Input::DeltaToControlPoint
-                            ? ParticleCore::RemapControlPointVector::Delta
-                            : ParticleCore::RemapControlPointVector::Direction;
-                    source = ParticleCore::remapControlPointVector (
-                        p.position, controlPoints[inputControlPoint].position, selector);
-                } else source = glm::vec3 (0.0f);
-                vectorInput = true;
-                break;
-            case VectorRemapValueOperator::Input::Color:
-                source = p.color; vectorInput = true; break;
-            case VectorRemapValueOperator::Input::Position:
-                source = ParticleCore::toAuthoredVector (p.position); vectorInput = true; break;
-            case VectorRemapValueOperator::Input::Velocity:
-                source = ParticleCore::toAuthoredVector (p.velocity); vectorInput = true; break;
-            }
-            if (vectorInput && component != ParticleCore::RemapVectorComponent::All) {
-                source = glm::vec3 (ParticleCore::reduceRemapVector (
-                    source.x, source.y, source.z, component));
-            }
-            glm::vec3 current = output == VectorRemapValueOperator::Output::Color
-                ? p.color : output == VectorRemapValueOperator::Output::Position
-                    ? ParticleCore::toAuthoredVector (p.position)
-                    : ParticleCore::toAuthoredVector (p.velocity);
-            current = ParticleCore::remapVectorValue (current, source, age, operation,
-                inputMin, inputMax, outputMin, outputMax, flags, envelope,
-                outputComponent, transform, transformScale,
-                std::bit_cast<uint32_t> (p.oscillatorRandom), vectorInput,
-                transformOctaves);
-            if (output == VectorRemapValueOperator::Output::Color) p.color = current;
-            else if (output == VectorRemapValueOperator::Output::Position)
-                p.position = ParticleCore::toSimulationVector (current);
-            else p.velocity = ParticleCore::toSimulationVector (current);
-        }
-    };
+    return createVectorRemapOperator (
+        op, birth, hasRotationRandom, hasAngularMovement, hasAngularVelocityRandom);
 }
 
 OperatorFunc CParticle::createAlphaFadeOperator (const AlphaFadeOperator& op) {
@@ -3715,7 +3591,7 @@ void CParticle::updateOrdinaryControlPoints () {
     const CParticle* instanceOwner = instanceOverrideOwner ();
     for (size_t index = 0; index < m_controlPoints.size (); ++index) {
         auto& cp = m_controlPoints[index];
-        if (cp.linkMouse) continue;
+        if (cp.linkMouse || (cp.flags & 0x10000u) != 0) continue;
         glm::mat4 authored (1.0f);
         const bool instanceOverrideAllowed = (cp.flags & 0x10005u) == 0;
         const glm::vec3 overridePosition = instanceOwner->getInstanceControlPoint (index);

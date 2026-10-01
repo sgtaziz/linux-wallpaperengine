@@ -747,6 +747,22 @@ ParticleUniquePtr ObjectParser::parseParticle (const JSON& it, const Project& pr
             }
 	}
 
+        // Native 1401c5490 marks direct remap CP outputs as generated, before
+        // runtime CP construction. Ownership also applies to omitted slots.
+        for (const auto& initializer : initializers) {
+            if (!initializer->is<RemapInitialValueInitializer> ()) continue;
+            const auto& remap = initializer->as<RemapInitialValueInitializer> ()->remap;
+            if (!remap->is<VectorRemapValueOperator> ()) continue;
+            const auto& value = *remap->as<VectorRemapValueOperator> ();
+            if (value.output != VectorRemapValueOperator::Output::ControlPoint) continue;
+            const auto target = std::find_if (controlPoints.begin (), controlPoints.end (),
+                [&value] (const ParticleControlPoint& cp) { return cp.id == value.outputControlPoint0; });
+            if (target != controlPoints.end ()) target->flags |= 0x10000u;
+            else controlPoints.push_back (ParticleControlPoint {
+                .id = value.outputControlPoint0, .flags = 0x10000u, .parentControlPoint = 0,
+                .offset = glm::vec3 (0.0f), .angles = glm::vec3 (0.0f), .lockToPointer = false });
+        }
+
 	// Parse children
 	std::vector<ParticleChild> children;
 	const auto childrenIt = particleJson.optional ("children");
@@ -1217,8 +1233,10 @@ ParticleOperatorUniquePtr ObjectParser::parseParticleOperator (
 	return std::make_unique<CapVelocityOperator> (
 	    it.user ("maxspeed", properties, 100.0f), !it.contains ("maxspeed"));
     } else if (name == "remapvalue") {
-	// Only the numeric scalar path is represented. Native 1401bfbb0 inserts
-	// numeric range defaults; property-driven/vector ranges remain unsupported.
+	// Native ranges are literal numeric/vector JSON values. Direct CP output
+	// is represented only for the scalar birth dispatcher, not sparse SIMD ticks.
+	const auto output = it.optional<std::string> ("output", "size");
+	const bool controlPointOutput = birth && output == "controlpoint";
 	const auto isDefaultNumber = [&it] (const char* key, float value) {
 	    if (!it.contains (key)) return true;
 	    const auto& field = it.at (key);
@@ -1231,7 +1249,9 @@ ParticleOperatorUniquePtr ObjectParser::parseParticleOperator (
 	if ((transform != "none" && transform != "sine" && transform != "square"
 	     && transform != "saw" && transform != "triangle"
 	     && transform != "simplexnoise" && transform != "fbmnoise")
-	    || !isDefaultNumber ("outputcontrolpoint0", 0.0f)
+	    || (controlPointOutput ? (it.contains ("outputcontrolpoint0")
+	        && !it.at ("outputcontrolpoint0").is_number_integer ())
+	        : !isDefaultNumber ("outputcontrolpoint0", 0.0f))
 	    || !isDefaultNumber ("outputcontrolpoint1", 1.0f)
 	    || !isNumber ("transforminputscale")
 	    || (transform == "fbmnoise" ?
@@ -1241,8 +1261,13 @@ ParticleOperatorUniquePtr ObjectParser::parseParticleOperator (
 	const int transformOctaves = it.optional<int> ("transformoctaves", 3);
 	if (transform == "fbmnoise" && (transformOctaves < 0 || transformOctaves > 32))
 	    return nullptr;
-	const auto output = it.optional<std::string> ("output", "size");
+	const int outputControlPoint = controlPointOutput ? static_cast<int> (std::min (
+	    static_cast<uint32_t> (it.optional<int> ("outputcontrolpoint0", 0)), 7u)) : 0;
 	const auto input = it.optional<std::string> ("input", "lifetimefraction");
+	// Native birth inputs 16..18 overwrite their source CP before mapping.
+	// Do not expose those unrepresented mutations through the new CP output mode.
+	if (controlPointOutput && (input == "controlpoint" || input == "deltatocontrolpoint"
+	    || input == "directiontocontrolpoint")) return nullptr;
 	const auto inputComponent = it.optional<std::string> ("inputcomponent", "all");
 	const auto operation = it.optional<std::string> ("operation", "multiply");
 	const bool controlPointInput = input == "distancetocontrolpoint"
@@ -1264,7 +1289,8 @@ ParticleOperatorUniquePtr ObjectParser::parseParticleOperator (
 	const int inputControlPoint1 = static_cast<int> (std::min (
 	    static_cast<uint32_t> (authoredControlPoint1), 7u));
 	const auto outputComponent = it.optional<std::string> ("outputcomponent", "all");
-	const bool vectorOutput = output == "color" || output == "position" || output == "velocity";
+	const bool vectorOutput = output == "color" || output == "position" || output == "velocity"
+	    || controlPointOutput;
 	if (it.contains ("flags") && !it.at ("flags").is_number_integer ()) return nullptr;
 	const int flags = it.optional<int> ("flags", 1);
 	const bool birthScalarOutput = birth && (output == "maxlifetime"
@@ -1299,6 +1325,9 @@ ParticleOperatorUniquePtr ObjectParser::parseParticleOperator (
 	    const auto vectorRange = [&] (const char* key, float defaultValue) -> std::optional<glm::vec3> {
 	        if (!it.contains (key)) return glm::vec3 (defaultValue);
 	        const auto& field = it.at (key);
+	        // Native CP birth ranges use the factory's numeric/string JSON
+	        // converters. Retain legacy array compatibility for other outputs.
+	        if (controlPointOutput && field.is_array ()) return std::nullopt;
 	        if (field.is_number ()) return glm::vec3 (field.get<float> ());
 	        if (field.is_string ()) return it.optional (key, glm::vec3 (defaultValue));
 	        if (field.is_array () && field.size () == 3
@@ -1337,7 +1366,8 @@ ParticleOperatorUniquePtr ObjectParser::parseParticleOperator (
 	                                  : VectorRemapValueOperator::InputComponent::All,
 	        output == "color" ? VectorRemapValueOperator::Output::Color
 	        : output == "position" ? VectorRemapValueOperator::Output::Position
-	                               : VectorRemapValueOperator::Output::Velocity,
+	        : output == "controlpoint" ? VectorRemapValueOperator::Output::ControlPoint
+	                                  : VectorRemapValueOperator::Output::Velocity,
 	        outputComponent == "x" ? VectorRemapValueOperator::OutputComponent::X
 	        : outputComponent == "y" ? VectorRemapValueOperator::OutputComponent::Y
 	        : outputComponent == "z" ? VectorRemapValueOperator::OutputComponent::Z
@@ -1354,7 +1384,7 @@ ParticleOperatorUniquePtr ObjectParser::parseParticleOperator (
 	        : transform == "simplexnoise" ? VectorRemapValueOperator::Transform::SimplexNoise
 	        : transform == "fbmnoise" ? VectorRemapValueOperator::Transform::FBMNoise
 	                            : VectorRemapValueOperator::Transform::Identity,
-	        transformScale, inputControlPoint, transformOctaves, inputControlPoint1);
+	        transformScale, inputControlPoint, transformOctaves, inputControlPoint1, outputControlPoint);
 	}
 	return std::make_unique<ScalarRemapValueOperator> (
 	    input == "lifetimefraction" ? ScalarRemapValueOperator::Input::LifetimeFraction

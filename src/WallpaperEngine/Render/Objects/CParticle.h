@@ -101,7 +101,7 @@ using InitializerFunc = std::function<void (ParticleInstance&)>;
  * Particle operator function
  */
 using OperatorFunc = std::function<
-    void (std::vector<ParticleInstance>&, uint32_t, const std::vector<ControlPointData>&, float,
+    void (std::vector<ParticleInstance>&, uint32_t, std::vector<ControlPointData>&, float,
           ParticleCore::MovementTime)>;
 
 class CParticle final : public CRenderable, public Scripting::ScriptableObject {
