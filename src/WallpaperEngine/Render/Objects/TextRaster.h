@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <cstddef>
+#include <cmath>
 
 #include <ft2build.h>
 #include FT_FREETYPE_H
@@ -56,6 +57,33 @@ inline void compositeTextOffscreenRgba (uint8_t* destination, uint8_t red,
             (source[channel] * alpha + destination[channel] * inverse + 127) / 255);
     destination[3] = static_cast<uint8_t> (
         (alpha * alpha + destination[3] * inverse + 127) / 255);
+}
+
+// The HDR glyph draw carries unclamped floating RGB before coverage and
+// blending. Preserve the existing coverage/alpha quantization independently
+// while allowing monochrome fill and background values to exceed one.
+inline void compositeTextRgba (float* destination, float red, float green,
+                               float blue, uint8_t alpha) {
+    if (alpha == 0) return;
+    const int inverse = 255 - alpha;
+    const int previousAlpha = static_cast<int> (std::lround (destination[3] * 255.0f));
+    const int resultAlpha = alpha + (previousAlpha * inverse + 127) / 255;
+    const float source[3] = {red, green, blue};
+    for (int channel = 0; channel < 3; ++channel)
+        destination[channel] = (source[channel] * alpha
+            + destination[channel] * previousAlpha * inverse / 255.0f) / resultAlpha;
+    destination[3] = resultAlpha / 255.0f;
+}
+
+inline void compositeTextOffscreenRgba (float* destination, float red, float green,
+                                        float blue, uint8_t alpha) {
+    if (alpha == 0) return;
+    const int inverse = 255 - alpha;
+    const int previousAlpha = static_cast<int> (std::lround (destination[3] * 255.0f));
+    const float source[3] = {red, green, blue};
+    for (int channel = 0; channel < 3; ++channel)
+        destination[channel] = (source[channel] * alpha + destination[channel] * inverse) / 255.0f;
+    destination[3] = ((alpha * alpha + previousAlpha * inverse + 127) / 255) / 255.0f;
 }
 
 } // namespace WallpaperEngine::Render::Objects

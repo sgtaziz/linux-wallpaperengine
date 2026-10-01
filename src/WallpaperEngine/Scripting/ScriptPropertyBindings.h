@@ -66,13 +66,14 @@ inline auto scriptPropertyBindings (const WallpaperEngine::Data::Model::SceneSpo
 }
 
 inline auto scriptPropertyBindings (const Text& text) {
-    return std::array<ScriptPropertyBinding, 18> {{
+    return std::array<ScriptPropertyBinding, 20> {{
 	{"origin", *text.origin->value}, {"scale", *text.scale->value},
 	// Text currently has no typed angles field or rotation consumer. Keep the
 	// previously exposed generic property until text rotation is implemented.
 	{"angles", *text.groupAngles->value}, {"visible", *text.visible->value},
 	{"parallaxDepth", *text.parallaxDepth->value},
 	{"color", *text.color->value},
+	{"brightness", *text.brightness->value},
 	{"alpha", *text.alpha->value}, {"pointSize", *text.pointSize->value},
 	{"spacing", *text.spacing->value},
 	{"limitRows", *text.limitRows->value}, {"maxRows", *text.maxRows->value},
@@ -80,6 +81,7 @@ inline auto scriptPropertyBindings (const Text& text) {
 	{"limitUseEllipsis", *text.limitUseEllipsis->value},
 	{"opaqueBackground", *text.opaqueBackground->value},
 	{"backgroundColor", *text.backgroundColor->value},
+	{"backgroundBrightness", *text.backgroundBrightness->value},
 	{"padding", *text.padding->value},
 	{"text", *text.text->value},
     }};

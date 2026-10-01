@@ -84,6 +84,8 @@ private:
     glm::vec3 m_lastRasterColor = { -1.0f, -1.0f, -1.0f };
     glm::vec3 m_lastRasterBackgroundColor = { -1.0f, -1.0f, -1.0f };
     float m_lastRasterOpacity = -1.0f;
+    float m_lastRasterBrightness = 1.0f;
+    float m_lastRasterBackgroundBrightness = 1.0f;
     bool m_lastOpaqueBackground = false;
     bool m_lastOffscreenGlyphBlend = false;
     int m_lastMaxRows = 0;
