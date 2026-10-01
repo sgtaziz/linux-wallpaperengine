@@ -12,6 +12,8 @@
 #include <utility>
 #include <vector>
 
+#include "WallpaperEngine/Render/Utils/NativeParticleGradientNoise.h"
+
 #include <glm/glm.hpp>
 #include <glm/gtc/constants.hpp>
 
@@ -787,7 +789,7 @@ inline float reduceRemapVector (float x, float y, float z,
     return x;
 }
 
-inline float reduceBirthControlPointVector (float x, float y, float z,
+inline float reduceBirthRemapVector (float x, float y, float z,
                                             RemapVectorComponent component) {
     // 14023d605..63f reduces Y/Z first, then X; MAXSS/MINSS helpers
     // choose the first argument for equal/unordered operands.
@@ -846,10 +848,10 @@ inline float remapScalarValue (float currentValue, float inputValue,
                                float normalizedAge, RemapOperation operation,
                                std::optional<BlendEnvelope> envelope = std::nullopt,
                                ScalarRemapRange range = {},
-                               bool birthControlPointIEEE = false) {
-    // Only birth CP inputs 16..18 use native unchecked IEEE arithmetic.
-    // Keep the existing finite policy for every other birth/runtime path.
-    if (!birthControlPointIEEE && (!std::isfinite (currentValue) || !std::isfinite (inputValue)
+                               bool birthControlPointIEEE = false, bool birthNoise = false) {
+    // Birth CP inputs and birth noise retain native unchecked IEEE results.
+    const bool rawIEEE = birthControlPointIEEE || birthNoise;
+    if (!rawIEEE && (!std::isfinite (currentValue) || !std::isfinite (inputValue)
         || !std::isfinite (normalizedAge)
         || !std::isfinite (range.inputMin) || !std::isfinite (range.inputMax)
         || !std::isfinite (range.outputMin) || !std::isfinite (range.outputMax)
@@ -858,13 +860,8 @@ inline float remapScalarValue (float currentValue, float inputValue,
     const float span = range.inputMax - range.inputMin;
     const float safeSpan = span == 0.0f ? 0x1p-23f : span;
     float normalized = (inputValue - range.inputMin) / safeSpan;
-    if ((range.flags & 1) != 0) normalized = birthControlPointIEEE
+    if ((range.flags & 1) != 0) normalized = rawIEEE
         ? remapBirthControlPointClamp01 (normalized) : std::clamp (normalized, 0.0f, 1.0f);
-    // Native nonfinite noise lattice conversion is not recovered. Preserve
-    // the safe evaluation guard after the consequential birth CP mutation.
-    if (birthControlPointIEEE
-        && (range.transform == RemapTransform::SimplexNoise || range.transform == RemapTransform::FBMNoise)
-        && !std::isfinite (normalized * range.transformScale)) return currentValue;
     if (range.transform == RemapTransform::Sine) {
         const float packedScale = range.transformScale * 3.1415927f;
         normalized = (std::sin (normalized * packedScale - 1.5707964f) + 1.0f) * 0.5f;
@@ -873,7 +870,7 @@ inline float remapScalarValue (float currentValue, float inputValue,
         const float fraction = scaled - std::trunc (scaled);
         // Native ROUNDPS immediate 8 rounds the fraction to nearest-even,
         // independent of the process floating-point rounding mode.
-        normalized = birthControlPointIEEE && !std::isfinite (fraction) ? fraction
+        normalized = rawIEEE && !std::isfinite (fraction) ? fraction
             : (fraction > 0.5f ? 1.0f : fraction < -0.5f ? -1.0f : 0.0f)
                 + (scaled < 0.0f ? 1.0f : 0.0f);
     } else if (range.transform == RemapTransform::Saw) {
@@ -884,14 +881,16 @@ inline float remapScalarValue (float currentValue, float inputValue,
         const float scaled = std::abs (normalized * range.transformScale);
         normalized = 1.0f - std::abs ((scaled - std::trunc (scaled)) * 2.0f - 1.0f);
     } else if (range.transform == RemapTransform::SimplexNoise) {
-        normalized = remapSimplexNoise (range.noiseSeedBits,
-            normalized * range.transformScale) * 0.5f + 0.5f;
+        normalized = (birthNoise
+            ? Utils::nativeBirthParticleGradientNoise (normalized * range.transformScale)
+            : remapSimplexNoise (range.noiseSeedBits, normalized * range.transformScale)) * 0.5f + 0.5f;
     } else if (range.transform == RemapTransform::FBMNoise) {
-        normalized = remapFBMNoise (range.noiseSeedBits,
-            normalized * range.transformScale, range.noiseOctaves) * 0.5f + 0.5f;
+        normalized = (birthNoise
+            ? Utils::nativeBirthParticleFBMNoise (normalized, range.transformScale, range.noiseOctaves)
+            : remapFBMNoise (range.noiseSeedBits, normalized * range.transformScale, range.noiseOctaves)) * 0.5f + 0.5f;
     }
     float mapped = range.outputMin + normalized * (range.outputMax - range.outputMin);
-    if ((range.flags & 2) != 0) mapped = birthControlPointIEEE
+    if ((range.flags & 2) != 0) mapped = rawIEEE
         ? remapBirthControlPointClamp01 (mapped) : std::clamp (mapped, 0.0f, 1.0f);
     float target = currentValue;
     switch (operation) {
@@ -916,10 +915,10 @@ inline float remapScalarMultiply (float currentValue, float inputValue,
 // rotationrandom alone allocates only bit 1 (native 1401c5490).
 inline float remapBirthAngularSpeed (float current, float input, RemapOperation operation,
                                     ScalarRemapRange range, bool angularVelocityRandom,
-                                    bool angularMovement, bool birthControlPointIEEE = false) {
+                                    bool angularMovement, bool birthControlPointIEEE = false, bool birthNoise = false) {
     if (!(angularVelocityRandom || angularMovement)) return current;
     return remapScalarValue (current, input, 0.0f, operation, std::nullopt, range,
-                             birthControlPointIEEE);
+                             birthControlPointIEEE, birthNoise);
 }
 
 inline glm::vec3 remapSpeedOutput (glm::vec3 velocity, float mappedSpeed,
@@ -945,7 +944,7 @@ inline glm::vec3 remapVectorValue (glm::vec3 current, glm::vec3 input,
                                     uint32_t noiseSeedBits = 0u,
                                     bool vectorNoiseInput = false,
                                     int noiseOctaves = 3,
-                                    bool birthControlPointIEEE = false) {
+                                    bool birthControlPointIEEE = false, bool birthNoise = false) {
     for (int axis = 0; axis < 3; ++axis) {
         if (outputComponent != 0 && outputComponent != axis + 1) continue;
         uint32_t axisSeed = noiseSeedBits;
@@ -959,7 +958,7 @@ inline glm::vec3 remapVectorValue (glm::vec3 current, glm::vec3 input,
             operation, envelope, ScalarRemapRange { inputMin[axis], inputMax[axis],
                                                     outputMin[axis], outputMax[axis], flags,
                                                     transform, transformScale, axisSeed,
-                                                    noiseOctaves }, birthControlPointIEEE);
+                                                    noiseOctaves }, birthControlPointIEEE, birthNoise);
     }
     return current;
 }

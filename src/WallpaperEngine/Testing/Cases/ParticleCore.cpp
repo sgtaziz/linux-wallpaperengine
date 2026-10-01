@@ -1767,7 +1767,7 @@ TEST_CASE ("Production birth CP direction retains IEEE outcomes after mutation",
         cps[2].position = glm::vec3 (5, 7, 11);
         closure (particles, 1, cps, 0.0f, MovementTime {});
         REQUIRE (cps[2].position == glm::vec3 (0.0f));
-        REQUIRE (particles[0].size == 37.0f); // safe lattice guard; not a native numerical claim
+        REQUIRE (std::isnan (particles[0].size)); // native raw noise after source CP mutation
     }
 }
 
@@ -3067,4 +3067,210 @@ TEST_CASE ("Native turbulent birth uses one-dimensional gradient and phase-befor
     REQUIRE (oblique->y == Catch::Approx (241.53067f).margin (.002f));
     REQUIRE (oblique->z == Catch::Approx (506.56149f).margin (.002f));
     REQUIRE_FALSE (nativeParticleGradientNoise (std::numeric_limits<float>::infinity ()).has_value ());
+}
+
+TEST_CASE ("Birth noise kernels match captured native instruction bit vectors",
+           "[particle][birth][remap][noise]") {
+    using namespace WallpaperEngine::Render::Utils;
+    // Original 2.8.42 instructions 14027b090/14027b4b0, saved native leaf
+    // outputs under masked IEEE/RNE (25 gradient inputs and FBM scale 2).
+    const std::array<std::pair<uint32_t, uint32_t>, 25> gradientVectors {{
+        { 0x00000000u, 0x00000000u },
+        { 0x80000000u, 0x80000000u },
+        { 0x3e000000u, 0x3ebd5bf5u },
+        { 0xbe800000u, 0xbf0e5545u },
+        { 0x3fc00000u, 0x3e3ff852u },
+        { 0x41220000u, 0x3d24432eu },
+        { 0x437f8000u, 0xbe3ff852u },
+        { 0x43808000u, 0x00000000u },
+        { 0xbf800000u, 0x00000000u },
+        { 0xbf7fffffu, 0x33fccccdu },
+        { 0xbf800001u, 0xb47ccccdu },
+        { 0x3f7fffffu, 0xb2ca3d71u },
+        { 0x3f800001u, 0x334a3d71u },
+        { 0x49742400u, 0x80000000u },
+        { 0x4effffffu, 0x00000000u },
+        { 0x4f000000u, 0x7f800000u },
+        { 0xcf000000u, 0x00000000u },
+        { 0xcf000001u, 0xff800000u },
+        { 0x7f7fffffu, 0x7f800000u },
+        { 0xff7fffffu, 0xff800000u },
+        { 0x7fc00001u, 0x7fc00001u },
+        { 0xffc00001u, 0xffc00001u },
+        { 0x7f800000u, 0x7f800000u },
+        { 0xff800000u, 0xff800000u },
+        { 0x00000001u, 0x00000003u },
+    }};
+    for (const auto [input, expected] : gradientVectors) {
+        const float value = nativeBirthParticleGradientNoise (std::bit_cast<float> (input));
+        REQUIRE (std::bit_cast<uint32_t> (value) == expected);
+    }
+    const std::array<std::pair<int, uint32_t>, 6> fbmVectors {{
+        { 0, 0xffc00000u }, { 1, 0x3f197274u }, { 2, 0x3f0ba025u },
+        { 3, 0x3eef5badu }, { 5, 0x3ed831c5u }, { 32, 0x3ed17037u }
+    }};
+    for (const auto [count, expected] : fbmVectors) {
+        const float value = nativeBirthParticleFBMNoise (0.125f, 2.0f, count);
+        if (count == 0) REQUIRE (std::isnan (value));
+        else REQUIRE (std::bit_cast<uint32_t> (value) == expected);
+    }
+    for (const float input : { std::numeric_limits<float>::quiet_NaN (),
+                              std::numeric_limits<float>::infinity (),
+                              -std::numeric_limits<float>::infinity () }) {
+        REQUIRE (std::isnan (nativeBirthParticleFBMNoise (input, 2.0f, 0)));
+        const float value = nativeBirthParticleFBMNoise (input, 2.0f, 3);
+        if (std::isnan (input)) REQUIRE (std::isnan (value));
+        else REQUIRE (value == input);
+        REQUIRE_FALSE (nativeParticleGradientNoise (input).has_value ());
+    }
+    REQUIRE_FALSE (nativeParticleGradientNoise (1.0e6f).has_value ());
+    REQUIRE (std::bit_cast<uint32_t> (*nativeParticleGradientNoise (0.125f)) == 0x3ebd5bf5u);
+    // Existing seeded runtime kernels retain their accepted values/count policy.
+    REQUIRE (remapSimplexNoise (0x3e800000u, 0.3f) == Catch::Approx (0.6666548f));
+    REQUIRE (remapFBMNoise (0x3e800000u, 0.3f, 0) == remapFBMNoise (0x3e800000u, 0.3f, 1));
+}
+
+TEST_CASE ("Production birth noise uses native kernels for scalar and vector inputs",
+           "[particle][birth][remap][noise]") {
+    using namespace WallpaperEngine::Data::Model;
+    using namespace WallpaperEngine::Render::Objects;
+    using WallpaperEngine::Data::JSON::JSON;
+    using WallpaperEngine::Data::Parsers::ObjectParser;
+    Project project {};
+    for (const auto transform : { "simplexnoise", "fbmnoise" }) {
+        for (const int count : { 0, 1, 2, 3, 32 }) {
+            JSON data = JSON::parse (R"({"id":1,"particle":{"initializer":[
+                {"name":"remapinitialvalue","input":"size","output":"opacity",
+                 "operation":"remap","flags":0,"transforminputscale":2},
+                {"name":"remapinitialvalue","input":"position","output":"velocity",
+                 "operation":"remap","flags":0,"transforminputscale":2}
+            ]}})");
+            for (auto& initializer : data["particle"]["initializer"]) {
+                initializer["transformfunction"] = transform;
+                if (std::string (transform) == "fbmnoise") initializer["transformoctaves"] = count;
+            }
+            const auto object = ObjectParser::parse (data, project);
+            const auto& model = *object->as<Particle> ();
+            REQUIRE (model.initializers.size () == 2);
+            const auto& scalarModel = *model.initializers[0]->as<RemapInitialValueInitializer> ()
+                ->remap->as<ScalarRemapValueOperator> ();
+            const auto& vectorModel = *model.initializers[1]->as<RemapInitialValueInitializer> ()
+                ->remap->as<VectorRemapValueOperator> ();
+            REQUIRE (scalarModel.transformOctaves == (std::string (transform) == "fbmnoise" ? count : 3));
+            const auto scalar = createScalarRemapOperator (scalarModel, true, false, false, false);
+            const auto vector = createVectorRemapOperator (vectorModel, true, false, false, false);
+            std::vector<ParticleInstance> particles (2);
+            std::vector<ControlPointData> cps (8);
+            for (auto& p : particles) {
+                p.alive = true; p.lifetime = 10.0f; p.size = 0.125f;
+                p.position = toSimulationVector (glm::vec3 (0.125f));
+            }
+            particles[0].oscillatorRandom = 0.25f;
+            particles[1].oscillatorRandom = std::bit_cast<float> (0x7fc00001u);
+            scalar (particles, 2, cps, 0.0f, MovementTime {});
+            vector (particles, 2, cps, 0.0f, MovementTime {});
+            // Constants independently captured from native leaf instructions.
+            const uint32_t raw = std::string (transform) == "simplexnoise" || count == 1 ? 0x3f197274u
+                : count == 2 ? 0x3f0ba025u : count == 3 ? 0x3eef5badu : 0x3ed17037u;
+            const float expected = std::bit_cast<float> (raw) * 0.5f + 0.5f;
+            for (const auto& p : particles) {
+                if (std::string (transform) == "fbmnoise" && count == 0) {
+                    REQUIRE (std::isnan (p.alpha));
+                    for (int axis = 0; axis < 3; ++axis) REQUIRE (std::isnan (p.velocity[axis]));
+                } else {
+                    REQUIRE (std::bit_cast<uint32_t> (p.alpha) == std::bit_cast<uint32_t> (expected));
+                    REQUIRE (toAuthoredVector (p.velocity) == glm::vec3 (expected));
+                }
+            }
+            // Actual runtime closures still evaluate the seeded fallback kernel.
+            const auto runtime = createScalarRemapOperator (scalarModel, false, false, false, false);
+            runtime (particles, 2, cps, 0.0f, MovementTime {});
+            for (const auto& p : particles) {
+                const uint32_t seed = std::bit_cast<uint32_t> (p.oscillatorRandom);
+                const float runtimeExpected = (std::string (transform) == "simplexnoise"
+                    ? remapSimplexNoise (seed, 0.25f) : remapFBMNoise (seed, 0.25f, count)) * 0.5f + 0.5f;
+                // Runtime keeps nonfinite current values unchanged after birth FBM0.
+                if (std::string (transform) == "fbmnoise" && count == 0) REQUIRE (std::isnan (p.alpha));
+                else REQUIRE (p.alpha == runtimeExpected);
+            }
+        }
+    }
+}
+
+TEST_CASE ("Production birth noise preserves per-axis and raw output arithmetic",
+           "[particle][birth][remap][noise]") {
+    using namespace WallpaperEngine::Data::Model;
+    using namespace WallpaperEngine::Render::Objects;
+    using WallpaperEngine::Data::JSON::JSON;
+    using WallpaperEngine::Data::Parsers::ObjectParser;
+    Project project {};
+    const float nan = std::numeric_limits<float>::quiet_NaN ();
+    JSON data = JSON::parse (R"({"id":1,"particle":{"initializer":[
+        {"name":"remapinitialvalue","input":"position","output":"velocity",
+         "operation":"remap","flags":0,"transformfunction":"simplexnoise","transforminputscale":1},
+        {"name":"remapinitialvalue","input":"position","inputcomponent":"max","output":"opacity",
+         "operation":"remap","flags":0,"transformfunction":"simplexnoise","transforminputscale":1}
+    ]}})");
+    const auto object = ObjectParser::parse (data, project);
+    const auto& model = *object->as<Particle> ();
+    const auto vector = createVectorRemapOperator (*model.initializers[0]->as<RemapInitialValueInitializer> ()
+        ->remap->as<VectorRemapValueOperator> (), true, false, false, false);
+    const auto scalar = createScalarRemapOperator (*model.initializers[1]->as<RemapInitialValueInitializer> ()
+        ->remap->as<ScalarRemapValueOperator> (), true, false, false, false);
+    std::vector<ParticleInstance> particles (1);
+    particles[0].alive = true;
+    particles[0].position = toSimulationVector ({ 0.125f, -0.25f, 1.5f });
+    std::vector<ControlPointData> cps (8);
+    vector (particles, 1, cps, 0.0f, MovementTime {});
+    const auto velocity = toAuthoredVector (particles[0].velocity);
+    const std::array<uint32_t, 3> expected { 0x3f2f56fdu, 0x3e635576u, 0x3f17ff0au };
+    for (int axis = 0; axis < 3; ++axis)
+        REQUIRE (std::bit_cast<uint32_t> (velocity[axis]) == expected[axis]);
+    particles[0].position = toSimulationVector ({ 0.125f, nan, 1.5f });
+    scalar (particles, 1, cps, 0.0f, MovementTime {});
+    REQUIRE (std::bit_cast<uint32_t> (particles[0].alpha) == expected[0]);
+
+    for (const auto output : { "size", "opacity", "maxlifetime", "rotation", "angularspeed", "speed" }) {
+        for (int flags = 0; flags <= 3; ++flags) {
+            JSON definition = JSON::parse (R"({"id":1,"particle":{"initializer":[
+                {"name":"remapinitialvalue","input":"size","operation":"remap",
+                 "transformfunction":"fbmnoise","transformoctaves":0}
+            ]}})");
+            auto& entry = definition["particle"]["initializer"][0];
+            entry["output"] = output; entry["flags"] = flags;
+            const auto parsed = ObjectParser::parse (definition, project);
+            REQUIRE (parsed->as<Particle> ()->initializers.size () == 1);
+            const auto* remap = parsed->as<Particle> ()->initializers[0]
+                ->as<RemapInitialValueInitializer> ()->remap->as<ScalarRemapValueOperator> ();
+            REQUIRE (remap != nullptr);
+            const auto closure = createScalarRemapOperator (*remap, true, false, false, true);
+            particles[0] = ParticleInstance {};
+            particles[0].alive = true; particles[0].size = 0.125f;
+            particles[0].velocity = { 3, 4, 0 };
+            closure (particles, 1, cps, 0.0f, MovementTime {});
+            const float result = std::string (output) == "size" ? particles[0].size
+                : std::string (output) == "opacity" ? particles[0].alpha
+                : std::string (output) == "maxlifetime" ? particles[0].lifetime
+                : std::string (output) == "rotation" ? particles[0].rotation.z
+                : std::string (output) == "angularspeed" ? particles[0].angularVelocity.z
+                : particles[0].velocity.x;
+            REQUIRE (std::isnan (result));
+            if (std::string (output) == "speed")
+                for (int axis = 0; axis < 3; ++axis) REQUIRE (std::isnan (particles[0].velocity[axis]));
+        }
+    }
+    for (const float input : { nan, std::numeric_limits<float>::infinity (),
+                              -std::numeric_limits<float>::infinity () }) {
+        JSON definition = JSON::parse (R"({"id":1,"particle":{"initializer":[
+            {"name":"remapinitialvalue","input":"size","output":"opacity","flags":0,
+             "operation":"remap","transformfunction":"simplexnoise","transforminputscale":1}
+        ]}})");
+        const auto parsed = ObjectParser::parse (definition, project);
+        const auto closure = createScalarRemapOperator (*parsed->as<Particle> ()->initializers[0]
+            ->as<RemapInitialValueInitializer> ()->remap->as<ScalarRemapValueOperator> (), true, false, false, false);
+        particles[0] = ParticleInstance {}; particles[0].alive = true; particles[0].size = input;
+        closure (particles, 1, cps, 0.0f, MovementTime {});
+        if (std::isnan (input)) REQUIRE (std::isnan (particles[0].alpha));
+        else REQUIRE (particles[0].alpha == input);
+    }
 }

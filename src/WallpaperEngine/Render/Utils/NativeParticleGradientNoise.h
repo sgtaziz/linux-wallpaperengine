@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <bit>
 #include <cmath>
 #include <cstdint>
 #include <limits>
@@ -32,11 +33,51 @@ inline constexpr std::array<uint8_t, 256> nativeParticleGradientTable {
     0xde, 0x72, 0x43, 0x1d, 0x18, 0x48, 0xf3, 0x8d, 0x80, 0xc3, 0x4e, 0x42, 0xd7, 0x3d, 0x9c, 0xb4,
 };
 
+// Birth remap transforms 5/6 use 14027b090 with unchecked IEEE results.
+// Emulate CVTTSS2SI's masked-invalid sentinel without an undefined C++ cast,
+// then perform the native wrapping predecessor and low-byte table lookup.
+inline float nativeBirthParticleGradientNoise (float coordinate) {
+    const int32_t truncated = std::isfinite (coordinate)
+        && coordinate >= -2147483648.0f && coordinate < 2147483648.0f
+        ? static_cast<int32_t> (coordinate) : std::numeric_limits<int32_t>::min ();
+    const int32_t cell = !(static_cast<float> (truncated) > coordinate) ? truncated
+        : std::bit_cast<int32_t> (static_cast<uint32_t> (truncated) - 1u);
+    const uint8_t index = static_cast<uint8_t> (cell);
+    const float fraction = coordinate - static_cast<float> (cell);
+    const float previous = fraction - 1.0f;
+    const auto gradient = [] (uint8_t hash) {
+        const float magnitude = static_cast<float> ((hash & 7u) + 1u);
+        return (hash & 8u) ? -magnitude : magnitude;
+    };
+    float a0 = 1.0f - fraction * fraction;
+    a0 *= a0;
+    a0 *= a0;
+    float a1 = 1.0f - previous * previous;
+    a1 *= a1;
+    a1 *= a1;
+    return ((gradient (nativeParticleGradientTable[static_cast<uint8_t> (index + 1u)]) * previous) * a1
+          + (gradient (nativeParticleGradientTable[index]) * fraction) * a0) * 0.395f;
+}
+
+// 14027b4b0 samples frequency * original coordinate each iteration, then
+// divides the sequential weighted sum by its amplitude sum. Count zero
+// deliberately returns 0/0; the parser bounds the authored count to 0..32.
+inline float nativeBirthParticleFBMNoise (float coordinate, float frequency, int count) {
+    float total = 0.0f, amplitudeSum = 0.0f, amplitude = 1.0f;
+    for (int octave = 0; octave < count; ++octave) {
+        total += nativeBirthParticleGradientNoise (frequency * coordinate) * amplitude;
+        amplitudeSum += amplitude;
+        frequency *= 2.0f;
+        amplitude *= 0.5f;
+    }
+    return total / amplitudeSum;
+}
+
 // Native 14027b090 is one-dimensional gradient noise, unrelated to the
 // 3D simplex primitive used by the turbulence operator.
 inline std::optional<float> nativeParticleGradientNoise (float coordinate) {
     if (!std::isfinite (coordinate) || std::abs (coordinate) >= 1.0e6f)
-        return std::nullopt; // native float-to-int overflow behavior is unresolved
+        return std::nullopt; // preserve the accepted bounded opcode-9 evaluation policy
     const int cell = static_cast<int> (std::floor (coordinate));
     const float fraction = coordinate - static_cast<float> (cell);
     const float previous = fraction - 1.0f;
