@@ -1010,9 +1010,14 @@ void CPass::setupUniforms () {
     }
     this->addUniform ("g_LightsPosition", scene.getLegacyLightPositions (), 4);
     this->addUniform ("g_LightsColorRadius", scene.getLegacyLightColors (), 4);
-    // register variables like brightness and alpha with some default value
-    this->addUniform ("g_Brightness", &renderable.getBrightness ());
-    this->addUniform ("g_UserAlpha", &renderable.getUserAlpha ());
+    // Native model materials retain their authored/default scalar bindings.
+    // MeshDraw supplies neutral layer values only as a fallback; image and
+    // particle layer appearance continues to override these uniforms.
+    const bool modelMaterial = renderable.getObject ().is<SceneModel> ();
+    if (!modelMaterial || !this->m_uniforms.contains ("g_Brightness"))
+        this->addUniform ("g_Brightness", &renderable.getBrightness ());
+    if (!modelMaterial || !this->m_uniforms.contains ("g_UserAlpha"))
+        this->addUniform ("g_UserAlpha", &renderable.getUserAlpha ());
     this->addUniform ("g_Alpha", &renderable.getAlpha ());
     this->addUniform ("g_Color", &renderable.getColor ());
     this->addUniform ("g_Color4", &renderable.getColor4 ());
