@@ -1525,20 +1525,6 @@ TEST_CASE ("Production birth remap writes ordered CP components and preserves th
     const auto& cpWriter = *model.initializers[0]->as<RemapInitialValueInitializer> ()
         ->remap->as<VectorRemapValueOperator> ();
     REQUIRE_FALSE (createVectorRemapOperator (cpWriter, false, false, false, false));
-    VectorRemapValueOperator destructiveInput (
-        VectorRemapValueOperator::Input::ControlPoint, VectorRemapValueOperator::InputComponent::All,
-        VectorRemapValueOperator::Output::ControlPoint, VectorRemapValueOperator::OutputComponent::All,
-        VectorRemapValueOperator::Operation::Set, 1,
-        glm::vec3 (0.0f), glm::vec3 (1.0f), glm::vec3 (0.0f), glm::vec3 (1.0f));
-    for (const auto input : { VectorRemapValueOperator::Input::ControlPoint,
-                             VectorRemapValueOperator::Input::DeltaToControlPoint,
-                             VectorRemapValueOperator::Input::DirectionToControlPoint }) {
-        destructiveInput.input = input;
-        destructiveInput.output = VectorRemapValueOperator::Output::ControlPoint;
-        REQUIRE_FALSE (createVectorRemapOperator (destructiveInput, true, false, false, false));
-        destructiveInput.output = VectorRemapValueOperator::Output::Position;
-        REQUIRE (createVectorRemapOperator (destructiveInput, true, false, false, false));
-    }
     particles[0].position = glm::vec3 (0.0f);
     writers[4] (particles, 1, cps, 0.0f, MovementTime { 0.0f, 0.0f });
     REQUIRE (toAuthoredVector (particles[0].position) == glm::vec3 (50.0f, 47.0f, 30.0f));
@@ -1559,6 +1545,273 @@ TEST_CASE ("Production birth remap writes ordered CP components and preserves th
         for (int index = 0; index < 8; ++index) {
             REQUIRE (toAuthoredVector (targetCps[index].position)
                 == (index == target ? glm::vec3 (3.0f, 5.0f, 7.0f) : glm::vec3 (0.0f)));
+        }
+    }
+}
+
+TEST_CASE ("Production birth CP inputs clear translation before scalar and vector reductions",
+           "[particle][birth][remap][controlpoint]") {
+    using namespace WallpaperEngine::Data::Model;
+    using namespace WallpaperEngine::Render::Objects;
+    using WallpaperEngine::Data::JSON::JSON;
+    using WallpaperEngine::Data::Parsers::ObjectParser;
+    Project project {};
+    const std::array<const char*, 3> inputs {
+        "controlpoint", "deltatocontrolpoint", "directiontocontrolpoint" };
+    const std::array<const char*, 8> components { "all", "x", "y", "z", "sum", "average", "max", "min" };
+    // Independent coefficients for authored P=(30,40,0), not the old CP=(60,80,7).
+    const std::array<glm::vec3, 3> sources {
+        glm::vec3 (0.0f), glm::vec3 (-30.0f, -40.0f, 0.0f), glm::vec3 (-0.6f, -0.8f, 0.0f) };
+    const std::array<std::array<float, 8>, 3> reduced {{
+        { 0, 0, 0, 0, 0, 0, 0, 0 },
+        { -30, -30, -40, 0, -70, -70.0f / 3.0f, 0, -40 },
+        { -0.6f, -0.6f, -0.8f, 0, -1.4f, -1.4f / 3.0f, 0, -0.8f } }};
+    for (size_t input = 0; input < inputs.size (); ++input) {
+        for (size_t component = 0; component < components.size (); ++component) {
+            JSON data = JSON::parse (R"({"id":1,"particle":{"initializer":[]}})");
+            data["particle"]["initializer"] = JSON::array ({
+                JSON {{"name", "remapinitialvalue"}, {"input", inputs[input]},
+                    {"inputcomponent", components[component]}, {"inputcontrolpoint0", 2},
+                    {"output", "size"}, {"operation", "remap"}, {"flags", 0},
+                    {"outputrangemin", 4}, {"outputrangemax", 6}},
+                JSON {{"name", "remapinitialvalue"}, {"input", inputs[input]},
+                    {"inputcomponent", components[component]}, {"inputcontrolpoint0", 2},
+                    {"output", "position"}, {"operation", "remap"}, {"flags", 0}} });
+            const auto object = ObjectParser::parse (data, project);
+            const auto& model = *object->as<Particle> ();
+            REQUIRE (model.initializers.size () == 2);
+            REQUIRE (model.controlPoints.empty ()); // inputs never claim generated ownership
+            const auto scalar = createScalarRemapOperator (*model.initializers[0]
+                ->as<RemapInitialValueInitializer> ()->remap->as<ScalarRemapValueOperator> (),
+                true, false, false, false);
+            const auto vector = createVectorRemapOperator (*model.initializers[1]
+                ->as<RemapInitialValueInitializer> ()->remap->as<VectorRemapValueOperator> (),
+                true, false, false, false);
+            std::vector<ParticleInstance> particles (1);
+            particles[0].alive = true;
+            const glm::vec3 initialPosition = toSimulationVector ({ 30.0f, 40.0f, 0.0f });
+            std::vector<ControlPointData> cps (8);
+            cps[2].basis = glm::mat3 (glm::rotate (glm::mat4 (1.0f), 0.75f, glm::vec3 (0, 0, 1)));
+            cps[2].offset = glm::vec3 (11, 13, 17);
+            cps[2].previousPosition = glm::vec3 (19, 23, 29);
+            const auto original = cps[2];
+            for (const auto& closure : { scalar, vector }) {
+                cps[2].position = toSimulationVector ({ 60.0f, 80.0f, 7.0f });
+                particles[0].position = initialPosition;
+                closure (particles, 1, cps, 0.0f, MovementTime {});
+                REQUIRE (cps[2].position == glm::vec3 (0.0f));
+                REQUIRE (cps[2].basis == original.basis);
+                REQUIRE (cps[2].offset == original.offset);
+                REQUIRE (cps[2].previousPosition == original.previousPosition);
+                REQUIRE (cps[2].flags == 0);
+                REQUIRE (cps[1].position == glm::vec3 (0.0f));
+            }
+            REQUIRE (particles[0].size == Catch::Approx (4.0f + 2.0f * reduced[input][component]));
+            const glm::vec3 expected = component == 0 ? sources[input] : glm::vec3 (reduced[input][component]);
+            const auto actual = toAuthoredVector (particles[0].position);
+            for (int axis = 0; axis < 3; ++axis) REQUIRE (actual[axis] == Catch::Approx (expected[axis]));
+        }
+    }
+}
+
+TEST_CASE ("Birth CP input mutation precedes destination reads and disabled angular outputs",
+           "[particle][birth][remap][controlpoint]") {
+    using namespace WallpaperEngine::Data::Model;
+    using namespace WallpaperEngine::Render::Objects;
+    using WallpaperEngine::Data::JSON::JSON;
+    using WallpaperEngine::Data::Parsers::ObjectParser;
+    Project project {};
+    const auto object = ObjectParser::parse (JSON::parse (R"({"id":1,"particle":{"initializer":[
+        {"name":"remapinitialvalue","input":"controlpoint","inputcontrolpoint0":2,
+         "output":"controlpoint","outputcontrolpoint0":2,"operation":"add",
+         "outputrangemin":"10 20 30","outputrangemax":"10 20 30","flags":0},
+        {"name":"remapinitialvalue","input":"controlpoint","inputcontrolpoint0":2,
+         "output":"angularspeed","operation":"remap","outputrangemin":99,"outputrangemax":99}
+    ],"operator":[
+        {"name":"remapvalue","input":"controlpoint","inputcontrolpoint0":2,
+         "output":"position","operation":"remap","flags":0}
+    ]}})"), project);
+    const auto& model = *object->as<Particle> ();
+    REQUIRE (model.initializers.size () == 2);
+    const auto writer = createVectorRemapOperator (*model.initializers[0]
+        ->as<RemapInitialValueInitializer> ()->remap->as<VectorRemapValueOperator> (), true, false, false, false);
+    const auto disabledAngular = createScalarRemapOperator (*model.initializers[1]
+        ->as<RemapInitialValueInitializer> ()->remap->as<ScalarRemapValueOperator> (), true, false, false, false);
+    const auto reader = createVectorRemapOperator (*model.operators[0]
+        ->as<VectorRemapValueOperator> (), false, false, false, false);
+    std::vector<ParticleInstance> particles (1);
+    particles[0].alive = true;
+    particles[0].angularVelocity.z = 7.0f;
+    std::vector<ControlPointData> cps (8);
+    cps[2].position = toSimulationVector ({ 60.0f, 80.0f, 90.0f });
+    cps[2].basis = glm::mat3 (2.0f);
+    cps[2].flags = 0x10000u;
+    for (int birth = 0; birth < 4; ++birth) {
+        writer (particles, 1, cps, 0.0f, MovementTime {});
+        reader (particles, 1, cps, 0.0f, MovementTime {});
+        REQUIRE (toAuthoredVector (cps[2].position) == glm::vec3 (10, 20, 30));
+        REQUIRE (toAuthoredVector (particles[0].position) == glm::vec3 (10, 20, 30));
+        REQUIRE (cps[2].basis == glm::mat3 (2.0f));
+    }
+    disabledAngular (particles, 1, cps, 0.0f, MovementTime {});
+    reader (particles, 1, cps, 0.0f, MovementTime {});
+    REQUIRE (particles[0].angularVelocity.z == 7.0f);
+    REQUIRE (particles[0].position == glm::vec3 (0.0f));
+    REQUIRE (cps[2].position == glm::vec3 (0.0f));
+    REQUIRE (cps[2].basis == glm::mat3 (2.0f));
+    REQUIRE (cps[2].flags == 0x10000u);
+}
+
+TEST_CASE ("Production birth CP direction retains IEEE outcomes after mutation",
+           "[particle][birth][remap][controlpoint]") {
+    using namespace WallpaperEngine::Data::Model;
+    using namespace WallpaperEngine::Render::Objects;
+    using WallpaperEngine::Data::JSON::JSON;
+    using WallpaperEngine::Data::Parsers::ObjectParser;
+    Project project {};
+    const float infinity = std::numeric_limits<float>::infinity ();
+    const float nan = std::numeric_limits<float>::quiet_NaN ();
+    const auto speedObject = ObjectParser::parse (JSON::parse (R"({"id":1,"particle":{"initializer":[
+        {"name":"remapinitialvalue","input":"directiontocontrolpoint","inputcontrolpoint0":2,
+         "output":"speed","operation":"remap","flags":0}
+    ]}})"), project);
+    const auto speed = createScalarRemapOperator (*speedObject->as<Particle> ()->initializers[0]
+        ->as<RemapInitialValueInitializer> ()->remap->as<ScalarRemapValueOperator> (), true, false, false, false);
+    for (const auto velocity : { glm::vec3 (3, 4, 0), glm::vec3 (0.0f) }) {
+        std::vector<ParticleInstance> particles (1);
+        particles[0].alive = true;
+        particles[0].velocity = velocity;
+        std::vector<ControlPointData> cps (8);
+        cps[2].position = glm::vec3 (5, 7, 11);
+        speed (particles, 1, cps, 0.0f, MovementTime {});
+        REQUIRE (cps[2].position == glm::vec3 (0.0f));
+        for (int axis = 0; axis < 3; ++axis) REQUIRE (std::isnan (particles[0].velocity[axis]));
+    }
+    for (const auto component : { "max", "min" }) {
+        JSON data = JSON::parse (R"({"id":1,"particle":{"initializer":[
+            {"name":"remapinitialvalue","input":"deltatocontrolpoint","inputcontrolpoint0":2,
+             "output":"size","operation":"remap","flags":0},
+            {"name":"remapinitialvalue","input":"deltatocontrolpoint","inputcontrolpoint0":2,
+             "output":"position","operation":"remap","flags":0}
+        ]}})");
+        for (auto& initializer : data["particle"]["initializer"]) initializer["inputcomponent"] = component;
+        const auto object = ObjectParser::parse (data, project);
+        const auto& model = *object->as<Particle> ();
+        const auto scalar = createScalarRemapOperator (*model.initializers[0]
+            ->as<RemapInitialValueInitializer> ()->remap->as<ScalarRemapValueOperator> (), true, false, false, false);
+        const auto vector = createVectorRemapOperator (*model.initializers[1]
+            ->as<RemapInitialValueInitializer> ()->remap->as<VectorRemapValueOperator> (), true, false, false, false);
+        std::vector<ParticleInstance> particles (1);
+        particles[0].alive = true;
+        std::vector<ControlPointData> cps (8);
+        const float z = std::string (component) == "max" ? -10.0f : 10.0f;
+        for (const auto& closure : { scalar, vector }) {
+            particles[0].position = toSimulationVector ({ -1, nan, z });
+            cps[2].position = glm::vec3 (5, 7, 11);
+            closure (particles, 1, cps, 0.0f, MovementTime {});
+            REQUIRE (cps[2].position == glm::vec3 (0.0f));
+        }
+        REQUIRE (particles[0].size == 1.0f);
+        REQUIRE (toAuthoredVector (particles[0].position) == glm::vec3 (1.0f));
+    }
+    for (int flags = 0; flags <= 3; ++flags) {
+        JSON data = JSON::parse (R"({"id":1,"particle":{"initializer":[
+            {"name":"remapinitialvalue","input":"directiontocontrolpoint","inputcontrolpoint0":2,
+             "output":"size","operation":"remap"},
+            {"name":"remapinitialvalue","input":"directiontocontrolpoint","inputcontrolpoint0":2,
+             "output":"position","operation":"remap"}
+        ]}})");
+        for (auto& initializer : data["particle"]["initializer"]) initializer["flags"] = flags;
+        const auto object = ObjectParser::parse (data, project);
+        const auto& model = *object->as<Particle> ();
+        const auto scalar = createScalarRemapOperator (*model.initializers[0]
+            ->as<RemapInitialValueInitializer> ()->remap->as<ScalarRemapValueOperator> (), true, false, false, false);
+        const auto vector = createVectorRemapOperator (*model.initializers[1]
+            ->as<RemapInitialValueInitializer> ()->remap->as<VectorRemapValueOperator> (), true, false, false, false);
+        for (const auto authored : { glm::vec3 (0.0f), glm::vec3 (infinity, 0, 0), glm::vec3 (nan, 1, 2) }) {
+            std::vector<ParticleInstance> particles (1);
+            particles[0].alive = true;
+            std::vector<ControlPointData> cps (8);
+            for (const auto& closure : { scalar, vector }) {
+                cps[2].position = glm::vec3 (5, 7, 11);
+                particles[0].position = toSimulationVector (authored);
+                closure (particles, 1, cps, 0.0f, MovementTime {});
+                REQUIRE (cps[2].position == glm::vec3 (0.0f));
+            }
+            REQUIRE (std::isnan (particles[0].size));
+            REQUIRE (std::isnan (particles[0].position.x));
+            if (authored.x == infinity) {
+                REQUIRE (particles[0].position.y == 0.0f);
+                REQUIRE (particles[0].position.z == 0.0f);
+            } else {
+                REQUIRE (std::isnan (particles[0].position.y));
+                REQUIRE (std::isnan (particles[0].position.z));
+            }
+        }
+    }
+    for (const auto transform : { "simplexnoise", "fbmnoise" }) {
+        JSON data = JSON::parse (R"({"id":1,"particle":{"initializer":[
+            {"name":"remapinitialvalue","input":"directiontocontrolpoint","inputcontrolpoint0":2,
+             "output":"size","operation":"remap"}
+        ]}})");
+        data["particle"]["initializer"][0]["transformfunction"] = transform;
+        const auto object = ObjectParser::parse (data, project);
+        const auto& remap = *object->as<Particle> ()->initializers[0]
+            ->as<RemapInitialValueInitializer> ()->remap->as<ScalarRemapValueOperator> ();
+        REQUIRE (remap.transform != ScalarRemapValueOperator::Transform::Identity);
+        const auto closure = createScalarRemapOperator (remap, true, false, false, false);
+        std::vector<ParticleInstance> particles (1);
+        particles[0].alive = true;
+        particles[0].size = 37.0f;
+        std::vector<ControlPointData> cps (8);
+        cps[2].position = glm::vec3 (5, 7, 11);
+        closure (particles, 1, cps, 0.0f, MovementTime {});
+        REQUIRE (cps[2].position == glm::vec3 (0.0f));
+        REQUIRE (particles[0].size == 37.0f); // safe lattice guard; not a native numerical claim
+    }
+}
+
+TEST_CASE ("Extracted production runtime CP readers preserve translation and finite guards",
+           "[particle][remap][controlpoint]") {
+    using namespace WallpaperEngine::Data::Model;
+    using namespace WallpaperEngine::Render::Objects;
+    using WallpaperEngine::Data::JSON::JSON;
+    using WallpaperEngine::Data::Parsers::ObjectParser;
+    Project project {};
+    const std::array<const char*, 3> inputs { "controlpoint", "deltatocontrolpoint", "directiontocontrolpoint" };
+    const std::array<glm::vec3, 3> expected {
+        glm::vec3 (60, 80, 0), glm::vec3 (30, 40, 0), glm::vec3 (0.6f, 0.8f, 0) };
+    for (size_t index = 0; index < inputs.size (); ++index) {
+        JSON data = JSON::parse (R"({"id":1,"particle":{"operator":[]}})");
+        for (const auto output : { "size", "position" }) data["particle"]["operator"].push_back (
+            JSON {{"name", "remapvalue"}, {"input", inputs[index]}, {"inputcontrolpoint0", 2},
+                {"output", output}, {"operation", "remap"}, {"flags", 0}});
+        const auto object = ObjectParser::parse (data, project);
+        const auto& model = *object->as<Particle> ();
+        const auto scalar = createScalarRemapOperator (*model.operators[0]->as<ScalarRemapValueOperator> (),
+            false, false, false, false);
+        const auto vector = createVectorRemapOperator (*model.operators[1]->as<VectorRemapValueOperator> (),
+            false, false, false, false);
+        std::vector<ParticleInstance> particles (1);
+        particles[0].alive = true;
+        std::vector<ControlPointData> cps (8);
+        cps[2].position = toSimulationVector ({ 60, 80, 0 });
+        for (const auto& closure : { scalar, vector }) {
+            particles[0].position = toSimulationVector ({ 30, 40, 0 });
+            closure (particles, 1, cps, 0.0f, MovementTime {});
+            REQUIRE (toAuthoredVector (cps[2].position) == glm::vec3 (60, 80, 0));
+        }
+        REQUIRE (particles[0].size == Catch::Approx (expected[index].x));
+        const auto actual = toAuthoredVector (particles[0].position);
+        for (int axis = 0; axis < 3; ++axis) REQUIRE (actual[axis] == Catch::Approx (expected[index][axis]));
+        if (index == 2) {
+            particles[0].position = cps[2].position;
+            scalar (particles, 1, cps, 0.0f, MovementTime {});
+            particles[0].position = cps[2].position;
+            vector (particles, 1, cps, 0.0f, MovementTime {});
+            REQUIRE (particles[0].size == 0.0f);
+            REQUIRE (particles[0].position == glm::vec3 (0.0f));
+            REQUIRE (toAuthoredVector (cps[2].position) == glm::vec3 (60, 80, 0));
         }
     }
 }
