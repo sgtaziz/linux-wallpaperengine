@@ -63,8 +63,11 @@ inline glm::vec3 scenePointForCamera (
 // Displacement already includes camera amount and mouse influence.
 // Zero authored depth is fixed on screen.
 inline glm::vec3 sceneParallaxOffset (
-    const glm::vec2& depth, const glm::vec2& displacement, float sceneWidth
+    const glm::vec2& depth, const glm::vec2& displacement, float sceneWidth, bool orthographic
 ) {
+    // Native 14018aac0 requires both the parallax and orthographic scene
+    // bits (0x108). Perspective world positions never receive canvas offsets.
+    if (!orthographic) return {};
     return {-depth.x * displacement.x * sceneWidth,
             -depth.y * displacement.y * sceneWidth, 0.0f};
 }
@@ -76,8 +79,9 @@ inline glm::vec3 sceneParallaxOffset (
 inline glm::vec3 sceneParticleParallaxOffset (
     const glm::vec3& origin, const glm::vec3& cameraEye,
     const glm::vec2& depth, const glm::vec2& displacement,
-    float sceneWidth, float sceneHeight, float cameraAmount
+    float sceneWidth, float sceneHeight, float cameraAmount, bool orthographic
 ) {
+    if (!orthographic) return {};
     return {
         ((origin.x - cameraEye.x - sceneWidth * 0.5f) * cameraAmount
             - displacement.x * sceneWidth) * depth.x,

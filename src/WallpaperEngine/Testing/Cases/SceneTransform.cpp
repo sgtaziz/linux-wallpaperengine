@@ -140,14 +140,40 @@ TEST_CASE ("Scene layer parallax keeps zero depth fixed and signed depths symmet
     // negative-X-depth triangle/text pair. Camera amount is already included
     // in the displacement passed to this helper.
     const glm::vec2 displacement {0.125f, -0.0625f};
-    REQUIRE (sceneParallaxOffset ({0.0f, 0.0f}, displacement, 3840.0f)
+    REQUIRE (sceneParallaxOffset ({0.0f, 0.0f}, displacement, 3840.0f, true)
              == glm::vec3 (0.0f));
-    const glm::vec3 positive = sceneParallaxOffset ({0.1f, 0.1f}, displacement, 3840.0f);
-    const glm::vec3 negative = sceneParallaxOffset ({-0.1f, 0.0f}, displacement, 3840.0f);
+    const glm::vec3 positive = sceneParallaxOffset ({0.1f, 0.1f}, displacement, 3840.0f, true);
+    const glm::vec3 negative = sceneParallaxOffset ({-0.1f, 0.0f}, displacement, 3840.0f, true);
     REQUIRE (positive.x == Catch::Approx (-48.0f));
     REQUIRE (positive.y == Catch::Approx (24.0f));
     REQUIRE (negative.x == Catch::Approx (48.0f));
     REQUIRE (negative.y == Catch::Approx (0.0f));
+}
+
+TEST_CASE ("Perspective parallax preserves world visibility with nonzero authored depth", "[scene][parallax][perspective]") {
+    // Native 140186c90 sets scene bit8 only for orthogonalprojection;
+    // 14018aac0 applies canvas-relative offsets only when flags&0x108==0x108.
+    // A valid perspective object near the world origin would otherwise be
+    // displaced hundreds of scene units by the output's pixel dimensions.
+    const glm::vec3 origin {3.0f, 3.4f, 3.0f};
+    const glm::vec3 eye {10.63064f};
+    const auto view = glm::lookAt (eye, eye - glm::vec3 (2.0f), glm::vec3 (0, 1, 0));
+    const auto projection = glm::perspective (glm::radians (45.0f), 1280.0f / 720.0f, 0.1f, 10000.0f);
+    const auto visible = [&] (glm::vec3 offset) {
+        const auto clip = projection * view * glm::vec4 (origin + offset, 1.0f);
+        return clip.w > 0.0f && std::abs (clip.x) < clip.w && std::abs (clip.y) < clip.w;
+    };
+    REQUIRE (visible ({}));
+    for (const auto displacement : {glm::vec2 (0.0f), glm::vec2 (0.1f, -0.1f)}) {
+        const auto perspective = sceneParticleParallaxOffset (
+            origin, eye, {1.0f, 1.0f}, displacement, 1280.0f, 720.0f, 0.5f, false);
+        REQUIRE (perspective == glm::vec3 (0.0f));
+        REQUIRE (visible (perspective));
+        REQUIRE (sceneParallaxOffset ({1.0f, 1.0f}, displacement, 1280.0f, false)
+                 == glm::vec3 (0.0f));
+        REQUIRE_FALSE (visible (sceneParticleParallaxOffset (
+            origin, eye, {1.0f, 1.0f}, displacement, 1280.0f, 720.0f, 0.5f, true)));
+    }
 }
 
 TEST_CASE ("Scene parallax delay follows native per-frame smoothing", "[scene][parallax]") {
@@ -173,12 +199,12 @@ TEST_CASE ("Particle parallax uses authored depth and camera-relative origin", "
     const glm::vec2 displacement {0.125f, -0.0625f};
     const auto offset = [&] (glm::vec2 depth) {
         return sceneParticleParallaxOffset (origin, eye, depth, displacement,
-                                            3840.0f, 2160.0f, 0.5f);
+                                            3840.0f, 2160.0f, 0.5f, true);
     };
     // The original 2902406982 particle authors zero depth on both axes.
     REQUIRE (offset ({0.0f, 0.0f}) == glm::vec3 (0.0f));
     const auto centered = sceneParticleParallaxOffset (origin, eye, {0.1f, 0.1f},
-                                                       {0.0f, 0.0f}, 3840.0f, 2160.0f, 0.5f);
+                                                       {0.0f, 0.0f}, 3840.0f, 2160.0f, 0.5f, true);
     REQUIRE (centered.x == Catch::Approx (-0.701102f));
     REQUIRE (centered.y == Catch::Approx (-14.150496f));
     const auto positive = offset ({0.1f, 0.1f});
@@ -198,7 +224,7 @@ TEST_CASE ("Unparented scene parallax precedes rotated and mirrored object trans
     const glm::vec2 right {0.0144f, 0.0f}; // centered cursor .5 * amount .18 * influence .16
     const auto offset = [&] (const glm::vec3& origin, const glm::vec2& displacement) {
         return sceneParticleParallaxOffset (
-            origin, eye, {1.0f, 1.0f}, displacement, 1920.0f, 1080.0f, 0.18f);
+            origin, eye, {1.0f, 1.0f}, displacement, 1920.0f, 1080.0f, 0.18f, true);
     };
     for (const auto& [origin, scale, angle] : {
              std::tuple {glm::vec3 (943.53278f, 637.84656f, 0.0f),
@@ -226,7 +252,7 @@ TEST_CASE ("Unparented scene parallax precedes rotated and mirrored object trans
     REQUIRE (characterCenter.y == Catch::Approx (-36.75315f).margin (0.002f));
     REQUIRE ((characterTop - characterCenter).y == Catch::Approx (-15.552f).margin (0.001f));
     REQUIRE (sceneParticleParallaxOffset ({943.53278f, 637.84656f, 0.0f}, eye,
-             {0.0f, 0.0f}, right, 1920.0f, 1080.0f, 0.18f) == glm::vec3 (0.0f));
+             {0.0f, 0.0f}, right, 1920.0f, 1080.0f, 0.18f, true) == glm::vec3 (0.0f));
 }
 
 TEST_CASE ("Named puppet attachments compose live bone and offset before child local", "[scene][transform][puppet]") {

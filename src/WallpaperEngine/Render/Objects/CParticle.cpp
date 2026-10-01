@@ -3810,7 +3810,8 @@ void CParticle::applyParallaxToModelMatrix () {
         m_particle.origin->value->getVec3 (), getScene ().getCamera ().getEye (),
         m_particle.parallaxDepth->value->getVec2 (), *getScene ().getParallaxDisplacement (),
         static_cast<float> (getScene ().getWidth ()), static_cast<float> (getScene ().getHeight ()),
-        getScene ().getScene ().camera.parallax.amount->value->getFloat ());
+        getScene ().getScene ().camera.parallax.amount->value->getFloat (),
+        getScene ().getCamera ().isOrthogonal ());
     // Native translates the scene stack before dispatching this object's
     // draw. An unparented emitter's rotation or negative/nonuniform scale
     // must not rotate or magnify the camera movement (2334035201 fog/smoke).
