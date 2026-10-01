@@ -7,6 +7,7 @@
 #include "WallpaperEngine/Render/Shaders/ShaderMetadata.h"
 #include "WallpaperEngine/Render/Shaders/Shader.h"
 #include "WallpaperEngine/Render/Shaders/ExactSourceCache.h"
+#include "WallpaperEngine/Render/Shaders/SceneShaderCombos.h"
 
 using WallpaperEngine::Assets::AssetLocator;
 using WallpaperEngine::FileSystem::Container;
@@ -21,6 +22,44 @@ using WallpaperEngine::Data::Builders::UserSettingBuilder;
 static const ShaderConstantMap emptyConstants;
 static const TextureMap emptyTextures;
 static const ComboMap emptyCombos;
+
+TEST_CASE ("Active scene HDR overrides authored shader combos while inactive scenes preserve them",
+           "[shader][hdr][scene]") {
+    using WallpaperEngine::Render::Shaders::applySceneHdrCombo;
+    auto files = std::make_unique<Container> ();
+    AssetLocator assets (std::move (files));
+    const std::string source =
+        "// [COMBO] {\"combo\":\"HDR\",\"default\":1}\n"
+        "void main() {\n#if HDR\ngl_FragColor = vec4(1,0,0,1);\n"
+        "#else\ngl_FragColor = vec4(0,0,1,1);\n#endif\n}\n";
+    // Distinguish absence from explicit zero: inactive native contexts leave
+    // the shader's default and authored pass/override values intact.
+    for (const bool active : {false, true}) {
+        for (const int passHdr : {-1, 0, 1}) {
+            for (const int overrideHdr : {-1, 0, 1}) {
+                ComboMap pass {{"UNRELATED_PASS", 7}};
+                ComboMap overrides {{"UNRELATED_OVERRIDE", 8}};
+                if (passHdr >= 0) pass.emplace ("HDR", passHdr);
+                if (overrideHdr >= 0) overrides.emplace ("HDR", overrideHdr);
+                const auto authoredOverrides = overrides;
+                applySceneHdrCombo (overrides, active);
+                if (!active) REQUIRE (overrides == authoredOverrides);
+                REQUIRE (overrides.at ("UNRELATED_OVERRIDE") == 8);
+                REQUIRE (pass.at ("UNRELATED_PASS") == 7);
+                ShaderUnit unit (GLSLContext::UnitType_Fragment, "scene-hdr.frag", source,
+                                 assets, emptyConstants, emptyTextures, emptyTextures, pass, overrides);
+                const int effective = active ? 1 : overrideHdr >= 0 ? overrideHdr : passHdr >= 0 ? passHdr : 1;
+                const auto& compiled = unit.compile ();
+                const std::string definition = "#define HDR " + std::to_string (effective);
+                const auto first = compiled.find (definition);
+                REQUIRE (first != std::string::npos);
+                REQUIRE (compiled.find ("#define HDR ", first + definition.size ()) == std::string::npos);
+                REQUIRE (compiled.find ("#define UNRELATED_PASS 7") != std::string::npos);
+                REQUIRE (compiled.find ("#define UNRELATED_OVERRIDE 8") != std::string::npos);
+            }
+        }
+    }
+}
 
 TEST_CASE ("Sprite-trail shader restores native texture corner handedness after Y reflection",
            "[shader][particle][trail]") {

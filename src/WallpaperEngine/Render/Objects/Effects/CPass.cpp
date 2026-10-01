@@ -13,6 +13,7 @@
 #include "WallpaperEngine/Render/TextureAnimation.h"
 #include "WallpaperEngine/Render/UserTextureSelection.h"
 #include "WallpaperEngine/Render/Objects/CImage.h"
+#include "WallpaperEngine/Render/Shaders/SceneShaderCombos.h"
 
 #include "WallpaperEngine/Render/Shaders/Variables/ShaderVariable.h"
 #include "WallpaperEngine/Render/Shaders/Variables/ShaderVariableFloat.h"
@@ -738,6 +739,7 @@ void CPass::setupShaders () {
     }
 
     ComboMap sceneCombos = m_override.combos;
+    Shaders::applySceneHdrCombo (sceneCombos, m_renderable.getScene ().isHdrPostprocessingActive ());
     sceneCombos.insert_or_assign ("LIGHTS_POINT", m_renderable.getScene ().getPointLightCount ());
     sceneCombos.insert_or_assign ("LIGHTS_SPOT", m_renderable.getScene ().getSpotLightCount ());
     this->m_shader = new Render::Shaders::Shader (
