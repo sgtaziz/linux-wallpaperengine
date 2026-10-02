@@ -3,6 +3,7 @@
 #include <catch2/generators/catch_generators.hpp>
 
 #include "WallpaperEngine/Render/FBOProvider.h"
+#include "WallpaperEngine/Render/FramebufferCapture.h"
 #include "WallpaperEngine/Render/CTexture.h"
 #include "WallpaperEngine/Render/EffectClearAction.h"
 #include "WallpaperEngine/Render/Objects/Effects/UniformArrayUpload.h"
@@ -156,6 +157,95 @@ GLint internalFormat (const CFBO& fbo) {
     glBindTexture (GL_TEXTURE_2D, fbo.getTextureID (0));
     glGetTexLevelParameteriv (GL_TEXTURE_2D, 0, GL_TEXTURE_INTERNAL_FORMAT, &internal);
     return internal;
+}
+
+TEST_CASE ("Screenshot readback follows resized framebuffer pixels instead of authored extent",
+           "[render][framebuffer-capture]") {
+    SurfacelessGL gl;
+    REQUIRE (gl.ready);
+    const auto format = GENERATE (TextureFormat_ARGB8888, TextureFormat_RGBA16161616f);
+    CFBO target ("capture", format, TextureFlags_ClampUVs, 1, 4, 2, 4, 2);
+    target.resize (8, 4, 8, 4);
+    target.clear (glm::vec4 (0, 0, 0, 1));
+    glBindFramebuffer (GL_FRAMEBUFFER, target.getFramebuffer ());
+    // The cover is entirely above the old two-row authored readback band.
+    glEnable (GL_SCISSOR_TEST);
+    glScissor (0, 2, 8, 2);
+    glClearColor (20.0f / 255, 220.0f / 255, 240.0f / 255, 1);
+    glClear (GL_COLOR_BUFFER_BIT);
+    glDisable (GL_SCISSOR_TEST);
+    glPixelStorei (GL_PACK_ALIGNMENT, 1);
+    std::array<unsigned char, 4 * 2 * 3> truncated {};
+    glReadPixels (0, 0, 4, 2, GL_RGB, GL_UNSIGNED_BYTE, truncated.data ());
+    REQUIRE (std::ranges::all_of (truncated, [] (unsigned char value) { return value == 0; }));
+
+    const auto source = framebufferCaptureSource (target, {0, 1, 1, 0}, true, false);
+    glBindFramebuffer (GL_FRAMEBUFFER, source.framebuffer);
+    std::vector<unsigned char> pixels (source.extent.x * source.extent.y * 3);
+    glReadPixels (0, 0, source.extent.x, source.extent.y, GL_RGB, GL_UNSIGNED_BYTE, pixels.data ());
+    REQUIRE (pixels.size () == 8 * 4 * 3);
+    for (int y = 0; y < 4; ++y) {
+        for (int x = 0; x < 8; ++x) {
+            const auto offset = (y * 8 + x) * 3;
+            const std::array<unsigned char, 3> actual {pixels[offset], pixels[offset + 1], pixels[offset + 2]};
+            REQUIRE (actual == (y < 2 ? std::array<unsigned char, 3> {0, 0, 0}
+                                     : std::array<unsigned char, 3> {20, 220, 240}));
+        }
+    }
+    REQUIRE (glGetError () == GL_NO_ERROR);
+}
+
+TEST_CASE ("Screenshot applies presentation crop once and preserves output orientation",
+           "[render][framebuffer-capture]") {
+    SurfacelessGL gl;
+    REQUIRE (gl.ready);
+    CFBO target ("crop-capture", TextureFormat_ARGB8888, TextureFlags_ClampUVs, 1, 8, 4, 8, 4);
+    // Each GL row and monitor half has a different color. Capture must
+    // reproduce the final presentation's top-to-bottom order exactly once.
+    std::array<unsigned char, 8 * 4 * 4> rgba {};
+    for (int y = 0; y < 4; ++y) {
+        for (int x = 0; x < 8; ++x) {
+            const int offset = (y * 8 + x) * 4;
+            rgba[offset] = 20 * (y + 1);
+            rgba[offset + 1] = x < 4 ? 10 : 100;
+            rgba[offset + 2] = 240;
+            rgba[offset + 3] = 255;
+        }
+    }
+    glBindTexture (GL_TEXTURE_2D, target.getTextureID (0));
+    glTexSubImage2D (GL_TEXTURE_2D, 0, 0, 0, 8, 4, GL_RGBA, GL_UNSIGNED_BYTE, rgba.data ());
+    glBindFramebuffer (GL_FRAMEBUFFER, target.getFramebuffer ());
+    std::array<unsigned char, 8 * 4 * 3> pixels {};
+    glPixelStorei (GL_PACK_ALIGNMENT, 1);
+    glReadPixels (0, 0, 8, 4, GL_RGB, GL_UNSIGNED_BYTE, pixels.data ());
+    const glm::vec4 crop {0.25f, 0.75f, 0.875f, 0.125f};
+    // Video/web content is still unprojected, so its presentation UV range
+    // survives. A scene framebuffer already contains that crop and must show
+    // its entire rendered image, even when authored dimensions differ.
+    const auto unprojected = framebufferCaptureSource (target, crop, false, false);
+    REQUIRE (unprojected.uv == crop);
+    for (bool flipped : {false, true}) {
+        const auto projected = framebufferCaptureSource (target, crop, true, flipped);
+        REQUIRE (projected.uv.x == 0);
+        REQUIRE (projected.uv.y == 1);
+        REQUIRE (projected.uv.z == (flipped ? 0 : 1));
+        REQUIRE (projected.uv.w == (flipped ? 1 : 0));
+        for (int monitor = 0; monitor < 2; ++monitor) {
+            const auto uv = framebufferCaptureSlice (projected.uv,
+                {monitor * 0.5f, (monitor + 1) * 0.5f, 0, 1});
+            for (int y = 0; y < 4; ++y) {
+                for (int x = 0; x < 4; ++x) {
+                    const auto pixel = framebufferCapturePixel (projected.extent, uv, {x, y}, {4, 4});
+                    const int offset = (pixel.y * 8 + pixel.x) * 3;
+                    REQUIRE (pixels[offset] == 20 * (flipped ? y + 1 : 4 - y));
+                    REQUIRE (pixels[offset + 1] == (monitor == 0 ? 10 : 100));
+                    REQUIRE (pixels[offset + 2] == 240);
+                }
+            }
+        }
+    }
+    REQUIRE (unprojected.extent == glm::ivec2 (8, 4));
+    REQUIRE (glGetError () == GL_NO_ERROR);
 }
 
 TEST_CASE ("Reflection snapshot retains prior scene pixels and rebuilds limited mips on resize",
