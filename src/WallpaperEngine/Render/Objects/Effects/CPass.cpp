@@ -135,6 +135,11 @@ std::shared_ptr<const CFBO> CPass::resolveFBO (const std::string& name) const {
     return fbo;
 }
 
+std::shared_ptr<const TextureProvider> CPass::resolveResource (const std::string& name) const {
+    if (auto light = m_renderable.getScene ().findLightResource (name)) return light;
+    return resolveFBO (name);
+}
+
 std::shared_ptr<const TextureProvider> CPass::resolveChainTexture (const TextureChainEntry& entry) const {
     if (entry.selection != nullptr) {
         return resolveUserTextureSelection (
@@ -155,10 +160,28 @@ std::shared_ptr<const TextureProvider> CPass::resolveChainTexture (const Texture
     }
     if (entry.texture && !entry.texture->isReady () && entry.fallbackTexture &&
         entry.fallbackTexture->isReady ()) return entry.fallbackTexture;
-    return entry.resourceName.empty () ? entry.texture : this->resolveFBO (entry.resourceName);
+    return entry.resourceName.empty () ? entry.texture : this->resolveResource (entry.resourceName);
 }
 
 void CPass::setupRenderFramebuffer () const {
+    if (m_depthDestination) {
+        // Native caster stage (original GPU state): reversed-depth GREATER
+        // test/write, no culling, slope bias -4 and a tile scissor. Depth
+        // clamp stays off because the original pipeline keeps depth clipping.
+        const auto& tile = m_depthDestination->viewport;
+        glBindFramebuffer (GL_FRAMEBUFFER, m_depthDestination->framebuffer);
+        glViewport (tile.x, tile.y, tile.z, tile.w);
+        glEnable (GL_SCISSOR_TEST);
+        glScissor (tile.x, tile.y, tile.z, tile.w);
+        glDisable (GL_BLEND);
+        glEnable (GL_DEPTH_TEST);
+        glDepthFunc (GL_GREATER);
+        glDepthMask (GL_TRUE);
+        glDisable (GL_CULL_FACE);
+        glEnable (GL_POLYGON_OFFSET_FILL);
+        glPolygonOffset (-4.0f, 0.0f);
+        return;
+    }
     // set the framebuffer we're drawing to
     glBindFramebuffer (GL_FRAMEBUFFER, this->m_drawTo->getFramebuffer ());
 
@@ -382,6 +405,7 @@ void CPass::bindTextureOverrides (uint32_t currentTexture, std::shared_ptr<const
 	if (index == 0 && m_texture0Override) continue;
 	// find the expected texture
 	auto expectedTexture = this->resolveChainTexture (*chain);
+	std::string resource;
 
 	do {
 	    if (expectedTexture == nullptr) {
@@ -395,6 +419,7 @@ void CPass::bindTextureOverrides (uint32_t currentTexture, std::shared_ptr<const
 		    break;
 		}
 	    } else if (expectedTexture->isReady ()) {
+		resource = chain->resourceName;
 		break;
 	    }
 
@@ -414,10 +439,24 @@ void CPass::bindTextureOverrides (uint32_t currentTexture, std::shared_ptr<const
 	    : this->resolveTextureAnimationState (expectedTexture).currentTexture;
 	this->bindTextureUnit (index, expectedTexture, frame);
 	if (expectedTexture != nullptr) this->m_textureResolutions[index] = *expectedTexture->getResolution ();
+	this->bindLightResourceState (index, resource, expectedTexture, frame);
 
 	if (index == 0) {
 	    texture0 = expectedTexture;
 	}
+    }
+}
+
+void CPass::bindLightResourceState (int index, const std::string& resource,
+                                    const std::shared_ptr<const TextureProvider>& texture, uint32_t frame) {
+    const auto& scene = m_renderable.getScene ();
+    if (resource == "_rt_shadowAtlas") {
+        // The atlas texture owns its comparison sampler state; shaders read
+        // its texel vector through SHADOW_ATLAS_TEXEL.
+        m_textureTexels[index] = scene.getShadowAtlasTexel ();
+    } else if (resource == "_alias_lightCookie") {
+        glBindSampler (GLuint (index), scene.getLightCookieSampler (texture && texture->getMipLevelCount (frame) > 1));
+        m_samplerUnits.push_back (GLuint (index));
     }
 }
 
@@ -539,6 +578,13 @@ void CPass::cleanupRenderSetup () {
 	}
     }
 
+    if (m_depthDestination) {
+        glDisable (GL_SCISSOR_TEST);
+        glDisable (GL_POLYGON_OFFSET_FILL);
+    }
+    for (const GLuint unit : m_samplerUnits) glBindSampler (unit, 0);
+    m_samplerUnits.clear ();
+
     // unbind all the used textures
     glActiveTexture (GL_TEXTURE0);
     glBindTexture (GL_TEXTURE_2D, 0);
@@ -587,7 +633,7 @@ void CPass::render () {
 	}
     }
 
-    if (this->m_drawTo == nullptr) {
+    if (this->m_drawTo == nullptr && !this->m_depthDestination) {
 	sLog.error ("Skipping render pass for object ", this->m_renderable.getId (), ": no destination FBO set");
 	return;
     }
@@ -611,6 +657,10 @@ std::shared_ptr<const FBOProvider> CPass::getFBOProvider () const { return this-
 const CRenderable& CPass::getRenderable () const { return this->m_renderable; }
 
 void CPass::setDestination (std::shared_ptr<const CFBO> drawTo) { this->m_drawTo = std::move (drawTo); }
+
+void CPass::setDepthDestination (std::optional<DepthDestination> destination) {
+    this->m_depthDestination = destination;
+}
 
 void CPass::setInput (std::shared_ptr<const TextureProvider> input) { this->m_input = std::move (input); }
 
@@ -762,6 +812,20 @@ void CPass::setupShaders () {
     Shaders::applySceneHdrCombo (sceneCombos, m_renderable.getScene ().isHdrPostprocessingActive ());
     sceneCombos.insert_or_assign ("LIGHTS_POINT", m_renderable.getScene ().getPointLightCount ());
     sceneCombos.insert_or_assign ("LIGHTS_SPOT", m_renderable.getScene ().getSpotLightCount ());
+    // Native publishes the serialized spot feature subsets, then
+    // enables the shipped shadow/cookie helpers when any subset is present.
+    const auto& lightScene = m_renderable.getScene ();
+    const int spotShadows = lightScene.getSpotShadowSlotCount ();
+    const int spotCookies = lightScene.getSpotCookieSlotCount ();
+    const int spotBoth = lightScene.getSpotShadowCookieSlotCount ();
+    sceneCombos.insert_or_assign ("LIGHTS_SPOT_SHADOW_COOKIE", spotBoth);
+    sceneCombos.insert_or_assign ("LIGHTS_SPOT_SHADOW", spotShadows);
+    sceneCombos.insert_or_assign ("LIGHTS_SPOT_COOKIE", spotCookies);
+    if (spotShadows + spotBoth != 0) {
+        sceneCombos.insert_or_assign ("LIGHTS_SHADOW_MAPPING", 1);
+        sceneCombos.insert_or_assign ("LIGHTS_SHADOW_MAPPING_QUALITY", lightScene.getShadowQuality ());
+    }
+    if (spotCookies + spotBoth != 0) sceneCombos.insert_or_assign ("LIGHTS_COOKIE", 1);
     this->m_shader = new Render::Shaders::Shader (
 	this->m_renderable.getAssetLocator (), shaderName, this->m_combos, sceneCombos, passTextures,
 	overrideTextures, this->m_override.constants, &this->m_pass.constants
@@ -840,11 +904,12 @@ void CPass::setupTextureUniforms () {
     // but for now just set first vertex's textures
     // and then try with fragment's and override any existing
     for (const auto& [index, textureName] : this->m_shader->getVertex ().getTextures ()) {
-	if ((textureName == "_rt_MipMappedFrameBuffer" || textureName == "_rt_Reflection")
+	if ((textureName == "_rt_MipMappedFrameBuffer" || textureName == "_rt_Reflection"
+             || textureName == "_rt_shadowAtlas" || textureName == "_alias_lightCookie")
             && glGetUniformLocation (m_programID, ("g_Texture" + std::to_string (index)).c_str ()) < 0) continue;
 	try {
 	    auto texture = textureName.find ("_rt_") == 0 || textureName.find ("_alias_") == 0
-		? this->resolveFBO (textureName)
+		? this->resolveResource (textureName)
 		: this->getContext ().resolveTexture (textureName);
 
 	    // create chain entry
@@ -859,11 +924,12 @@ void CPass::setupTextureUniforms () {
     }
 
     for (const auto& [index, textureName] : this->m_shader->getFragment ().getTextures ()) {
-	if ((textureName == "_rt_MipMappedFrameBuffer" || textureName == "_rt_Reflection")
+	if ((textureName == "_rt_MipMappedFrameBuffer" || textureName == "_rt_Reflection"
+             || textureName == "_rt_shadowAtlas" || textureName == "_alias_lightCookie")
             && glGetUniformLocation (m_programID, ("g_Texture" + std::to_string (index)).c_str ()) < 0) continue;
 	try {
 	    auto texture = textureName.find ("_rt_") == 0 || textureName.find ("_alias_") == 0
-		? this->resolveFBO (textureName)
+		? this->resolveResource (textureName)
 		: this->getContext ().resolveTexture (textureName);
 
 	    const auto it = this->m_textures.find (index);
@@ -882,7 +948,7 @@ void CPass::setupTextureUniforms () {
     for (const auto& [index, textureName] : this->m_pass.textures) {
 	try {
 	    auto texture = textureName.find ("_rt_") == 0 || textureName.find ("_alias_") == 0
-		? this->resolveFBO (textureName)
+		? this->resolveResource (textureName)
 		: this->getContext ().resolveTexture (textureName);
 
 	    const auto it = this->m_textures.find (index);
@@ -929,7 +995,7 @@ void CPass::setupTextureUniforms () {
     for (const auto& [index, textureName] : this->m_override.textures) {
 	try {
 	    auto texture = textureName.find ("_rt_") == 0 || textureName.find ("_alias_") == 0
-		? this->resolveFBO (textureName)
+		? this->resolveResource (textureName)
 		: this->getContext ().resolveTexture (textureName);
 
 	    const auto it = this->m_textures.find (index);
@@ -1011,6 +1077,8 @@ void CPass::setupTextureUniforms () {
     }
 
     this->addUniform ("g_Texture0Resolution", &this->m_texture0Resolution);
+    for (const auto& index : this->m_textures | std::views::keys)
+        this->addUniform ("g_Texture" + std::to_string (index) + "Texel", &this->m_textureTexels[index]);
 }
 
 void CPass::setupUniforms () {
@@ -1033,6 +1101,11 @@ void CPass::setupUniforms () {
         this->addUniform ("g_LSpot_Origin", scene.getSpotLightOrigins (), scene.getSpotLightCount ());
         this->addUniform ("g_LSpot_Direction", scene.getSpotLightDirections (), scene.getSpotLightCount ());
         this->addUniform ("g_LSpot_Exponent", scene.getSpotLightExponents (), scene.getSpotLightCount ());
+    }
+    if (scene.getSpotFeatureCount () > 0) {
+        this->addUniform ("g_LFeature_ShadowProjection", scene.getSpotFeatureProjections (), scene.getSpotFeatureCount ());
+        this->addUniform ("g_LFeature_ShadowProjectionTransform", scene.getSpotFeatureTransforms (),
+                          scene.getSpotFeatureCount ());
     }
     this->addUniform ("g_LightsPosition", scene.getLegacyLightPositions (), 4);
     this->addUniform ("g_LightsColorRadius", scene.getLegacyLightColors (), 4);

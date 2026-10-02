@@ -244,7 +244,8 @@ ObjectUniquePtr ObjectParser::parse (const JSON& it, const Project& project) {
 	if (path.empty ()) throw std::invalid_argument ("Scene model path must not be empty");
 	const int skin = it.optional ("skin", 0);
 	if (skin < 0) throw std::invalid_argument ("Scene model skin must be nonnegative");
-	return std::make_unique<SceneModel> (std::move (basedata), SceneModelData {.path = path, .skin = skin});
+	return std::make_unique<SceneModel> (std::move (basedata), SceneModelData {.path = path, .skin = skin,
+            .castShadow = it.user ("castshadow", project.properties, true)});
     } else if (cameraIt != it.end () && cameraIt->is_string ()) {
 	return std::make_unique<SceneCamera> (std::move (basedata), SceneCameraData {
 	    .mode = cameraIt->get<std::string> (),
@@ -265,6 +266,7 @@ ObjectUniquePtr ObjectParser::parse (const JSON& it, const Project& project) {
                 .controlPoint = it.user ("controlpoint", project.properties, glm::vec3 (0.0f, 2.0f, 0.0f)),
                 .castShadow = it.optional ("castshadow", false),
                 .useCookie = it.optional ("usecookie", false),
+                .cookie = it.optional<std::string> ("cookie", "cookie/flashlight1"),
             });
         }
 	if (!lightIt->is_string () || (lightIt->get<std::string> () != "point"

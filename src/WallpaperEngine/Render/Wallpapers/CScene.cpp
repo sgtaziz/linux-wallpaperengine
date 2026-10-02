@@ -1,4 +1,5 @@
 #include "SpotLightUniforms.h"
+#include "SpotLightShadow.h"
 #include "LegacyLightUniforms.h"
 #include "WallpaperEngine/Render/Objects/CImage.h"
 #include "SceneAutoProjection.h"
@@ -63,8 +64,6 @@ public:
         CObject (scene, light), ScriptableObject (scene, light) {
         for (const auto& binding : Scripting::scriptPropertyBindings (light))
             registerProperty (binding.name, binding.value);
-        if (light.castShadow || light.useCookie)
-            sLog.error ("Spot light shadow/cookie rendering is not supported: object_id=", light.id);
     }
 };
 
@@ -147,12 +146,6 @@ CScene::CScene (
     if (scene->camera.projection.isAuto)
         m_sceneFBO->resize (initialTargetWidth, initialTargetHeight, initialTargetWidth, initialTargetHeight);
 
-    this->_rt_shadowAtlas = this->create (
-	"_rt_shadowAtlas", TextureFormat_ARGB8888, TextureFlags_ClampUVs, 1.0,
-        { initialTargetWidth, initialTargetHeight }, { initialTargetWidth, initialTargetHeight }
-    );
-    this->alias ("_alias_lightCookie", "_rt_shadowAtlas");
-
     // set clear color
     const glm::vec3 clearColor = scene->colors.clear->value->getVec3 ();
 
@@ -174,9 +167,13 @@ CScene::CScene (
     m_spotLightOrigins.resize (scene->spotLightSlots, glm::vec4 (0.0f));
     m_spotLightDirections.resize (scene->spotLightSlots, glm::vec4 (0.0f));
     m_spotLightExponents.resize (scene->spotLightSlots, glm::vec4 (0.0f));
+    // Native sizes both feature arrays by the leading subset slots.
+    const int featureSlots = scene->spotShadowSlots + scene->spotCookieSlots + scene->spotShadowCookieSlots;
+    m_spotFeatureProjections.resize (featureSlots, glm::mat4 (0.0f));
+    m_spotFeatureTransforms.resize (featureSlots, glm::vec4 (0.0f));
     for (const auto& object : scene->objects) {
         if (object->is<SceneSpotLight> () && !m_rejectedObjectIds.contains (object->id))
-            m_spotLightObjects.push_back (object->as<SceneSpotLight> ());
+            registerSpotLight (object->as<SceneSpotLight> ());
     }
     refreshSpotLights ();
 
@@ -291,6 +288,8 @@ CScene::~CScene () {
 
     this->m_objectsByRenderOrder.clear ();
     this->m_objects.clear ();
+    for (const GLuint sampler : m_lightCookieSamplers)
+        if (sampler != GL_NONE) glDeleteSamplers (1, &sampler);
 }
 
 Render::CObject* CScene::createObject (const Object& object) {
@@ -597,6 +596,12 @@ void CScene::renderFrame (const glm::ivec4& viewport) {
     m_childCompositionScope = false;
     m_maxAlphaCompositionScope = false;
 
+    // Native fills the spot atlas before the scene stages sample it.
+    renderShadowAtlas ();
+    glBindVertexArray (this->m_vaoBuffer);
+    glBindFramebuffer (GL_FRAMEBUFFER, this->m_sceneFBO->getFramebuffer ());
+    glViewport (0, 0, this->m_sceneFBO->getRealWidth (), this->m_sceneFBO->getRealHeight ());
+
     const auto& debug = this->getContext ().getApp ().getContext ().settings.render.debug;
     if (debug.objectFilter.has_value () || !debug.skipObjects.empty ()) {
         if (clearEnabled) glClear (GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
@@ -773,7 +778,6 @@ void CScene::resizeSceneTargets (int width, int height) {
     resize (m_reflectionSceneFBO, width, height);
     if (m_reflectionSceneFBO) m_reflectionSceneFBO->attachSharedDepth (m_sceneFBO);
     resize (m_mipMappedSceneFBO, std::max (2, width), std::max (2, height));
-    resize (_rt_shadowAtlas, width, height);
     resize (_rt_4FrameBuffer, std::max (1, width / 4), std::max (1, height / 4));
     resize (_rt_8FrameBuffer, std::max (1, width / 8), std::max (1, height / 8));
     resize (_rt_Bloom, std::max (1, width / 8), std::max (1, height / 8));
@@ -1049,17 +1053,26 @@ void CScene::refreshPointLights () {
     m_legacyLightPremultipliedColors = legacyLightPremultipliedColors (m_legacyLightColors);
 }
 
+void CScene::registerSpotLight (const SceneSpotLight* light) {
+    m_spotLightObjects.push_back (light);
+    // Native loads the authored cookie (default cookie/flashlight1)
+    // for every spot light; usecookie only selects whether it is sampled.
+    std::shared_ptr<const TextureProvider> cookie;
+    try {
+        cookie = getContext ().resolveTexture (light->cookie);
+    } catch (const std::exception& e) {
+        sLog.error ("Cannot load spot light cookie ", light->cookie, " for object ", light->id, ": ", e.what ());
+    }
+    m_spotLightCookies.insert_or_assign (light, std::move (cookie));
+}
+
 void CScene::refreshSpotLights () {
-    std::fill (m_spotLightColors.begin (), m_spotLightColors.end (), glm::vec4 (0.0f));
-    std::fill (m_spotLightOrigins.begin (), m_spotLightOrigins.end (), glm::vec4 (0.0f));
-    std::fill (m_spotLightDirections.begin (), m_spotLightDirections.end (), glm::vec4 (0.0f));
-    std::fill (m_spotLightExponents.begin (), m_spotLightExponents.end (), glm::vec4 (0.0f));
-    size_t slot = 0;
+    // The authored-space view of this frame, after camera paths, active
+    // camera objects and script transforms.
+    const auto direction = viewForward (getCamera ().getLookAt ());
+    std::vector<SpotLightInput> inputs;
+    std::vector<const SceneSpotLight*> lights;
     for (const SceneSpotLight* light : m_spotLightObjects) {
-        if (slot >= m_spotLightColors.size ()) break;
-        // Shadow/cookie atlases have a separate native producer and shader
-        // branch. Keep unsupported objects out of this plain-cone producer.
-        if (light->castShadow || light->useCookie) continue;
         const auto transform = resolveSceneTransform (*light,
             [this] (int parentId) -> const Object* { return findObjectData (parentId); },
             [this] (const Object& parent, const std::string& name) {
@@ -1077,13 +1090,91 @@ void CScene::refreshSpotLights () {
         };
         if (!finite (packed.color) || !finite (packed.origin)
             || !finite (packed.direction) || !finite (packed.exponent)) continue;
-        m_spotLightColors[slot] = packed.color;
-        m_spotLightOrigins[slot] = packed.origin;
-        m_spotLightDirections[slot] = packed.direction;
-        m_spotLightExponents[slot] = packed.exponent;
-        ++slot;
+        // The native sort key reads the node's local origin (,
+        // rewritten as a local value reparent path).
+        inputs.push_back ({light->castShadow, light->useCookie,
+            glm::dot (light->origin->value->getVec3 (), direction), packed,
+            spotLightProjection (transform.authoredMatrix, light->outerCone->value->getFloat (),
+                                 light->radius->value->getFloat (), getCamera ().isOrthogonal ())});
+        lights.push_back (light);
+    }
+    const auto& scene = getScene ();
+    auto packing = packSpotLights (inputs,
+        {scene.spotLightSlots, scene.spotShadowSlots, scene.spotCookieSlots, scene.spotShadowCookieSlots},
+        getShadowQuality (), m_shadowAtlas ? m_shadowAtlas->getRealWidth () : 0,
+        m_shadowAtlas ? m_shadowAtlas->getRealHeight () : 0);
+    for (size_t slot = 0; slot < packing.slots.size (); ++slot) {
+        m_spotLightColors[slot] = packing.slots[slot].color;
+        m_spotLightOrigins[slot] = packing.slots[slot].origin;
+        m_spotLightDirections[slot] = packing.slots[slot].direction;
+        m_spotLightExponents[slot] = packing.slots[slot].exponent;
+    }
+    std::copy (packing.projections.begin (), packing.projections.end (), m_spotFeatureProjections.begin ());
+    std::copy (packing.transforms.begin (), packing.transforms.end (), m_spotFeatureTransforms.begin ());
+    m_lightCookie = packing.cookie < 0 ? nullptr : m_spotLightCookies.at (lights[packing.cookie]);
+    m_shadowViews = std::move (packing.views);
+    if (m_shadowViews.empty ()) return;
+    if (!m_shadowAtlas) m_shadowAtlas = std::make_shared<DepthTarget> (packing.atlasWidth, packing.atlasHeight);
+    else m_shadowAtlas->resize (packing.atlasWidth, packing.atlasHeight);
+    m_shadowAtlasTexel = {1.0f / float (packing.atlasWidth), 1.0f / float (packing.atlasHeight),
+                          float (packing.atlasWidth), float (packing.atlasHeight)};
+}
+
+void CScene::renderShadowAtlas () {
+    if (m_shadowViews.empty ()) return;
+    const auto& debug = getContext ().getApp ().getContext ().settings.render.debug;
+    // Native clears the D32 atlas once to the reversed-depth far value.
+    m_shadowAtlas->clear ();
+    for (const auto& view : m_shadowViews) {
+        if (debug.passLog) {
+            const auto& m = view.casterProjection;
+            sLog.out ("Shadow atlas view tile=", view.tile.x, ",", view.tile.y, ",", view.tile.size,
+                      " atlas=", m_shadowAtlas->getRealWidth (), "x", m_shadowAtlas->getRealHeight (),
+                      " glCasterRows=[", m[0][0], " ", m[1][0], " ", m[2][0], " ", m[3][0], "][",
+                      m[0][1], " ", m[1][1], " ", m[2][1], " ", m[3][1], "][",
+                      m[0][2], " ", m[1][2], " ", m[2][2], " ", m[3][2], "][",
+                      m[0][3], " ", m[1][3], " ", m[2][3], " ", m[3][3], "]");
+        }
+        for (auto* object : m_objectsByRenderOrder) {
+            if (!object->is<Objects::CModel> ()) continue;
+            // The render debug filters select casters like ordinary draws.
+            if (debug.objectFilter.has_value () && object->getId () != debug.objectFilter.value ()) continue;
+            if (std::ranges::find (debug.skipObjects, object->getId ()) != debug.skipObjects.end ()) continue;
+            object->as<Objects::CModel> ()->renderShadowCaster (*m_shadowAtlas, view.tile, view.casterProjection);
+        }
     }
 }
+
+std::shared_ptr<const TextureProvider> CScene::findLightResource (const std::string& name) const {
+    if (name == "_rt_shadowAtlas") {
+        // Receivers may compile before the first shadow view allocates the
+        // atlas; a cleared minimum atlas compares as unoccluded.
+        if (!m_shadowAtlas) m_shadowAtlas = std::make_shared<DepthTarget> (2, 2);
+        return m_shadowAtlas;
+    }
+    if (name == "_alias_lightCookie")
+        return m_lightCookie ? m_lightCookie : findFBO ("_alias_NullShaderResource");
+    return nullptr;
+}
+
+GLuint CScene::getLightCookieSampler (bool mipmapped) const {
+    auto& sampler = m_lightCookieSamplers[mipmapped ? 1 : 0];
+    if (sampler == GL_NONE) {
+        glGenSamplers (1, &sampler);
+        glSamplerParameteri (sampler, GL_TEXTURE_MIN_FILTER, mipmapped ? GL_LINEAR_MIPMAP_LINEAR : GL_LINEAR);
+        glSamplerParameteri (sampler, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glSamplerParameteri (sampler, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
+        glSamplerParameteri (sampler, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
+        const GLfloat border[4] {};
+        glSamplerParameterfv (sampler, GL_TEXTURE_BORDER_COLOR, border);
+        glSamplerParameterf (sampler, GL_TEXTURE_MAX_ANISOTROPY, 1.0f);
+    }
+    return sampler;
+}
+
+int CScene::getSpotShadowSlotCount () const { return getScene ().spotShadowSlots; }
+int CScene::getSpotCookieSlotCount () const { return getScene ().spotCookieSlots; }
+int CScene::getSpotShadowCookieSlotCount () const { return getScene ().spotShadowCookieSlots; }
 
 std::optional<glm::mat4> CScene::getPuppetAttachmentTransform (
     int parentId, const std::string& name
@@ -1156,7 +1247,7 @@ CObject* CScene::createScriptLayer (const std::string& configurationJson,
 	m_pointLightObjects.push_back (light);
     }
     if (inserted.first->second->is<SceneSpotLight> ())
-        m_spotLightObjects.push_back (inserted.first->second->as<SceneSpotLight> ());
+        registerSpotLight (inserted.first->second->as<SceneSpotLight> ());
     if (inserted.first->second->is<SceneCamera> ())
         m_sceneCameraObjects.push_back (inserted.first->second->as<SceneCamera> ());
     m_objectsByRenderOrder.push_back (result);
@@ -1211,8 +1302,11 @@ void CScene::flushDestroyedScriptLayers () {
 		std::erase (m_pointLightObjects, light);
 		m_legacyLightSlots.erase (light);
 	    }
-            if (object->getObject ().is<SceneSpotLight> ())
-                std::erase (m_spotLightObjects, object->getObject ().as<SceneSpotLight> ());
+            if (object->getObject ().is<SceneSpotLight> ()) {
+                const auto* light = object->getObject ().as<SceneSpotLight> ();
+                std::erase (m_spotLightObjects, light);
+                m_spotLightCookies.erase (light);
+            }
             m_objects.erase (id);
             delete object;
             m_scriptObjectData.erase (id);

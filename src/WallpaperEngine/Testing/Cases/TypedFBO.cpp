@@ -3,6 +3,7 @@
 #include <catch2/generators/catch_generators.hpp>
 
 #include "WallpaperEngine/Render/FBOProvider.h"
+#include "WallpaperEngine/Render/DepthTarget.h"
 #include "WallpaperEngine/Render/FramebufferCapture.h"
 #include "WallpaperEngine/Render/CTexture.h"
 #include "WallpaperEngine/Render/EffectClearAction.h"
@@ -16,12 +17,17 @@
 #include "WallpaperEngine/Data/Model/Project.h"
 #include "WallpaperEngine/Data/Model/Wallpaper.h"
 #include "WallpaperEngine/Data/Model/Material.h"
+#include "WallpaperEngine/Assets/AssetLocator.h"
+#include "WallpaperEngine/FileSystem/Container.h"
+#include "WallpaperEngine/Render/Shaders/Shader.h"
+#include "WallpaperEngine/Render/Wallpapers/SpotLightShadow.h"
 
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 
 #include <array>
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <stdexcept>
@@ -1681,4 +1687,196 @@ TEST_CASE ("Conditional effect loading omits inactive resources while preserving
     REQUIRE (enabled->passes[1]->binds.size () == 2);
     REQUIRE (inactive->fbos.size () == 1);
     REQUIRE (inactive->passes[0]->binds.size () == 1);
+}
+
+namespace {
+GLuint linkProgram (const std::string& vertex, const std::string& fragment) {
+    GLuint shaders[2] {glCreateShader (GL_VERTEX_SHADER), glCreateShader (GL_FRAGMENT_SHADER)};
+    const char* sources[2] {vertex.c_str (), fragment.c_str ()};
+    const auto result = glCreateProgram ();
+    for (int i = 0; i < 2; ++i) {
+        glShaderSource (shaders[i], 1, &sources[i], nullptr);
+        glCompileShader (shaders[i]);
+        GLint compiled = 0;
+        glGetShaderiv (shaders[i], GL_COMPILE_STATUS, &compiled);
+        if (compiled != GL_TRUE) {
+            std::array<char, 4096> log {};
+            glGetShaderInfoLog (shaders[i], GLsizei (log.size ()), nullptr, log.data ());
+            INFO (log.data ());
+            REQUIRE (compiled == GL_TRUE);
+        }
+        glAttachShader (result, shaders[i]);
+    }
+    glLinkProgram (result);
+    GLint linked = 0;
+    glGetProgramiv (result, GL_LINK_STATUS, &linked);
+    REQUIRE (linked == GL_TRUE);
+    for (auto shader : shaders) glDeleteShader (shader);
+    return result;
+}
+} // namespace
+
+TEST_CASE ("D32 shadow atlas writes reversed depth and samples GREATER with zero border",
+           "[render][shadow-atlas][gl]") {
+    SurfacelessGL gl;
+    REQUIRE (gl.ready);
+    DepthTarget atlas (4, 4);
+    glBindTexture (GL_TEXTURE_2D, atlas.getTextureID (0));
+    GLint format = 0;
+    glGetTexLevelParameteriv (GL_TEXTURE_2D, 0, GL_TEXTURE_INTERNAL_FORMAT, &format);
+    REQUIRE (format == GL_DEPTH_COMPONENT32F);
+    std::array<float, 16> depths {};
+    glGetTexImage (GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT, GL_FLOAT, depths.data ());
+    REQUIRE (std::ranges::all_of (depths, [] (float x) { return x == 0; }));
+    const auto program = [] (const char* fragment) {
+        return linkProgram ("#version 330\nuniform float depth;void main(){"
+            "vec2 p=vec2((gl_VertexID<<1)&2,gl_VertexID&2);"
+            "gl_Position=vec4(p*2.-1.,depth*2.-1.,1.);}", fragment);
+    };
+    GLuint vao = 0;
+    glGenVertexArrays (1, &vao);
+    glBindVertexArray (vao);
+    const auto caster = program ("#version 330\nvoid main(){}");
+    glBindFramebuffer (GL_FRAMEBUFFER, atlas.getFramebuffer ());
+    glViewport (0, 0, 4, 4);
+    glEnable (GL_DEPTH_TEST);
+    glDepthFunc (GL_GREATER);
+    glDepthMask (GL_TRUE);
+    glUseProgram (caster);
+    for (float depth : {0.5f, 0.25f}) {
+        glUniform1f (glGetUniformLocation (caster, "depth"), depth);
+        glDrawArrays (GL_TRIANGLES, 0, 3);
+    }
+    glGetTexImage (GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT, GL_FLOAT, depths.data ());
+    REQUIRE (std::ranges::all_of (depths, [] (float x) { return x == 0.5f; }));
+    const auto receiver = program ("#version 330\nuniform sampler2DShadow atlas;out vec4 color;"
+        "void main(){int x=int(gl_FragCoord.x);float ref=x==0?.3:x==1?.5:.7;"
+        "color=vec4(texture(atlas,vec3(x==3?2.:.5,.5,ref)));}");
+    CFBO output ("depth-compare", TextureFormat_ARGB8888, TextureFlags_ClampUVs, 1, 4, 1, 4, 1);
+    glBindFramebuffer (GL_FRAMEBUFFER, output.getFramebuffer ());
+    glViewport (0, 0, 4, 1);
+    glDisable (GL_DEPTH_TEST);
+    glActiveTexture (GL_TEXTURE0);
+    glBindTexture (GL_TEXTURE_2D, atlas.getTextureID (0));
+    glUseProgram (receiver);
+    glUniform1i (glGetUniformLocation (receiver, "atlas"), 0);
+    glDrawArrays (GL_TRIANGLES, 0, 3);
+    std::array<uint8_t, 16> pixels {};
+    glReadPixels (0, 0, 4, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data ());
+    REQUIRE (pixels[0] == 0);
+    REQUIRE (pixels[4] == 0); // equality is not greater
+    REQUIRE (pixels[8] == 255);
+    REQUIRE (pixels[12] == 255); // positive reference compared to clear-zero border
+    atlas.resize (8, 2);
+    glBindTexture (GL_TEXTURE_2D, atlas.getTextureID (0));
+    glGetTexImage (GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT, GL_FLOAT, depths.data ());
+    REQUIRE (std::ranges::all_of (depths, [] (float x) { return x == 0; }));
+    glGetTexParameteriv (GL_TEXTURE_2D, GL_TEXTURE_COMPARE_FUNC, &format);
+    REQUIRE (format == GL_GREATER);
+    REQUIRE (glGetError () == GL_NO_ERROR);
+    glDeleteProgram (caster);
+    glDeleteProgram (receiver);
+    glDeleteVertexArrays (1, &vao);
+}
+
+TEST_CASE ("Spot caster tiles keep the native atlas orientation and reversed depth",
+           "[render][shadow-atlas][gl]") {
+    using namespace WallpaperEngine::Render::Wallpapers;
+    SurfacelessGL gl;
+    REQUIRE (gl.ready);
+    // The fixture light looks down -Z at the z=0 receiver from z=160.
+    const auto world = glm::translate (glm::mat4 (1), glm::vec3 (0, 0, 160))
+        * glm::rotate (glm::mat4 (1), glm::half_pi<float> (), glm::vec3 (0, 1, 0));
+    const auto sampling = spotLightProjection (world, 38, 360, false);
+    REQUIRE (sampling.has_value ());
+    const auto caster = spotLightGLCasterProjection (*sampling);
+    DepthTarget atlas (8, 4);
+    const auto program = linkProgram (
+        "#version 330\nuniform mat4 caster;in vec3 position;"
+        "void main(){gl_Position=caster*vec4(position,1.);}",
+        "#version 330\nvoid main(){}");
+    // World +Y only: native sampling places it in the first texture rows.
+    const std::array<float, 18> quad {-200, 1, 0, 200, 1, 0, 200, 200, 0, -200, 1, 0, 200, 200, 0, -200, 200, 0};
+    GLuint vao = 0, buffer = 0;
+    glGenVertexArrays (1, &vao);
+    glBindVertexArray (vao);
+    glGenBuffers (1, &buffer);
+    glBindBuffer (GL_ARRAY_BUFFER, buffer);
+    glBufferData (GL_ARRAY_BUFFER, sizeof (quad), quad.data (), GL_STATIC_DRAW);
+    const auto position = GLuint (glGetAttribLocation (program, "position"));
+    glEnableVertexAttribArray (position);
+    glVertexAttribPointer (position, 3, GL_FLOAT, GL_FALSE, 0, nullptr);
+    glUseProgram (program);
+    glUniformMatrix4fv (glGetUniformLocation (program, "caster"), 1, GL_FALSE, &caster[0][0]);
+    glBindFramebuffer (GL_FRAMEBUFFER, atlas.getFramebuffer ());
+    glViewport (4, 0, 4, 4);
+    glEnable (GL_SCISSOR_TEST);
+    glScissor (4, 0, 4, 4);
+    glEnable (GL_DEPTH_TEST);
+    glDepthFunc (GL_GREATER);
+    glDepthMask (GL_TRUE);
+    glDrawArrays (GL_TRIANGLES, 0, 6);
+    glDisable (GL_SCISSOR_TEST);
+    std::array<float, 32> depths {};
+    glBindTexture (GL_TEXTURE_2D, atlas.getTextureID (0));
+    glGetTexImage (GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT, GL_FLOAT, depths.data ());
+    // The receiver compares native zero-to-one depth from the caster matrix.
+    const auto native = spotLightCasterProjection (*sampling) * glm::vec4 (0, 50, 0, 1);
+    const float expected = native.z / native.w;
+    REQUIRE (expected > 0);
+    for (int row = 0; row < 4; ++row)
+        for (int column = 0; column < 8; ++column) {
+            const float depth = depths[row * 8 + column];
+            if (column < 4 || row >= 2) REQUIRE (depth == 0);
+            else REQUIRE (depth == Catch::Approx (expected).epsilon (1e-5));
+        }
+    REQUIRE (glGetError () == GL_NO_ERROR);
+    glDeleteBuffers (1, &buffer);
+    glDeleteVertexArrays (1, &vao);
+    glDeleteProgram (program);
+}
+
+TEST_CASE ("Shipped generic4 receivers and the shadow caster compile with spot features",
+           "[render][shadow-atlas][shader][gl]") {
+    using namespace WallpaperEngine::Render::Shaders;
+    const char* root = std::getenv ("WPE_SHIPPED_ASSETS");
+    if (!root) return;
+    SurfacelessGL gl;
+    REQUIRE (gl.ready);
+    auto files = std::make_unique<WallpaperEngine::FileSystem::Container> ();
+    files->mount (root, "/");
+    WallpaperEngine::Assets::AssetLocator assets (std::move (files));
+    const ShaderConstantMap constants;
+    const TextureMap textures;
+    struct Features { int spots, shadow, cookie, both; };
+    for (const auto& features : {Features {1, 0, 0, 0}, Features {1, 1, 0, 0}, Features {1, 0, 1, 0},
+                                 Features {1, 0, 0, 1}, Features {2, 0, 0, 2}, Features {4, 1, 1, 1}}) {
+        INFO ("spots=" << features.spots << " shadow=" << features.shadow << " cookie=" << features.cookie
+              << " both=" << features.both);
+        const ComboMap combos {{"LIGHTING", 1}};
+        ComboMap scene {{"LIGHTS_POINT", 1}, {"LIGHTS_SPOT", features.spots},
+            {"LIGHTS_SPOT_SHADOW", features.shadow}, {"LIGHTS_SPOT_COOKIE", features.cookie},
+            {"LIGHTS_SPOT_SHADOW_COOKIE", features.both}};
+        if (features.shadow + features.both) {
+            scene["LIGHTS_SHADOW_MAPPING"] = 1;
+            scene["LIGHTS_SHADOW_MAPPING_QUALITY"] = 4;
+        }
+        if (features.cookie + features.both) scene["LIGHTS_COOKIE"] = 1;
+        Shader receiver (assets, "generic4", combos, scene, textures, textures, constants);
+        const auto [vertex, fragment] = GLSLContext::get ().toGlsl (receiver.vertex (), receiver.fragment ());
+        REQUIRE_FALSE (fragment.empty ());
+        const auto program = linkProgram (vertex, fragment);
+        REQUIRE ((glGetUniformLocation (program, "g_Texture6") >= 0) == (features.shadow + features.both > 0));
+        REQUIRE ((glGetUniformLocation (program, "g_Texture7") >= 0) == (features.cookie + features.both > 0));
+        if (features.shadow + features.cookie + features.both)
+            REQUIRE (glGetUniformLocation (program, "g_LFeature_ShadowProjection") >= 0);
+        glDeleteProgram (program);
+    }
+    Shader caster (assets, "shadowcaster", {}, {}, textures, textures, constants);
+    const auto [vertex, fragment] = GLSLContext::get ().toGlsl (caster.vertex (), caster.fragment ());
+    REQUIRE_FALSE (vertex.empty ());
+    const auto program = linkProgram (vertex, fragment);
+    REQUIRE (glGetUniformLocation (program, "g_ViewportViewProjectionMatrices") >= 0);
+    REQUIRE (glGetUniformLocation (program, "g_ModelMatrix") >= 0);
+    glDeleteProgram (program);
 }

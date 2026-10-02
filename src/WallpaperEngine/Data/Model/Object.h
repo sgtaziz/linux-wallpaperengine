@@ -163,6 +163,7 @@ public:
 struct SceneModelData {
     std::string path;
     int skin = 0;
+    UserSettingUniquePtr castShadow;
     std::shared_ptr<DynamicModelData> dynamic;
 };
 
@@ -215,6 +216,7 @@ struct SceneSpotLightData {
     UserSettingUniquePtr controlPoint;
     bool castShadow = false;
     bool useCookie = false;
+    std::string cookie = "cookie/flashlight1";
 };
 
 class SceneSpotLight : public Object, public SceneSpotLightData {

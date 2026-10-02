@@ -6,7 +6,9 @@
 #include "WallpaperEngine/Audio/Drivers/Recorders/SceneSpectrumState.h"
 
 #include "WallpaperEngine/Render/CWallpaper.h"
+#include "WallpaperEngine/Render/DepthTarget.h"
 #include "WallpaperEngine/Scripting/ScriptEngine.h"
+#include "SpotLightShadow.h"
 #include <array>
 #include <map>
 #include <optional>
@@ -76,6 +78,29 @@ public:
     [[nodiscard]] const glm::vec4* getSpotLightOrigins () const;
     [[nodiscard]] const glm::vec4* getSpotLightDirections () const;
     [[nodiscard]] const glm::vec4* getSpotLightExponents () const;
+    /** Serialized spot feature slot counts. */
+    [[nodiscard]] int getSpotShadowSlotCount () const;
+    [[nodiscard]] int getSpotCookieSlotCount () const;
+    [[nodiscard]] int getSpotShadowCookieSlotCount () const;
+    /** Leading feature slots carrying a projection (both, cookie, then shadow). */
+    [[nodiscard]] int getSpotFeatureCount () const { return int (m_spotFeatureProjections.size ()); }
+    [[nodiscard]] const glm::mat4* getSpotFeatureProjections () const { return m_spotFeatureProjections.data (); }
+    [[nodiscard]] const glm::vec4* getSpotFeatureTransforms () const { return m_spotFeatureTransforms.data (); }
+    /** Native context byte 0x1ac shadow quality. */
+    [[nodiscard]] int getShadowQuality () const { return nativeShadowQuality; }
+    /**
+     * Light-owned sampled resources (`_rt_shadowAtlas`, `_alias_lightCookie`), resolved
+     * separately from color render targets. Returns null for any other name.
+     */
+    [[nodiscard]] std::shared_ptr<const TextureProvider> findLightResource (const std::string& name) const;
+    /**
+     * Native cookie sampler: linear, clamp-to-border zero, no anisotropy. A texture
+     * without mips (the null-resource fallback) uses the non-mip minification filter
+     * so that it stays complete and samples zero.
+     */
+    [[nodiscard]] GLuint getLightCookieSampler (bool mipmapped) const;
+    /** Native atlas texel vector: inverse size, then size. */
+    [[nodiscard]] const glm::vec4& getShadowAtlasTexel () const { return m_shadowAtlasTexel; }
     [[nodiscard]] const glm::vec3* getLegacyLightPositions () const;
     [[nodiscard]] const glm::vec4* getLegacyLightColors () const;
     [[nodiscard]] const glm::vec4* getLegacyLightPremultipliedColors () const;
@@ -112,6 +137,8 @@ private:
     void flushDestroyedScriptLayers ();
     void refreshPointLights ();
     void refreshSpotLights ();
+    void registerSpotLight (const SceneSpotLight* light);
+    void renderShadowAtlas ();
     void assignLegacyLightSlot (const ScenePointLight* light);
     Render::CObject* dispatchObjectType (const Object& object);
     void addObjectToRenderOrder (const Object& object);
@@ -142,6 +169,14 @@ private:
     std::vector<glm::vec4> m_spotLightOrigins = {};
     std::vector<glm::vec4> m_spotLightDirections = {};
     std::vector<glm::vec4> m_spotLightExponents = {};
+    std::map<const SceneSpotLight*, std::shared_ptr<const TextureProvider>> m_spotLightCookies = {};
+    std::vector<glm::mat4> m_spotFeatureProjections = {};
+    std::vector<glm::vec4> m_spotFeatureTransforms = {};
+    std::vector<SpotLightPacking::View> m_shadowViews = {};
+    mutable std::shared_ptr<DepthTarget> m_shadowAtlas = nullptr;
+    glm::vec4 m_shadowAtlasTexel {0.5f, 0.5f, 2.0f, 2.0f};
+    std::shared_ptr<const TextureProvider> m_lightCookie = nullptr;
+    mutable std::array<GLuint, 2> m_lightCookieSamplers {GL_NONE, GL_NONE};
     std::map<const ScenePointLight*, size_t> m_legacyLightSlots = {};
     std::vector<glm::vec4> m_pointLightColors = {};
     std::vector<glm::vec4> m_pointLightOrigins = {};
@@ -166,6 +201,5 @@ private:
     std::shared_ptr<CFBO> _rt_4FrameBuffer = nullptr;
     std::shared_ptr<CFBO> _rt_8FrameBuffer = nullptr;
     std::shared_ptr<CFBO> _rt_Bloom = nullptr;
-    std::shared_ptr<CFBO> _rt_shadowAtlas = nullptr;
 };
 } // namespace WallpaperEngine::Render::Wallpaper

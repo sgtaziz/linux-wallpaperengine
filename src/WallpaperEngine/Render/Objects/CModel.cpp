@@ -6,14 +6,21 @@
 #include "StaticModelTail.h"
 #include "PuppetSkinning.h"
 #include "WallpaperEngine/Data/Parsers/MaterialParser.h"
+#include "WallpaperEngine/Logging/Log.h"
+#include "WallpaperEngine/Render/DepthTarget.h"
 #include "WallpaperEngine/Render/Objects/Effects/CPass.h"
 #include "WallpaperEngine/Render/Wallpapers/SceneTransform.h"
+#include "WallpaperEngine/Render/Wallpapers/SpotLightShadow.h"
 #include "WallpaperEngine/Scripting/ScriptPropertyBindings.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <climits>
 #include <iterator>
+#include <regex>
+#include <set>
+#include <sstream>
 #include <stdexcept>
 
 using namespace WallpaperEngine;
@@ -58,6 +65,34 @@ void disableAttribute (GLuint program, const char* name, GLuint buffer) {
     if (location >= 0) glDisableVertexAttribArray (GLuint (location));
 }
 
+// A shader names its shadow-stage replacement with `// [PASS] shadow <shader>`
+// (foliage4, fur4); every other material uses the shipped shadowcaster.
+std::string shadowCasterShader (const Assets::AssetLocator& assets, const std::string& shader) {
+    static const std::regex declaration (R"(^\s*//\s*\[PASS\]\s+shadow\s+([A-Za-z0-9_/]+))");
+    for (const auto& source : {assets.fragmentShader (shader), assets.vertexShader (shader)}) {
+        std::istringstream lines (source);
+        std::string line;
+        std::smatch match;
+        while (std::getline (lines, line))
+            if (std::regex_search (line, match, declaration)) return match[1].str ();
+    }
+    return "shadowcaster";
+}
+
+// Native forwards only the combos that the caster declares.
+std::set<std::string> declaredCombos (const Assets::AssetLocator& assets, const std::string& shader) {
+    static const std::regex combo (R"re(//\s*\[COMBO\].*"combo"\s*:\s*"([^"]+)")re");
+    std::set<std::string> result;
+    for (const auto& source : {assets.fragmentShader (shader), assets.vertexShader (shader)}) {
+        std::istringstream lines (source);
+        std::string line;
+        std::smatch match;
+        while (std::getline (lines, line))
+            if (std::regex_search (line, match, combo)) result.insert (match[1].str ());
+    }
+    return result;
+}
+
 struct PresentationFrontFace {
     GLint previous = GL_CCW;
     bool reversed = false;
@@ -75,7 +110,7 @@ struct CModel::MeshDraw final : CRenderable {
     MeshDraw (Wallpapers::CScene& scene, const SceneModel& object, const Material& material,
               const PuppetMeshData& mesh, const std::vector<uint32_t>* wideIndices = nullptr,
               size_t shapeIndex = 0, const std::vector<glm::mat4>& palette = {}) :
-        CObject (scene, object), CRenderable (scene, object, material) {
+        CObject (scene, object), CRenderable (scene, object, material), m_material (material) {
         m_shapeIndex = shapeIndex;
         try {
         const size_t count = wideIndices ? wideIndices->size () : mesh.indices.size ();
@@ -136,39 +171,7 @@ struct CModel::MeshDraw final : CRenderable {
                 *this, std::make_shared<FBOProvider> (this), *authoredPass,
                 std::nullopt, std::nullopt, std::nullopt);
             auto* const passPointer = pass.get ();
-            pass->setGeometryCallback (
-                [this, passPointer] () {
-                    const GLuint program = passPointer->getProgramID ();
-                    const GLint bones = glGetUniformLocation (program, "g_Bones[0]");
-                    const bool shaderSkinning = bones >= 0 && !m_bones.empty ();
-                    if (shaderSkinning) glUniformMatrix4x3fv (bones, GLsizei (m_bones.size () / 12), GL_FALSE, m_bones.data ());
-                    bindFloatAttribute (program, "a_Position", shaderSkinning || !m_skinnedPosition ? m_position : m_skinnedPosition, 3);
-                    bindFloatAttribute (program, "a_Normal", shaderSkinning || !m_skinnedNormal ? m_normal : m_skinnedNormal, 3);
-                    bindFloatAttribute (program, "a_Tangent4", shaderSkinning || !m_skinnedTangent ? m_tangent : m_skinnedTangent, 4);
-                    bindFloatAttribute (program, "a_BlendWeights", m_blendWeights, 4);
-                    const GLint indices = glGetAttribLocation (program, "a_BlendIndices");
-                    if (indices >= 0 && m_blendIndices) {
-                        glEnableVertexAttribArray (GLuint (indices));
-                        glBindBuffer (GL_ARRAY_BUFFER, m_blendIndices);
-                        glVertexAttribIPointer (GLuint (indices), 4, GL_UNSIGNED_INT, 0, nullptr);
-                    }
-                    bindFloatAttribute (program, "a_TexCoord", m_texcoord, 2);
-                    bindFloatAttribute (program, "a_TexCoordVec4", m_texcoordFull, 4);
-                },
-                [this] () {
-                    glBindBuffer (GL_ELEMENT_ARRAY_BUFFER, m_index);
-                    glDrawElements (GL_TRIANGLES, m_indexCount, m_indexType, nullptr);
-                },
-                [this, passPointer] () {
-                    const GLuint program = passPointer->getProgramID ();
-                    disableAttribute (program, "a_Position", m_position);
-                    disableAttribute (program, "a_Normal", m_normal);
-                    disableAttribute (program, "a_Tangent4", m_tangent);
-                    disableAttribute (program, "a_TexCoord", m_texcoord);
-                    disableAttribute (program, "a_TexCoordVec4", m_texcoordFull);
-                    disableAttribute (program, "a_BlendWeights", m_blendWeights);
-                    disableAttribute (program, "a_BlendIndices", m_blendIndices);
-                });
+            attachGeometry (*passPointer);
             m_passes.push_back (std::move (pass));
         }
         } catch (...) {
@@ -179,8 +182,105 @@ struct CModel::MeshDraw final : CRenderable {
         }
     }
 
+    void attachGeometry (Effects::CPass& target) {
+        auto* const passPointer = &target;
+        target.setGeometryCallback (
+            [this, passPointer] () {
+                const GLuint program = passPointer->getProgramID ();
+                const GLint bones = glGetUniformLocation (program, "g_Bones[0]");
+                const bool shaderSkinning = bones >= 0 && !m_bones.empty ();
+                if (shaderSkinning) glUniformMatrix4x3fv (bones, GLsizei (m_bones.size () / 12), GL_FALSE, m_bones.data ());
+                bindFloatAttribute (program, "a_Position", shaderSkinning || !m_skinnedPosition ? m_position : m_skinnedPosition, 3);
+                bindFloatAttribute (program, "a_Normal", shaderSkinning || !m_skinnedNormal ? m_normal : m_skinnedNormal, 3);
+                bindFloatAttribute (program, "a_Tangent4", shaderSkinning || !m_skinnedTangent ? m_tangent : m_skinnedTangent, 4);
+                bindFloatAttribute (program, "a_BlendWeights", m_blendWeights, 4);
+                const GLint indices = glGetAttribLocation (program, "a_BlendIndices");
+                if (indices >= 0 && m_blendIndices) {
+                    glEnableVertexAttribArray (GLuint (indices));
+                    glBindBuffer (GL_ARRAY_BUFFER, m_blendIndices);
+                    glVertexAttribIPointer (GLuint (indices), 4, GL_UNSIGNED_INT, 0, nullptr);
+                }
+                bindFloatAttribute (program, "a_TexCoord", m_texcoord, 2);
+                bindFloatAttribute (program, "a_TexCoordVec4", m_texcoordFull, 4);
+            },
+            [this] () {
+                glBindBuffer (GL_ELEMENT_ARRAY_BUFFER, m_index);
+                glDrawElements (GL_TRIANGLES, m_indexCount, m_indexType, nullptr);
+            },
+            [this, passPointer] () {
+                const GLuint program = passPointer->getProgramID ();
+                disableAttribute (program, "a_Position", m_position);
+                disableAttribute (program, "a_Normal", m_normal);
+                disableAttribute (program, "a_Tangent4", m_tangent);
+                disableAttribute (program, "a_TexCoord", m_texcoord);
+                disableAttribute (program, "a_TexCoordVec4", m_texcoordFull);
+                disableAttribute (program, "a_BlendWeights", m_blendWeights);
+                disableAttribute (program, "a_BlendIndices", m_blendIndices);
+            });
+    }
+
+    /**
+     * Native sets the support bit for normal (0) or alpha-to-coverage (3)
+     * materials. Linux parses alphatocoverage as normal blending, so only the
+     * normal category is distinguishable here.
+     */
+    [[nodiscard]] bool supportsShadowCasting () const {
+        return !m_material.passes.empty () && m_material.passes.front ()->blending == BlendingMode_Normal;
+    }
+
+    [[nodiscard]] bool ensureShadowPass () {
+        if (m_shadowPass || m_shadowPassFailed || m_material.passes.empty ()) return m_shadowPass != nullptr;
+        try {
+            // Native replaces the material in the shadow stage with
+            // its caster shader, forwarding the declared combos and textures.
+            const auto& original = *m_material.passes.front ();
+            const auto shader = shadowCasterShader (getAssetLocator (), original.shader);
+            ComboMap combos;
+            for (const auto& name : declaredCombos (getAssetLocator (), shader))
+                if (const auto found = original.combos.find (name); found != original.combos.end ())
+                    combos.emplace (*found);
+            m_shadowMaterial = std::make_unique<MaterialPass> ();
+            m_shadowMaterial->blending = BlendingMode_Normal;
+            m_shadowMaterial->cullmode = CullingMode_Disable;
+            m_shadowMaterial->depthtest = DepthtestMode_Enabled;
+            m_shadowMaterial->depthwrite = DepthwriteMode_Enabled;
+            m_shadowMaterial->shader = shader;
+            m_shadowMaterial->textures = original.textures;
+            m_shadowMaterial->combos = std::move (combos);
+            m_shadowPass = std::make_unique<Effects::CPass> (
+                *this, std::make_shared<FBOProvider> (this), *m_shadowMaterial,
+                std::nullopt, std::nullopt, std::nullopt);
+            attachGeometry (*m_shadowPass);
+            m_shadowPass->addUniform ("g_ViewportViewProjectionMatrices", m_shadowViewProjections.data (),
+                                      int (m_shadowViewProjections.size ()));
+        } catch (const std::exception& e) {
+            sLog.error ("Cannot create shadow caster for model ", getId (), ": ", e.what ());
+            m_shadowPass.reset ();
+            m_shadowPassFailed = true;
+        }
+        return m_shadowPass != nullptr;
+    }
+
+    void drawShadow (CModel& model, const DepthTarget& atlas, const Wallpapers::ShadowAtlasTile& tile,
+                     const glm::mat4& viewProjection) {
+        if (!ensureShadowPass ()) return;
+        // GL 3.3 has no viewport arrays: each atlas viewport is a separate
+        // single-instance draw using the shader's first viewport matrix.
+        m_shadowViewProjections.fill (viewProjection);
+        m_shadowPass->setDepthDestination (Effects::CPass::DepthDestination {
+            atlas.getFramebuffer (), glm::ivec4 (tile.x, tile.y, tile.size, tile.size)});
+        m_shadowPass->setInput (m_texture);
+        m_shadowPass->setModelMatrix (&model.m_shadowWorld);
+        m_shadowPass->setNormalModelMatrix (&model.m_normalModel);
+        m_shadowPass->setViewProjectionMatrix (&model.m_viewProjection);
+        m_shadowPass->setModelViewProjectionMatrix (&model.m_mvp);
+        m_shadowPass->setModelViewProjectionMatrixInverse (&model.m_mvpInverse);
+        m_shadowPass->render ();
+    }
+
     ~MeshDraw () override {
         m_passes.clear ();
+        m_shadowPass.reset ();
         for (GLuint buffer : {m_position, m_normal, m_tangent, m_texcoord, m_texcoordFull, m_index,
                              m_skinnedPosition, m_skinnedNormal, m_skinnedTangent, m_blendIndices, m_blendWeights})
             if (buffer != GL_NONE) glDeleteBuffers (1, &buffer);
@@ -249,6 +349,11 @@ struct CModel::MeshDraw final : CRenderable {
     GLenum m_indexType = GL_UNSIGNED_SHORT;
     size_t m_shapeIndex = 0;
     std::vector<std::unique_ptr<Effects::CPass>> m_passes;
+    const Material& m_material;
+    std::unique_ptr<MaterialPass> m_shadowMaterial;
+    std::unique_ptr<Effects::CPass> m_shadowPass;
+    bool m_shadowPassFailed = false;
+    std::array<glm::mat4, 6> m_shadowViewProjections {};
 };
 
 CModel::CModel (Wallpapers::CScene& scene, const SceneModel& model) :
@@ -409,4 +514,38 @@ void CModel::render () {
     const float mvpDeterminant = glm::determinant (m_mvp);
     m_mvpInverse = mvpDeterminant == 0.0f ? glm::mat4 (1.0f) : glm::inverse (m_mvp);
     for (const auto& mesh : m_meshes) mesh->draw (*this);
+}
+
+bool CModel::castsShadow () const {
+    // Native defaults the MODEL castshadow bit on; programmatic
+    // model data without an authored setting keeps that default.
+    return !m_model.castShadow || !m_model.castShadow->value || m_model.castShadow->value->getBool ();
+}
+
+void CModel::renderShadowCaster (const DepthTarget& atlas, const Wallpapers::ShadowAtlasTile& tile,
+                                 const glm::mat4& viewProjection) {
+    if (!castsShadow ()) return;
+    if (m_model.dynamic && m_dynamicStructureRevision != m_model.dynamic->structureRevision)
+        rebuildDynamic ();
+    else if (m_model.dynamic && m_dynamicRevision != m_model.dynamic->revision)
+        updateDynamic ();
+    // Native admits visible models with the caster support bit.
+    if (std::ranges::none_of (m_meshes, [] (const auto& mesh) { return mesh->supportsShadowCasting (); }))
+        return;
+    const auto transform = Wallpapers::resolveSceneTransform (
+        m_model,
+        [this] (int parentId) -> const Object* {
+            const auto* parent = getScene ().getObject (parentId);
+            return parent ? &parent->getObject () : nullptr;
+        },
+        [this] (const Object& parent, const std::string& name) {
+            return getScene ().getPuppetAttachmentTransform (parent.id, name);
+        });
+    if (!transform.visible) return;
+    m_shadowWorld = transform.authoredMatrix;
+    // Native sets stage byte 0x12eb to 0 only around the shadow
+    // submission (2 otherwise); then draws only meshes whose
+    // material category is normal (0) or alpha-to-coverage (3).
+    for (const auto& mesh : m_meshes)
+        if (mesh->supportsShadowCasting ()) mesh->drawShadow (*this, atlas, tile, viewProjection);
 }
