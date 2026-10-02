@@ -760,13 +760,19 @@ void CParticle::advanceFrame () {
     const auto frame = getScene ().getContext ().getDriver ().getFrameCounter ();
     if (m_lastAdvancedFrame && *m_lastAdvancedFrame == frame) return;
     m_lastAdvancedFrame = frame;
-    // Native outer-root flush precedes visibility, enabled and clock guards.
+    if (!m_initialized) return;
+    const bool admitted = resolveTransform ().visible;
+    // 140230650 resets live CPU streams before flushing instance patches.
+    // CP values, API enable/pause, inactive children and GPU packets survive.
+    const uint32_t liveCount = m_slotStreams ? m_slotStreams->nativeCount () : m_particleCount;
+    ParticleCore::resetHiddenRoot (admitted, liveCount, [this] {
+        resetStaticEmitterTree (false);
+        clearStaticCpuTree ();
+    });
+    m_automaticEmissionAdmitted = admitted;
     // Inner warm-up/update and explicit emitParticles do not flush writes.
     if (m_initialized && m_instancePatchWrites && m_instancePatchWrites->consume ())
         patchInstanceSequenceSteps ();
-    if (!m_initialized || !resolveTransform ().visible) {
-	return;
-    }
 
     // The application supplies the first frame's scene delta too. Skipping
     // it would leave warmed-up particles frozen for one live frame.
@@ -774,8 +780,8 @@ void CParticle::advanceFrame () {
     if (const auto fixedStep = getScene ().getContext ().getApp ().getContext ()
                                    .settings.render.debug.particleStep) {
         sceneDt = *fixedStep;
-        m_time += *fixedStep;
-    } else {
+        if (admitted) m_time += *fixedStep;
+    } else if (admitted) {
         m_time = g_Time;
     }
 
@@ -891,7 +897,8 @@ void CParticle::emitNewParticles (float dt) {
 	}
 	// Node pause suppresses automatic emission, not aging/operator execution.
         // Native propagates its paused bit through the active child tree.
-        if (ParticleCore::automaticEmissionAllowed (m_emissionEnabled, isEmissionPaused (), m_forcedEmitCount))
+        if (ParticleCore::automaticEmissionAllowed (m_emissionEnabled, isEmissionPaused (),
+                                                   m_forcedEmitCount, m_automaticEmissionAdmitted))
         for (auto& emitter : m_emitters) {
 	    const uint32_t oldCount = m_particleCount;
 	    uint32_t emissionCount = m_slotStreams ? m_slotStreams->nativeCount () : m_particleCount;
@@ -984,16 +991,36 @@ void CParticle::refreshNativeLiveView () {
     });
 }
 
-void CParticle::resetStaticEmitterTree () {
+void CParticle::resetStaticEmitterTree (bool enableEmission) {
     m_time = 0.0;
     resetSequenceCounters (false);
     m_emitters.clear ();
     m_emitterCanProduce.clear ();
     setupEmitters ();
-    m_emissionEnabled = true;
+    if (enableEmission) m_emissionEnabled = true;
     for (auto& node : m_childNodes)
         if (m_particle.children[node.descriptor].type == "static")
-            node.runtime->resetStaticEmitterTree ();
+            node.runtime->resetStaticEmitterTree (enableEmission);
+}
+
+void CParticle::clearStaticCpuTree () {
+    // 14022fd90 clears live/high-water/index streams and active event nodes,
+    // without touching initializer/CP values, node flags or published geometry.
+    m_particleCount = 0;
+    m_ropeBirthSlots.clear ();
+    m_ropeExpiredCount = 0;
+    m_nativeSlots = ParticleCore::NativeSlotAllocation {};
+    m_eventSlotValues.clear ();
+    if (m_slotStreams) m_slotStreams->stop ();
+    for (size_t index = 0; index < m_childNodes.size ();) {
+        auto& node = m_childNodes[index];
+        if (m_particle.children[node.descriptor].type == "static") {
+            node.runtime->clearStaticCpuTree ();
+            ++index;
+        } else {
+            m_childNodes.erase (m_childNodes.begin () + static_cast<std::ptrdiff_t> (index));
+        }
+    }
 }
 
 void CParticle::resetPeriodicChildren () {
@@ -1118,7 +1145,7 @@ bool CParticle::isPlaying () const {
 
 bool CParticle::isEmissionPaused () const {
     for (const CParticle* node = this; node; node = node->m_parentParticleRuntime)
-        if (node->m_paused) return true;
+        if (node->m_paused || node->m_inheritedEmissionPause) return true;
     return false;
 }
 
@@ -1358,6 +1385,9 @@ void CParticle::advanceChildren (ParticleCore::TickClock clock) {
 	    }
 	}
 	node.runtime->inheritControlPointsFromParent (*this, m_particle.children[node.descriptor]);
+	// Native outer traversal passes API pause OR failed root admission to
+	// descendants. The root's forced API still observes only its own pause.
+	node.runtime->m_inheritedEmissionPause = isEmissionPaused () || !m_automaticEmissionAdmitted;
 	node.runtime->m_time = m_time;
 	node.runtime->advanceNode (clock);
 	if (traceParticleChildren (*this))

@@ -44,8 +44,17 @@ private:
     std::vector<std::vector<GeometryPacket>> m_streams;
 };
 
-inline bool automaticEmissionAllowed (bool enabled, bool paused, uint32_t forcedCount) {
-    return (enabled && !paused) || forcedCount != 0;
+inline bool automaticEmissionAllowed (bool enabled, bool paused, uint32_t forcedCount,
+                                     bool admitted = true) {
+    return (admitted && enabled && !paused) || forcedCount != 0;
+}
+
+// Native root admission is separate from the node's API pause/enable bits.
+// Only a hidden root with live CPU particles resets its static tree; retained
+// GPU publications and inactive event nodes survive that reset.
+template <typename Reset>
+void resetHiddenRoot (bool admitted, uint32_t liveCount, Reset&& reset) {
+    if (!admitted && liveCount != 0) reset ();
 }
 
 // Native stores segment attributes in its stream, but its geometry shader

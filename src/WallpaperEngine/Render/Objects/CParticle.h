@@ -228,7 +228,8 @@ protected:
     [[nodiscard]] uint32_t emissionCapacity (const std::vector<ParticleInstance>& particles, uint32_t count) const;
     void refreshNativeLiveView ();
     void resetPeriodicChildren ();
-    void resetStaticEmitterTree ();
+    void resetStaticEmitterTree (bool enableEmission = true);
+    void clearStaticCpuTree ();
     void warmup ();
     void resetSequenceCounters (bool periodicOnly);
     void patchInstanceSequenceSteps ();
@@ -272,6 +273,8 @@ private:
     std::vector<ParticleCore::EventParticleValues> m_eventSlotValues;
     bool m_emissionEnabled { true };
     bool m_paused { false };
+    bool m_automaticEmissionAdmitted { true };
+    bool m_inheritedEmissionPause { false };
     uint32_t m_forcedEmitCount { 0 };
     uint32_t m_pendingEmitCount { 0 };
     bool m_birthEventsEnabled { true };
