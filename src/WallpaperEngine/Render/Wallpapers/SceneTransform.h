@@ -60,6 +60,19 @@ inline glm::vec3 scenePointForCamera (
             sceneHeight * 0.5f - authored.y, authored.z};
 }
 
+// Model shaders consume their authored world matrix separately. Move the
+// orthographic canvas-to-GL conversion into VP, leaving model/normal uniforms
+// in the native authored basis (including parent shear).
+inline glm::mat4 sceneAuthoredToCamera (float width, float height, bool orthographic) {
+    if (!orthographic) return glm::mat4 (1.0f);
+    return glm::translate (glm::mat4 (1.0f), glm::vec3 (-width * 0.5f, height * 0.5f, 0))
+        * glm::scale (glm::mat4 (1.0f), glm::vec3 (1, -1, 1));
+}
+
+inline bool modelPresentationReversesWinding (bool orthographic, bool childScope) {
+    return orthographic || !childScope;
+}
+
 // Displacement already includes camera amount and mouse influence.
 // Zero authored depth is fixed on screen.
 inline glm::vec3 sceneParallaxOffset (
