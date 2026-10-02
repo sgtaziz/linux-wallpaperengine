@@ -50,44 +50,11 @@ inline ShapedTextRun shapeTextRun (FT_Face face, std::span<const char32_t> codep
     return result;
 }
 
-/** Shape each script word with its own guessed properties. A single buffer for
- * a mixed Latin/Arabic row inherits the first script and leaves later Arabic
- * letters disconnected. Full Unicode bidi paragraph reordering is separate. */
+/** Native shapes the complete contiguous font-face run,
+ * including spaces, with one guessed script/direction. Splitting words loses
+ * RTL word order; splitting scripts invents a different mixed-text layout.
+ * This is the native first-strong-script contract, not paragraph bidi. */
 inline ShapedTextRun shapeTextRow (FT_Face face, std::span<const char32_t> codepoints) {
-    ShapedTextRun result {{}, HB_DIRECTION_INVALID};
-    if (!face || codepoints.empty ()) return result;
-    hb_unicode_funcs_t* unicode = hb_unicode_funcs_get_default ();
-    size_t start = 0;
-    hb_script_t script = HB_SCRIPT_INVALID;
-    const auto append = [&] (size_t end) {
-        if (end <= start) return;
-        ShapedTextRun segment = shapeTextRun (face, codepoints.subspan (start, end - start));
-        if (result.direction == HB_DIRECTION_INVALID) result.direction = segment.direction;
-        for (auto& glyph : segment.glyphs) {
-            glyph.cluster += static_cast<uint32_t> (start);
-            result.glyphs.push_back (glyph);
-        }
-    };
-    for (size_t index = 0; index < codepoints.size (); ++index) {
-        const char32_t codepoint = codepoints[index];
-        if (codepoint == ' ' || codepoint == '\t') {
-            append (index);
-            start = index;
-            append (index + 1);
-            start = index + 1;
-            script = HB_SCRIPT_INVALID;
-            continue;
-        }
-        const hb_script_t current = hb_unicode_script (unicode, static_cast<hb_codepoint_t> (codepoint));
-        if (current == HB_SCRIPT_COMMON || current == HB_SCRIPT_INHERITED
-            || current == HB_SCRIPT_UNKNOWN) continue;
-        if (script != HB_SCRIPT_INVALID && current != script) {
-            append (index);
-            start = index;
-        }
-        script = current;
-    }
-    append (codepoints.size ());
-    return result;
+    return shapeTextRun (face, codepoints);
 }
 } // namespace WallpaperEngine::Render::Objects
