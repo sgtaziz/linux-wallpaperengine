@@ -156,7 +156,7 @@ void CImage::preparePuppetAnimation () {
     if (m_puppetPoseFrame == frame) return;
     m_puppetPoseFrame = frame;
     updatePuppetAnimation ();
-    m_puppetEmissionWorldHistory.advance (resolveTransform (m_image).authoredMatrix, m_puppetCurrentGlobals);
+    m_puppetEmissionWorldHistory.advance (emissionSourceWorld (), m_puppetCurrentGlobals);
 }
 
 CImage::CImage (Wallpapers::CScene& scene, const Image& image) :
@@ -266,6 +266,8 @@ CImage::CImage (Wallpapers::CScene& scene, const Image& image) :
 	// TODO: CHANGE ALIGNMENT TOO?
     }
     this->m_size = size;
+    m_emissionAlignment.rebuild (m_alignment,
+        m_image.model->fullscreen && m_hasSourceTexture ? glm::vec2 (2.0f) : dimensions.logical);
     const glm::vec2 backingSize = m_loadedTargetSize;
     const glm::vec2 quadProjectionSize = imageBackingDimensions (size);
 
@@ -1651,6 +1653,8 @@ void CImage::refreshSourceDimensions () {
     m_loadedTargetSize = dimensions.backing;
     m_loadedLogicalSize = dimensions.logical;
     m_size = dimensions.geometry;
+    m_emissionAlignment.rebuild (m_alignment,
+        m_image.model->fullscreen ? glm::vec2 (2.0f) : dimensions.logical);
     if (m_image.model->autosize || m_image.model->fullscreen)
         m_image.size->value->update (dimensions.logical, DynamicValue::Script);
 }
@@ -2050,6 +2054,16 @@ bool CImage::executeMaterialFunction (const std::string& name) {
 
 glm::vec2 CImage::getSize () const {
     return this->getImage ().size->value->getVec2 ();
+}
+
+void CImage::setAlignment (std::string alignment) {
+    m_alignment = std::move (alignment);
+    m_emissionAlignment.rebuild (m_alignment,
+        m_image.model->fullscreen && m_hasSourceTexture ? glm::vec2 (2.0f) : getSize ());
+}
+
+glm::mat4 CImage::emissionSourceWorld () const {
+    return m_emissionAlignment.world (resolveTransform (m_image).authoredMatrix);
 }
 
 GLuint CImage::getSceneSpacePosition () const { return this->m_sceneSpacePosition; }

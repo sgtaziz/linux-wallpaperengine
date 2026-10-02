@@ -1,5 +1,6 @@
 #include "WallpaperEngine/Render/Objects/ParticleCore.h"
 #include "WallpaperEngine/Render/Objects/ParticlePuppetEmission.h"
+#include "WallpaperEngine/Render/Objects/ImageAlignment.h"
 #include "WallpaperEngine/Render/Objects/CParticle.h"
 #include "WallpaperEngine/Render/Objects/ParticleRemapOperators.h"
 #include "WallpaperEngine/Render/Objects/ParticleSlotStreams.h"
@@ -31,6 +32,77 @@
 #include <glm/gtc/matrix_transform.hpp>
 
 using namespace WallpaperEngine::Render::Objects::ParticleCore;
+
+TEST_CASE ("Image emission alignment retains built integer offsets until geometry callback rebuild",
+           "[particle][image-alignment]") {
+    using namespace WallpaperEngine::Render::Objects;
+    ImageEmissionAlignment alignment;
+    const std::array<std::pair<std::string_view, glm::vec2>, 9> nativeOffsets {{
+        {"center", {0, 0}}, {"top", {0, -9.5f}}, {"topright", {-15.5f, -9.5f}},
+        {"right", {-15.5f, 0}}, {"bottomright", {-15.5f, 9.5f}}, {"bottom", {0, 9.5f}},
+        {"bottomleft", {15.5f, 9.5f}}, {"left", {15.5f, 0}}, {"topleft", {15.5f, -9.5f}}
+    }};
+    for (const auto& [name, expected] : nativeOffsets) {
+        alignment.rebuild (name, {31.9f, 19.9f});
+        REQUIRE (alignment.offset == expected);
+    }
+    alignment.rebuild ("topleft", {32, 32});
+    glm::vec2 logicalSize (64, 48);
+    // A getter consumes stored +2f8/+2fc; changing size cannot silently
+    // re-evaluate it. The explicit alignment callback does geometry setup.
+    REQUIRE (alignment.world (glm::mat4 (1))[3] == glm::vec4 (16, -16, 0, 1));
+    alignment.rebuild ("bottomright", logicalSize);
+    REQUIRE (alignment.world (glm::mat4 (1))[3] == glm::vec4 (-32, 24, 0, 1));
+    // Native fullscreen setup supplies two geometry units, not viewport or
+    // source texture dimensions, to the alignment-offset writer.
+    alignment.rebuild ("bottomright", {2, 2});
+    REQUIRE (alignment.offset == glm::vec2 (-1, 1));
+}
+
+TEST_CASE ("Aligned image world preserves native translation order and emission histories",
+           "[particle][image-alignment]") {
+    using namespace WallpaperEngine::Render::Objects;
+    ImageEmissionAlignment alignment;
+    glm::mat4 world (1);
+    world[0] = {625000000.0f, 0.25f, 0.5f, 0.125f};
+    world[1] = {-0.1875f, 2, -1, 0.25f};
+    world[3] = {-10000000000.0f, 12, 7, 0.5f};
+    alignment.rebuild ("center", {32, 32});
+    REQUIRE (alignment.world (world) == world);
+    alignment.rebuild ("topleft", {32, 32});
+    const auto shifted = alignment.world (world);
+    REQUIRE (shifted[3].x == 3.0f);
+    REQUIRE (glm::translate (world, glm::vec3 (16, -16, 0))[3].x == 0.0f);
+    REQUIRE (shifted[0] == world[0]);
+    REQUIRE (shifted[1] == world[1]);
+    REQUIRE (shifted[2] == world[2]);
+    REQUIRE (shifted[3].w == world[3].w);
+
+    world = glm::mat4 (1);
+    world[0] = {2, 1, 0, 0};
+    world[1] = {0.5f, 3, 0, 0};
+    world[3] = {150, 80, 0, 1};
+    const auto top = alignment.world (world);
+    ImageEmitterSourceHistory ordinary;
+    ordinary.previousWorld = top;
+    PuppetEmissionWorldHistory puppet;
+    const std::array<glm::mat4, 1> bones {glm::translate (glm::mat4 (1), glm::vec3 (4, 6, 0))};
+    puppet.advance (top, bones);
+    alignment.rebuild ("bottomright", {32, 32});
+    const auto bottom = alignment.world (world);
+    const glm::vec3 pixel (3, -5, 0);
+    REQUIRE (imageEmitterPoint (bottom, pixel) - imageEmitterPoint (ordinary.previousWorld, pixel)
+             == glm::vec3 (-48, 64, 0));
+    // Scene-owned puppet history advances even between emitter invocations.
+    puppet.advance (bottom, bones);
+    REQUIRE (puppet.previous.size () == 1);
+    REQUIRE (imageEmitterPoint (bottom * bones[0], pixel) - imageEmitterPoint (puppet.previous[0], pixel)
+             == glm::vec3 (-48, 64, 0));
+    REQUIRE (ordinary.previousWorld == top);
+    ordinary.previousWorld = bottom;
+    REQUIRE (imageEmitterSourceVelocity (imageEmitterPoint (bottom, pixel),
+        imageEmitterPoint (ordinary.previousWorld, pixel), 1.0f / 30, 0.1f) == glm::vec3 (0));
+}
 
 TEST_CASE ("Emitter batch captures CP before ordered birth writes and next invocation sees accumulated CP",
            "[particle][birth-batch]") {

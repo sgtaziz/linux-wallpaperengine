@@ -5,6 +5,7 @@
 #include "WallpaperEngine/Render/Objects/Effects/CPass.h"
 #include "WallpaperEngine/Render/Objects/PuppetSkinning.h"
 #include "WallpaperEngine/Render/Objects/ImageCompositeSteps.h"
+#include "WallpaperEngine/Render/Objects/ImageAlignment.h"
 #include "WallpaperEngine/Render/Wallpapers/CScene.h"
 #include "WallpaperEngine/Render/Wallpapers/SceneTransform.h"
 #include "WallpaperEngine/Render/TextureAnimation.h"
@@ -45,7 +46,8 @@ public:
 
     [[nodiscard]] const Image& getImage () const;
     [[nodiscard]] const std::string& getAlignment () const { return m_alignment; }
-    void setAlignment (std::string alignment) { m_alignment = std::move (alignment); }
+    void setAlignment (std::string alignment);
+    [[nodiscard]] glm::mat4 emissionSourceWorld () const;
     [[nodiscard]] std::optional<glm::mat4> puppetAttachmentTransform (const std::string& name) const;
     [[nodiscard]] std::optional<glm::mat4> puppetEmissionBoneTransform (uint8_t boneIndex) const;
     [[nodiscard]] std::optional<glm::mat4> puppetPreviousEmissionBoneTransform (uint8_t boneIndex) const;
@@ -242,6 +244,7 @@ private:
     glm::vec3 m_sceneQuad[4] = {};
     glm::vec3 m_sceneCenter = {};
     glm::vec2 m_size = {};
+    ImageEmissionAlignment m_emissionAlignment;
     glm::vec2 m_loadedTargetSize = {};
     glm::vec2 m_loadedLogicalSize = {};
     glm::vec2 m_loadedSourceSize = {};

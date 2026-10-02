@@ -2118,18 +2118,13 @@ EmitterFunc CParticle::createImageEmitter (const ParticleEmitter& emitter, size_
         }
         if (!cache->ready || cache->samples.empty () || toEmit == 0) return;
 
-        auto findParent = [this] (int parentId) -> const Object* {
-            const auto* parent = getScene ().getObject (parentId);
-            return parent ? &parent->getObject () : nullptr;
-        };
-        const auto sourceTransform = Wallpapers::resolveSceneTransform (
-            image->getImage (), findParent);
+        const glm::mat4 sourceWorld = image->emissionSourceWorld ();
         const bool world = (m_particle.flags & 1u) != 0;
         const bool orthographic = getScene ().getCamera ().isOrthogonal ();
         const glm::vec2 canvas (getScene ().getWidth (), getScene ().getHeight ());
         const glm::mat4 invocation = ParticleCore::imageEmitterInvocationMatrix (
             m_simulationModelMatrix, orthographic, canvas, m_forcedEmitCount != 0, world);
-        const glm::mat4 currentSource = invocation * sourceTransform.authoredMatrix;
+        const glm::mat4 currentSource = invocation * sourceWorld;
         auto& history = m_imageEmitterHistory[index];
         const glm::mat4 previousSource = invocation * history.previousWorld;
 
@@ -2213,7 +2208,7 @@ EmitterFunc CParticle::createImageEmitter (const ParticleEmitter& emitter, size_
             for (auto& initializer : m_initializers) initializer (particle);
             finishEmittedParticle (particle, count);
         }
-        history.previousWorld = sourceTransform.authoredMatrix;
+        history.previousWorld = sourceWorld;
     };
 }
 
