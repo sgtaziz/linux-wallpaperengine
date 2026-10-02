@@ -500,9 +500,9 @@ void ApplicationContext::loadSettingsFromArgv () {
 	.choices ("auto", "nvdec-copy", "no")
 	.store_into (this->settings.render.hwdec);
     performanceGroup.add_argument ("--postprocessing")
-	.help ("Postprocessing quality: normal preserves the standard 8-bit path; ultra enables HDR when the scene authors both bloom and hdr")
+	.help ("Postprocessing quality (default: ultra): ultra enables HDR when the scene authors both bloom and hdr; normal uses the standard 8-bit path")
 	.choices ("normal", "ultra")
-	.default_value (std::string ("normal"))
+	.default_value (std::string ("ultra"))
 	.action ([this] (const std::string& value) -> void {
 	    this->settings.render.postprocessing = value == "ultra" ? POSTPROCESSING_ULTRA : POSTPROCESSING_NORMAL;
 	});

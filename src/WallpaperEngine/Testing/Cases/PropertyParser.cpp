@@ -15,12 +15,30 @@
 #include "WallpaperEngine/WebBrowser/WebPropertyPayload.h"
 #include "WallpaperEngine/WebBrowser/WebAudioFrame.h"
 #include "WallpaperEngine/FileSystem/Container.h"
+#include "WallpaperEngine/Application/ApplicationContext.h"
 #include <fstream>
 #include <chrono>
 
 using WallpaperEngine::Data::JSON::JSON;
 using WallpaperEngine::Data::Model::DynamicValue;
 using WallpaperEngine::Data::Parsers::PropertyParser;
+
+TEST_CASE ("CLI postprocessing defaults to ultra and preserves explicit quality", "[cli][postprocessing]") {
+    using WallpaperEngine::Application::ApplicationContext;
+    for (const std::string quality : { "", "normal", "ultra" }) {
+        std::vector<std::string> arguments { "options-test", "--assets-dir", "/tmp", "/tmp/options-test" };
+        if (!quality.empty ()) {
+            arguments.insert (arguments.end (), { "--postprocessing", quality });
+        }
+        std::vector<char*> argv;
+        for (auto& argument : arguments) argv.push_back (argument.data ());
+        ApplicationContext application (static_cast<int> (argv.size ()), argv.data ());
+        CHECK (application.settings.render.postprocessing == ApplicationContext::POSTPROCESSING_ULTRA);
+        application.loadSettingsFromArgv ();
+        CHECK (application.settings.render.postprocessing
+            == (quality == "normal" ? ApplicationContext::POSTPROCESSING_NORMAL : ApplicationContext::POSTPROCESSING_ULTRA));
+    }
+}
 
 TEST_CASE ("Bool properties without a value default to false") {
     const JSON propertyData = {
