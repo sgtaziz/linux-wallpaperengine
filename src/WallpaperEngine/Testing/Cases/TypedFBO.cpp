@@ -159,6 +159,50 @@ GLint internalFormat (const CFBO& fbo) {
     return internal;
 }
 
+TEST_CASE ("Render targets preserve native linear sampling across allocation and resize",
+           "[render][fbo-sampler]") {
+    SurfacelessGL gl;
+    REQUIRE (gl.ready);
+    const auto format = GENERATE (TextureFormat_ARGB8888, TextureFormat_RGBA16161616f);
+    CFBO target ("sampler", format, TextureFlags_ClampUVs, 1, 4, 2, 4, 2);
+    auto anisotropy = [&] {
+        GLfloat value = 0;
+        glBindTexture (GL_TEXTURE_2D, target.getTextureID (0));
+        glGetTexParameterfv (GL_TEXTURE_2D, GL_TEXTURE_MAX_ANISOTROPY, &value);
+        return value;
+    };
+    // Original GPU traces distinguish linear render-target inputs from the
+    // authored image/normal-map sampler, which has anisotropy eight.
+    REQUIRE (anisotropy () == 1.0f);
+    target.resize (8, 4, 8, 4);
+    REQUIRE (anisotropy () == 1.0f);
+    GLint width = 0;
+    glGetTexLevelParameteriv (GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &width);
+    REQUIRE (width == 8);
+
+    CFBO previous ("previous", format, TextureFlags_ClampUVs, 1, 2, 2, 2, 2);
+    glBindTexture (GL_TEXTURE_2D, previous.getTextureID (0));
+    target.setMaxAnisotropy (4.0f);
+    GLint bound = 0;
+    glGetIntegerv (GL_TEXTURE_BINDING_2D, &bound);
+    REQUIRE (bound == static_cast<GLint> (previous.getTextureID (0)));
+    REQUIRE (anisotropy () == 4.0f);
+    target.resize (12, 6, 12, 6);
+    REQUIRE (anisotropy () == 4.0f);
+    target.setMaxAnisotropy (1.0f);
+    REQUIRE (anisotropy () == 1.0f);
+    GLint minFilter = 0;
+    GLint magFilter = 0;
+    GLint wrap = 0;
+    glGetTexParameteriv (GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, &minFilter);
+    glGetTexParameteriv (GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, &magFilter);
+    glGetTexParameteriv (GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, &wrap);
+    REQUIRE (minFilter == GL_LINEAR);
+    REQUIRE (magFilter == GL_LINEAR);
+    REQUIRE (wrap == GL_CLAMP_TO_EDGE);
+    REQUIRE (glGetError () == GL_NO_ERROR);
+}
+
 TEST_CASE ("Screenshot readback follows resized framebuffer pixels instead of authored extent",
            "[render][framebuffer-capture]") {
     SurfacelessGL gl;

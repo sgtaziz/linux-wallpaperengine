@@ -67,7 +67,9 @@ private:
     std::string m_name = "";
     TextureFormat m_format = TextureFormat_UNKNOWN;
     uint32_t m_flags = TextureFlags_NoFlags;
-    float m_maxAnisotropy = 8.0f;
+    // Native render-target inputs use the linear sampler without anisotropy;
+    // authored image textures retain their separate anisotropic sampler.
+    float m_maxAnisotropy = 1.0f;
     bool m_sceneReflectionMipmaps = false;
     uint32_t m_mipLevelCount = 1;
     std::unique_ptr<ReflectionMipmapGenerator> m_reflectionGenerator;
