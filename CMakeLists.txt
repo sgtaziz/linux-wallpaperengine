@@ -453,6 +453,7 @@ set(COMMON_SOURCES
 
     src/WallpaperEngine/Render/CFBO.h
     src/WallpaperEngine/Render/CFBO.cpp
+    src/WallpaperEngine/Render/ReflectionMipmapGenerator.cpp
     src/WallpaperEngine/Render/Objects/Effects/CPass.h
     src/WallpaperEngine/Render/Objects/Effects/CPass.cpp
     src/WallpaperEngine/Render/Objects/Effects/UniformArrayUpload.h

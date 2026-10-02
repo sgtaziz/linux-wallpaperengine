@@ -19,6 +19,7 @@
 #include "ExactSourceCache.h"
 #include "ParticleRopeShader.h"
 #include "ShaderMetadata.h"
+#include "NativeReflectionVectors.h"
 #include "WallpaperEngine/Assets/AssetLoadException.h"
 #include "WallpaperEngine/Render/Shaders/Variables/ShaderVariable.h"
 #include "WallpaperEngine/Render/Shaders/Variables/ShaderVariableFloat.h"
@@ -161,6 +162,8 @@ void ShaderUnit::preprocess () {
     this->m_includes = "";
 
     this->preprocessIncludes ();
+    if (m_type == GLSLContext::UnitType_Vertex)
+        m_preprocessed = nativeReflectionVectorSource (m_preprocessed);
     if (m_type == GLSLContext::UnitType_Vertex && m_file == "genericparticle"
         && m_overrideCombos.contains ("TRAILRENDERER")
         && m_overrideCombos.at ("TRAILRENDERER") != 0) {

@@ -170,7 +170,7 @@ private:
     [[nodiscard]] std::shared_ptr<const TextureProvider> resolveTexture0 ();
     [[nodiscard]] TextureAnimationState
     resolveTextureAnimationState (const std::shared_ptr<const TextureProvider>& texture) const;
-    void bindTextureUnit (int index, const std::shared_ptr<const TextureProvider>& texture, uint32_t frame) const;
+    void bindTextureUnit (int index, const std::shared_ptr<const TextureProvider>& texture, uint32_t frame);
     void bindTextureOverrides (uint32_t currentTexture, std::shared_ptr<const TextureProvider>& texture0);
     void setupRenderUniforms ();
     void setupRenderReferenceUniforms ();
@@ -219,6 +219,8 @@ private:
     glm::vec4 m_texture0Resolution = {};
     glm::vec2 m_sceneTexelSize = {};
     glm::vec2 m_sceneTexelSizeHalf = {};
+    glm::vec3 m_sceneScreen = {};
+    std::array<float, 10> m_textureMipLevelCounts {1, 1, 1, 1, 1, 1, 1, 1, 1, 1};
 
     GLuint m_programID;
 

@@ -598,6 +598,7 @@ void CScene::renderFrame (const glm::ivec4& viewport) {
 	    if (std::ranges::find (debug.skipObjects, cur->getId ()) != debug.skipObjects.end ()) continue;
 	    cur->render ();
 	}
+	if (m_mipMappedSceneFBO) m_mipMappedSceneFBO->snapshotFrom (*m_sceneFBO);
 	return;
     }
 
@@ -680,6 +681,9 @@ void CScene::renderFrame (const glm::ivec4& viewport) {
 	});
     };
     for (auto* root : roots) renderNode (root);
+    // Native copies the completed scene and generates reflection mips before
+    // DOF/HDR presentation. This snapshot is consumed by the next scene frame.
+    if (m_mipMappedSceneFBO) m_mipMappedSceneFBO->snapshotFrom (*m_sceneFBO);
 }
 
 void CScene::resizeSceneTargets (int width, int height) {
@@ -698,6 +702,7 @@ void CScene::resizeSceneTargets (int width, int height) {
     // Retain CFBO objects (and therefore references held by effect passes).
     // CFBO::resize also replaces the root D16 attachment and texture storage.
     resize (m_sceneFBO, width, height);
+    resize (m_mipMappedSceneFBO, std::max (2, width), std::max (2, height));
     resize (_rt_shadowAtlas, width, height);
     resize (_rt_4FrameBuffer, std::max (1, width / 4), std::max (1, height / 4));
     resize (_rt_8FrameBuffer, std::max (1, width / 8), std::max (1, height / 8));

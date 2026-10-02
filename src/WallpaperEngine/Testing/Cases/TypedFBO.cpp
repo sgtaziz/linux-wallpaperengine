@@ -1,5 +1,6 @@
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/generators/catch_generators.hpp>
 
 #include "WallpaperEngine/Render/FBOProvider.h"
 #include "WallpaperEngine/Render/CTexture.h"
@@ -9,6 +10,8 @@
 #include "WallpaperEngine/Data/Parsers/EffectParser.h"
 #include "WallpaperEngine/Render/Objects/ImageCompositeSteps.h"
 #include "WallpaperEngine/Render/Objects/ImageQuadUV.h"
+#include "WallpaperEngine/Render/Objects/ImageCompositeSampler.h"
+#include "WallpaperEngine/Render/SceneReflectionMipmaps.h"
 #include "WallpaperEngine/Data/Model/Project.h"
 #include "WallpaperEngine/Data/Model/Wallpaper.h"
 #include "WallpaperEngine/Data/Model/Material.h"
@@ -17,6 +20,7 @@
 #include <EGL/eglext.h>
 
 #include <array>
+#include <algorithm>
 #include <cstring>
 #include <limits>
 #include <stdexcept>
@@ -26,50 +30,6 @@
 using namespace WallpaperEngine::Data::Model;
 using namespace WallpaperEngine::Render;
 using WallpaperEngine::Data::Parsers::EffectParser;
-
-namespace {
-struct SurfacelessGL {
-    EGLDisplay display = EGL_NO_DISPLAY;
-    EGLSurface surface = EGL_NO_SURFACE;
-    EGLContext context = EGL_NO_CONTEXT;
-    bool ready = false;
-
-    SurfacelessGL () {
-        display = eglGetPlatformDisplay (EGL_PLATFORM_SURFACELESS_MESA, EGL_DEFAULT_DISPLAY, nullptr);
-        if (display == EGL_NO_DISPLAY || !eglInitialize (display, nullptr, nullptr)) return;
-        if (!eglBindAPI (EGL_OPENGL_API)) return;
-        const EGLint configAttributes[] = {
-            EGL_SURFACE_TYPE, EGL_PBUFFER_BIT, EGL_RENDERABLE_TYPE, EGL_OPENGL_BIT, EGL_NONE};
-        EGLConfig config = nullptr;
-        EGLint configCount = 0;
-        if (!eglChooseConfig (display, configAttributes, &config, 1, &configCount) || configCount != 1) return;
-        const EGLint pbufferAttributes[] = {EGL_WIDTH, 4, EGL_HEIGHT, 4, EGL_NONE};
-        surface = eglCreatePbufferSurface (display, config, pbufferAttributes);
-        if (surface == EGL_NO_SURFACE) return;
-        const EGLint contextAttributes[] = {EGL_CONTEXT_MAJOR_VERSION, 3, EGL_CONTEXT_MINOR_VERSION, 3, EGL_NONE};
-        context = eglCreateContext (display, config, EGL_NO_CONTEXT, contextAttributes);
-        if (context == EGL_NO_CONTEXT || !eglMakeCurrent (display, surface, surface, context)) return;
-        glewExperimental = GL_TRUE;
-        (void) glewInit ();
-        while (glGetError () != GL_NO_ERROR) { }
-        ready = glGenFramebuffers != nullptr && glClearBufferfv != nullptr;
-    }
-
-    ~SurfacelessGL () {
-        if (display == EGL_NO_DISPLAY) return;
-        eglMakeCurrent (display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
-        if (context != EGL_NO_CONTEXT) eglDestroyContext (display, context);
-        if (surface != EGL_NO_SURFACE) eglDestroySurface (display, surface);
-        eglTerminate (display);
-    }
-};
-
-GLint internalFormat (const CFBO& fbo) {
-    GLint internal = 0;
-    glBindTexture (GL_TEXTURE_2D, fbo.getTextureID (0));
-    glGetTexLevelParameteriv (GL_TEXTURE_2D, 0, GL_TEXTURE_INTERNAL_FORMAT, &internal);
-    return internal;
-}
 
 TEST_CASE ("Direct image padding uses allocated texels and model exclusions", "[render][image-quad-uv]") {
     using WallpaperEngine::Render::Objects::directImageQuadUV;
@@ -126,6 +86,362 @@ TEST_CASE ("Image effect presentation has a separate native padding rule", "[ren
         REQUIRE (excluded.right == 1);
         REQUIRE (excluded.top == 1);
     }
+}
+
+TEST_CASE ("Scene reflection reserves the native final mip reductions", "[render][reflection-mips]") {
+    // Native RGB target count is derived from rounded-up power-of-two axes,
+    // rather than GL's full chain or the maximum LOD index.
+    REQUIRE (sceneReflectionMipLevels (768, 432) == 6);
+    REQUIRE (sceneReflectionMipLevels (1920, 1080) == 8);
+    REQUIRE (sceneReflectionMipLevels (128, 64) == 3);
+    REQUIRE (sceneReflectionMipLevels (128, 65) == 4);
+    REQUIRE (sceneReflectionMipLevels (1, 1) == 1);
+    REQUIRE (sceneReflectionMipLevels (0, 19) == 1);
+    REQUIRE (sceneReflectionMipLevels (65535, 65535) == 13);
+}
+
+TEST_CASE ("Texture mip metadata follows the bound page and video storage", "[render][reflection-mips]") {
+    Texture texture;
+    texture.imageCount = 3;
+    texture.images[0].resize (4);
+    texture.images[1].resize (2);
+    REQUIRE (CTexture::mipLevelCount (texture, 0) == 4);
+    REQUIRE (CTexture::mipLevelCount (texture, 1) == 2);
+    REQUIRE (CTexture::mipLevelCount (texture, 2) == 0);
+    REQUIRE (CTexture::mipLevelCount (texture, 7) == 4);
+    texture.flags |= TextureFlags_Video;
+    REQUIRE (CTexture::mipLevelCount (texture, 0) == 1);
+    REQUIRE (CTexture::mipLevelCount (texture, 1) == 1);
+}
+
+namespace {
+struct SurfacelessGL {
+    EGLDisplay display = EGL_NO_DISPLAY;
+    EGLSurface surface = EGL_NO_SURFACE;
+    EGLContext context = EGL_NO_CONTEXT;
+    bool ready = false;
+
+    SurfacelessGL () {
+        display = eglGetPlatformDisplay (EGL_PLATFORM_SURFACELESS_MESA, EGL_DEFAULT_DISPLAY, nullptr);
+        if (display == EGL_NO_DISPLAY || !eglInitialize (display, nullptr, nullptr)) return;
+        if (!eglBindAPI (EGL_OPENGL_API)) return;
+        const EGLint configAttributes[] = {
+            EGL_SURFACE_TYPE, EGL_PBUFFER_BIT, EGL_RENDERABLE_TYPE, EGL_OPENGL_BIT, EGL_NONE};
+        EGLConfig config = nullptr;
+        EGLint configCount = 0;
+        if (!eglChooseConfig (display, configAttributes, &config, 1, &configCount) || configCount != 1) return;
+        const EGLint pbufferAttributes[] = {EGL_WIDTH, 4, EGL_HEIGHT, 4, EGL_NONE};
+        surface = eglCreatePbufferSurface (display, config, pbufferAttributes);
+        if (surface == EGL_NO_SURFACE) return;
+        const EGLint contextAttributes[] = {EGL_CONTEXT_MAJOR_VERSION, 3, EGL_CONTEXT_MINOR_VERSION, 3, EGL_NONE};
+        context = eglCreateContext (display, config, EGL_NO_CONTEXT, contextAttributes);
+        if (context == EGL_NO_CONTEXT || !eglMakeCurrent (display, surface, surface, context)) return;
+        glewExperimental = GL_TRUE;
+        (void) glewInit ();
+        while (glGetError () != GL_NO_ERROR) { }
+        ready = glGenFramebuffers != nullptr && glClearBufferfv != nullptr;
+    }
+
+    ~SurfacelessGL () {
+        if (display == EGL_NO_DISPLAY) return;
+        eglMakeCurrent (display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+        if (context != EGL_NO_CONTEXT) eglDestroyContext (display, context);
+        if (surface != EGL_NO_SURFACE) eglDestroySurface (display, surface);
+        eglTerminate (display);
+    }
+};
+
+GLint internalFormat (const CFBO& fbo) {
+    GLint internal = 0;
+    glBindTexture (GL_TEXTURE_2D, fbo.getTextureID (0));
+    glGetTexLevelParameteriv (GL_TEXTURE_2D, 0, GL_TEXTURE_INTERNAL_FORMAT, &internal);
+    return internal;
+}
+
+TEST_CASE ("Reflection snapshot retains prior scene pixels and rebuilds limited mips on resize",
+           "[render][reflection-mips]") {
+    SurfacelessGL gl;
+    REQUIRE (gl.ready);
+    auto scene = std::make_shared<CFBO> ("scene", TextureFormat_RGBA16161616f,
+        TextureFlags_ClampUVs, 1, 128, 96, 128, 96);
+    auto snapshot = std::make_shared<CFBO> ("reflection", TextureFormat_RGB161616f,
+        TextureFlags_ClampUVs, 1, 128, 96, 128, 96);
+    const std::shared_ptr<const TextureProvider> retainedConsumer = snapshot;
+    REQUIRE (scene->getMipLevelCount (0) == 1);
+    snapshot->enableSceneReflectionMipmaps ();
+    REQUIRE (snapshot->getMipLevelCount (0) == 4);
+    std::vector<float> pixels (128 * 96 * 4);
+    for (size_t y = 0; y < 96; ++y) {
+        for (size_t x = 0; x < 128; ++x) {
+            // Four distinct HDR quadrants expose both copy orientation and
+            // mip generation. Native/GL storage uses the same sampled basis.
+            const glm::vec3 color = y < 48
+                ? (x < 64 ? glm::vec3 (2, 0, 0) : glm::vec3 (0, 0, 2))
+                : (x < 64 ? glm::vec3 (0, 2, 0) : glm::vec3 (2, 2, 0));
+            const auto index = (y * 128 + x) * 4;
+            pixels[index] = color.r;
+            pixels[index + 1] = color.g;
+            pixels[index + 2] = color.b;
+            pixels[index + 3] = 1.0f;
+        }
+    }
+    glBindTexture (GL_TEXTURE_2D, scene->getTextureID (0));
+    glTexSubImage2D (GL_TEXTURE_2D, 0, 0, 0, 128, 96, GL_RGBA, GL_FLOAT, pixels.data ());
+    glActiveTexture (GL_TEXTURE5);
+    glBindTexture (GL_TEXTURE_2D, scene->getTextureID (0));
+    glBindFramebuffer (GL_READ_FRAMEBUFFER, snapshot->getFramebuffer ());
+    glBindFramebuffer (GL_DRAW_FRAMEBUFFER, scene->getFramebuffer ());
+    glEnable (GL_SCISSOR_TEST);
+    glScissor (0, 0, 1, 1);
+    snapshot->snapshotFrom (*scene);
+    GLint bound = 0;
+    glGetIntegerv (GL_ACTIVE_TEXTURE, &bound);
+    REQUIRE (bound == GL_TEXTURE5);
+    glGetIntegerv (GL_TEXTURE_BINDING_2D, &bound);
+    REQUIRE (bound == static_cast<GLint> (scene->getTextureID (0)));
+    glGetIntegerv (GL_READ_FRAMEBUFFER_BINDING, &bound);
+    REQUIRE (bound == static_cast<GLint> (snapshot->getFramebuffer ()));
+    glGetIntegerv (GL_DRAW_FRAMEBUFFER_BINDING, &bound);
+    REQUIRE (bound == static_cast<GLint> (scene->getFramebuffer ()));
+    REQUIRE (glIsEnabled (GL_SCISSOR_TEST));
+    glDisable (GL_SCISSOR_TEST);
+    const auto readMip = [&] (int level, int width, int height, int x = 0, int y = 0) {
+        glBindTexture (GL_TEXTURE_2D, retainedConsumer->getTextureID (0));
+        std::vector<float> rgb (width * height * 3);
+        glGetTexImage (GL_TEXTURE_2D, level, GL_RGB, GL_FLOAT, rgb.data ());
+        const auto index = (y * width + x) * 3;
+        return glm::vec3 (rgb[index], rgb[index + 1], rgb[index + 2]);
+    };
+    for (const auto level : {0, 3}) {
+        const int width = 128 >> level, height = 96 >> level;
+        REQUIRE (readMip (level, width, height) == glm::vec3 (2, 0, 0));
+        REQUIRE (readMip (level, width, height, width - 1, 0) == glm::vec3 (0, 0, 2));
+        REQUIRE (readMip (level, width, height, 0, height - 1) == glm::vec3 (0, 2, 0));
+        REQUIRE (readMip (level, width, height, width - 1, height - 1) == glm::vec3 (2, 2, 0));
+    }
+    scene->clear (glm::vec4 (0, 3, 0, 1));
+    REQUIRE (readMip (3, 16, 12) == glm::vec3 (2, 0, 0));
+    snapshot->snapshotFrom (*scene);
+    REQUIRE (readMip (3, 16, 12) == glm::vec3 (0, 3, 0));
+    REQUIRE_THROWS_AS (snapshot->snapshotFrom (*snapshot), std::invalid_argument);
+    const auto oldTexture = retainedConsumer->getTextureID (0);
+    scene->resize (136, 97, 136, 97);
+    snapshot->resize (136, 97, 136, 97);
+    REQUIRE (retainedConsumer->getTextureID (0) != oldTexture);
+    REQUIRE (retainedConsumer->getMipLevelCount (0) == 4);
+    REQUIRE (readMip (3, 17, 12) == glm::vec3 (0));
+    GLint mipWidth = 0, mipHeight = 0, minFilter = 0, maxLevel = 0;
+    glGetTexLevelParameteriv (GL_TEXTURE_2D, 3, GL_TEXTURE_WIDTH, &mipWidth);
+    glGetTexLevelParameteriv (GL_TEXTURE_2D, 3, GL_TEXTURE_HEIGHT, &mipHeight);
+    glGetTexParameteriv (GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, &minFilter);
+    glGetTexParameteriv (GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, &maxLevel);
+    REQUIRE (mipWidth == 17);
+    REQUIRE (mipHeight == 12);
+    REQUIRE (minFilter == GL_LINEAR_MIPMAP_LINEAR);
+    REQUIRE (maxLevel == 3);
+    scene->clear (glm::vec4 (2, 1, 0, 1));
+    snapshot->snapshotFrom (*scene);
+    REQUIRE (readMip (3, 17, 12) == glm::vec3 (2, 1, 0));
+    REQUIRE (glGetError () == GL_NO_ERROR);
+}
+
+TEST_CASE ("Reflection odd reductions retain native tile phase and HDR range",
+           "[render][reflection-mips]") {
+    SurfacelessGL gl;
+    REQUIRE (gl.ready);
+    const bool hdr = GENERATE (false, true);
+    CFBO source ("native reduction input", hdr ? TextureFormat_RGBA16161616f : TextureFormat_ARGB8888,
+        TextureFlags_ClampUVs, 1, 1280, 720, 1280, 720);
+    CFBO snapshot ("native reduction output", hdr ? TextureFormat_RGB161616f : TextureFormat_RGB888,
+        TextureFlags_ClampUVs, 1, 1280, 720, 1280, 720);
+    snapshot.enableSceneReflectionMipmaps ();
+    std::vector<float> pixels (1280 * 720 * 4);
+    for (int y = 0; y < 720; ++y) {
+        for (int x = 0; x < 1280; ++x) {
+            const auto offset = (y * 1280 + x) * 4;
+            pixels[offset + 1] = y < 656 ? (hdr ? 5.0f : 1.0f) : 0.0f;
+            pixels[offset + 2] = y < 656 ? 0.0f : (hdr ? 2.0f : 1.0f);
+            pixels[offset + 3] = 1.0f;
+        }
+    }
+    glBindTexture (GL_TEXTURE_2D, source.getTextureID (0));
+    glTexSubImage2D (GL_TEXTURE_2D, 0, 0, 0, 1280, 720, GL_RGBA, GL_FLOAT, pixels.data ());
+    glViewport (17, 19, 3, 5);
+    glEnable (GL_BLEND);
+    glColorMask (GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+    snapshot.snapshotFrom (source);
+    REQUIRE (glIsEnabled (GL_BLEND));
+    GLint viewport[4] {};
+    glGetIntegerv (GL_VIEWPORT, viewport);
+    const std::array<int, 4> actualViewport {viewport[0], viewport[1], viewport[2], viewport[3]};
+    const std::array<int, 4> expectedViewport {17, 19, 3, 5};
+    REQUIRE (actualViewport == expectedViewport);
+    GLboolean mask[4] {};
+    glGetBooleanv (GL_COLOR_WRITEMASK, mask);
+    REQUIRE (std::all_of (std::begin (mask), std::end (mask), [] (auto v) { return !v; }));
+    glDisable (GL_BLEND);
+    glColorMask (GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    glBindTexture (GL_TEXTURE_2D, snapshot.getTextureID (0));
+    std::vector<float> level5 (40 * 22 * 3), level6 (20 * 11 * 3);
+    glGetTexImage (GL_TEXTURE_2D, 5, GL_RGB, GL_FLOAT, level5.data ());
+    glGetTexImage (GL_TEXTURE_2D, 6, GL_RGB, GL_FLOAT, level6.data ());
+    // Native level4 has 45 rows. The last tile starts at source row40;
+    // its first destination row samples40.5, mixing green/blue equally.
+    // Driver/global reduction instead samples beyond row41 and loses green.
+    const float tolerance = hdr ? 0.003f : 1.1f / 255.0f;
+    REQUIRE (level5[(20 * 40 + 12) * 3 + 1]
+             == Catch::Approx (hdr ? 2.5f : 128.0f / 255).margin (tolerance));
+    REQUIRE (level5[(20 * 40 + 12) * 3 + 2]
+             == Catch::Approx (hdr ? 1.0f : 128.0f / 255).margin (tolerance));
+    REQUIRE (level6[(10 * 20 + 6) * 3 + 1]
+             == Catch::Approx (hdr ? 1.25f : 64.0f / 255).margin (tolerance));
+    REQUIRE (level6[(10 * 20 + 6) * 3 + 2]
+             == Catch::Approx (hdr ? 1.5f : 191.0f / 255).margin (tolerance));
+    REQUIRE (source.getMipLevelCount (0) == 1);
+    REQUIRE (snapshot.getMipLevelCount (0) == 7);
+    REQUIRE (glGetError () == GL_NO_ERROR);
+}
+
+TEST_CASE ("Reflection separates public normalized storage from LDS quantization",
+           "[render][reflection-mips]") {
+    SurfacelessGL gl;
+    REQUIRE (gl.ready);
+    CFBO source ("half reduction input", TextureFormat_ARGB8888,
+        TextureFlags_ClampUVs, 1, 128, 64, 128, 64);
+    CFBO snapshot ("half reduction output", TextureFormat_RGB888,
+        TextureFlags_ClampUVs, 1, 128, 64, 128, 64);
+    snapshot.enableSceneReflectionMipmaps ();
+    std::vector<uint8_t> pixels (128 * 64 * 4);
+    for (size_t pixel = 0; pixel < 128 * 64; ++pixel) {
+        pixels[pixel * 4] = pixel % 2 == 0 ? 122 : 123;
+        pixels[pixel * 4 + 3] = 255;
+    }
+    glBindTexture (GL_TEXTURE_2D, source.getTextureID (0));
+    glTexSubImage2D (GL_TEXTURE_2D, 0, 0, 0, 128, 64, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data ());
+    snapshot.snapshotFrom (source);
+    glBindTexture (GL_TEXTURE_2D, snapshot.getTextureID (0));
+    std::vector<uint8_t> level1 (64 * 32 * 3), level2 (32 * 16 * 3);
+    glGetTexImage (GL_TEXTURE_2D, 1, GL_RGB, GL_UNSIGNED_BYTE, level1.data ());
+    glGetTexImage (GL_TEXTURE_2D, 2, GL_RGB, GL_UNSIGNED_BYTE, level2.data ());
+    // The raw first result is half(122.5/255) = .48046875;
+    // hardware normalized storage converts122.51953125 to123. Native LDS
+    // instead rounds half(result*255) =122.5 to122 before the next reduction.
+    // Quantizing before EVERY public store collapses these two native paths.
+    bool firstMatches = true, secondMatches = true;
+    for (size_t i = 0; i < level1.size (); i += 3) firstMatches &= level1[i] == 123;
+    for (size_t i = 0; i < level2.size (); i += 3) secondMatches &= level2[i] == 122;
+    REQUIRE (firstMatches);
+    REQUIRE (secondMatches);
+    REQUIRE (glGetError () == GL_NO_ERROR);
+}
+
+TEST_CASE ("Reflection shared tail starts with native global half interpolation",
+           "[render][reflection-mips]") {
+    SurfacelessGL gl;
+    REQUIRE (gl.ready);
+    CFBO source ("shared tail input", TextureFormat_RGBA16161616f,
+        TextureFlags_ClampUVs, 1, 1920, 1080, 1920, 1080);
+    CFBO snapshot ("shared tail output", TextureFormat_RGB161616f,
+        TextureFlags_ClampUVs, 1, 1920, 1080, 1920, 1080);
+    snapshot.enableSceneReflectionMipmaps ();
+    REQUIRE (snapshot.getMipLevelCount (0) == 8);
+    constexpr float halfUnit = 1.0f / 16777216.0f;
+    std::vector<float> pixels (1920 * 1080 * 4);
+    for (size_t y = 0; y < 1080; ++y) {
+        for (size_t x = 0; x < 1920; ++x) {
+            const auto offset = (y * 1920 + x) * 4;
+            pixels[offset] = (y % 64 < 32 ? 1000 : 1004) * halfUnit;
+            pixels[offset + 3] = 1;
+        }
+    }
+    glBindTexture (GL_TEXTURE_2D, source.getTextureID (0));
+    glTexSubImage2D (GL_TEXTURE_2D, 0, 0, 0, 1920, 1080, GL_RGBA, GL_FLOAT, pixels.data ());
+    snapshot.snapshotFrom (source);
+    glBindTexture (GL_TEXTURE_2D, snapshot.getTextureID (0));
+    std::vector<float> level6 (30 * 16 * 3), level7 (15 * 8 * 3);
+    glGetTexImage (GL_TEXTURE_2D, 6, GL_RGB, GL_FLOAT, level6.data ());
+    glGetTexImage (GL_TEXTURE_2D, 7, GL_RGB, GL_FLOAT, level7.data ());
+    // The first six reductions mix the two half-representable bands. The
+    // shared tail then uses half FMix even though its source axes are even.
+    // Quarter-scaling before adding would round250.5 to250 and return1000
+    // half units instead of retaining the constant1002-unit interpolant.
+    REQUIRE (level6[0] == Catch::Approx (1002 * halfUnit).margin (halfUnit * 0.5f));
+    REQUIRE (level7[0] == Catch::Approx (1002 * halfUnit).margin (halfUnit * 0.5f));
+    REQUIRE (glGetError () == GL_NO_ERROR);
+}
+
+TEST_CASE ("Image composite edge sampler survives resize without opposite-edge colors",
+           "[render][image-composite-sampler]") {
+    SurfacelessGL gl;
+    REQUIRE (gl.ready);
+    const uint32_t sourceFlags = GENERATE (uint32_t (TextureFlags_NoFlags),
+        uint32_t (TextureFlags_ClampUVsBorder),
+        uint32_t (TextureFlags_NoInterpolation | TextureFlags_ClampUVsBorder));
+    CFBO composite ("public image composite", TextureFormat_ARGB8888,
+        Objects::imageCompositeTextureFlags (sourceFlags), 1, 2, 2, 2, 2);
+    const auto compile = [] (GLenum stage, const char* text) {
+        const auto shader = glCreateShader (stage);
+        glShaderSource (shader, 1, &text, nullptr);
+        glCompileShader (shader);
+        GLint ok = 0;
+        glGetShaderiv (shader, GL_COMPILE_STATUS, &ok);
+        REQUIRE (ok == GL_TRUE);
+        return shader;
+    };
+    const auto vertex = compile (GL_VERTEX_SHADER, R"(#version 330 core
+        void main() {
+            vec2 p = vec2((gl_VertexID << 1) & 2, gl_VertexID & 2);
+            gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);
+        })");
+    const auto fragment = compile (GL_FRAGMENT_SHADER, R"(#version 330 core
+        uniform sampler2D source;
+        out vec4 color;
+        void main() { color = texture(source, vec2(0.5, 0.01)); })");
+    const auto program = glCreateProgram ();
+    glAttachShader (program, vertex);
+    glAttachShader (program, fragment);
+    glLinkProgram (program);
+    GLint linked = 0;
+    glGetProgramiv (program, GL_LINK_STATUS, &linked);
+    REQUIRE (linked == GL_TRUE);
+    GLuint vao = 0;
+    glGenVertexArrays (1, &vao);
+    glBindVertexArray (vao);
+    glUseProgram (program);
+    glUniform1i (glGetUniformLocation (program, "source"), 0);
+    glActiveTexture (GL_TEXTURE0);
+    for (uint32_t size : {2u, 3u}) {
+        if (size == 3) composite.resize (size, size, size, size);
+        std::vector<float> pixels (size * size * 4);
+        for (uint32_t y = 0; y < size; ++y) {
+            for (uint32_t x = 0; x < size; ++x) {
+                const auto offset = (y * size + x) * 4;
+                pixels[offset] = pixels[offset + 2] = y + 1 == size ? 1 : 0;
+                pixels[offset + 1] = pixels[offset + 3] = 1;
+            }
+        }
+        glBindTexture (GL_TEXTURE_2D, composite.getTextureID (0));
+        glTexSubImage2D (GL_TEXTURE_2D, 0, 0, 0, size, size, GL_RGBA, GL_FLOAT, pixels.data ());
+        GLint filter = 0;
+        glGetTexParameteriv (GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, &filter);
+        REQUIRE (filter == (sourceFlags & TextureFlags_NoInterpolation ? GL_NEAREST : GL_LINEAR));
+        glBindFramebuffer (GL_FRAMEBUFFER, 0);
+        glViewport (0, 0, 4, 4);
+        glDrawArrays (GL_TRIANGLES, 0, 3);
+        std::array<uint8_t, 4> pixel {};
+        glReadPixels (1, 1, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixel.data ());
+        REQUIRE (pixel[0] == 0);
+        REQUIRE (pixel[1] == 255);
+        REQUIRE (pixel[2] == 0);
+        // Repeat addressing blends the opposite white edge into this green
+        // border. Native internal A/B targets retain edge addressing after
+        // replacing their texture storage, independently of source flags.
+    }
+    REQUIRE (glGetError () == GL_NO_ERROR);
+    glDeleteVertexArrays (1, &vao);
+    glDeleteProgram (program);
+    glDeleteShader (vertex);
+    glDeleteShader (fragment);
 }
 
 TEST_CASE ("Uniform array upload reaches second bone matrix and blend row", "[render][uniform-array]") {
