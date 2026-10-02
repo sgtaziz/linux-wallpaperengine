@@ -25,6 +25,8 @@ struct FBO {
 };
 
 struct EffectPass {
+    /** Original descriptor ordinal, including conditionally omitted passes. */
+    size_t authoredIndex = 0;
     /** The material to use for this effect's pass */
     std::optional<MaterialUniquePtr> material;
     /** Texture bindings for this effect's pass */

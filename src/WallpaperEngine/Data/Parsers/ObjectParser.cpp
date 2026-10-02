@@ -499,7 +499,8 @@ ImageEffectUniquePtr ObjectParser::parseEffect (const JSON& it, const Project& p
 	.visible = it.user ("visible", project.properties, true),
 	.passOverrides = passsOverrides.has_value () ? parseEffectPassOverrides (passsOverrides.value (), project)
 						     : std::vector<ImageEffectPassOverrideUniquePtr> {},
-	.effect = EffectParser::load (project, it.require ("file", "Image effect must have an effect")) });
+	.effect = EffectParser::load (project, it.require ("file", "Image effect must have an effect"),
+            it.optional ("combos") ? EffectParser::parseConditionCombos (*it.optional ("combos")) : ComboMap {}) });
 }
 
 std::vector<ImageEffectPassOverrideUniquePtr>

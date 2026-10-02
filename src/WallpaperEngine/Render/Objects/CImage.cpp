@@ -1100,8 +1100,6 @@ void CImage::setup () {
 
 	    auto curEffect = cur->effect->passes.begin ();
 	    auto endEffect = cur->effect->passes.end ();
-	    auto curOverride = cur->passOverrides.begin ();
-	    auto endOverride = cur->passOverrides.end ();
 	    std::vector<ImageCompositeStepEnd> descriptorEnds;
 
 	    for (; curEffect != endEffect; ++curEffect) {
@@ -1147,8 +1145,8 @@ void CImage::setup () {
 		    ));
 		} else {
 		    for (auto& pass : (*curEffect)->material.value ()->passes) {
-			const auto override = curOverride != endOverride
-			    ? **curOverride
+			const auto override = (*curEffect)->authoredIndex < cur->passOverrides.size ()
+			    ? *cur->passOverrides[(*curEffect)->authoredIndex]
 			    : std::optional<std::reference_wrapper<const ImageEffectPassOverride>> (std::nullopt);
 			const auto target = (*curEffect)->target.has_value ()
 			    ? *(*curEffect)->target
@@ -1159,9 +1157,6 @@ void CImage::setup () {
 			);
 		    }
 
-		    if (curOverride != endOverride) {
-			++curOverride;
-		    }
 		}
 		descriptorEnds.back () = {m_passes.size (), m_resourceSwaps.size ()};
 	    }
