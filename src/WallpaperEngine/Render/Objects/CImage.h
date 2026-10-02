@@ -120,6 +120,13 @@ private:
     GLuint m_copySpacePosition;
     GLuint m_passSpacePosition;
     GLuint m_texcoordCopy;
+    GLuint m_texcoordDirect = GL_NONE;
+    float m_texcoordDirectTopV = 1.0f;
+    float m_texcoordDirectBottomV = 0.0f;
+    GLuint m_texcoordComposite = GL_NONE;
+    GLuint m_texcoordCompositePresented = GL_NONE;
+    float m_texcoordCompositeTopV = 1.0f;
+    float m_texcoordCompositeBottomV = 0.0f;
     GLuint m_texcoordPass;
     GLuint m_texcoordPassPresented = GL_NONE;
     float m_texcoordCopyTopV = 1.0f;
