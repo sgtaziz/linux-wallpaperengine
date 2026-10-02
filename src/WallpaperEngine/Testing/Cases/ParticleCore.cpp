@@ -4220,6 +4220,88 @@ TEST_CASE ("Puppet emission retains scene-frame world poses independently of bir
     REQUIRE_FALSE (puppetEmissionBoneMatrix (pose, inverseBind, 0xff));
 }
 
+TEST_CASE ("Ignored boids blend fields cannot create script bindings while other envelopes remain",
+           "[particle][boids][envelope][parser]") {
+    using namespace WallpaperEngine::Data::Model;
+    using WallpaperEngine::Data::Parsers::ObjectParser;
+    using WallpaperEngine::Data::JSON::JSON;
+    Project project {};
+    const auto object = ObjectParser::parse (JSON::parse (R"({"id":1,"particle":{
+        "operator":[{"name":"boids","blendinstart":{"value":0.75,
+            "script":"export function update(){throw new Error('ignored boids field');}"},
+            "blendinend":1,"blendoutstart":1,"blendoutend":1},
+            {"name":"capvelocity","maxspeed":40,"blendinstart":0.75,
+             "blendinend":1,"blendoutstart":1,"blendoutend":1}]}})"), project);
+    const auto& particle = *object->as<Particle> ();
+    REQUIRE_FALSE (particle.hasUnsupportedComponents);
+    REQUIRE_FALSE (nativeSlotScopeError (particle));
+    REQUIRE_FALSE (particle.operators[0]->blendEnvelope);
+    REQUIRE (particle.operators[1]->blendEnvelope);
+    std::vector<std::string> settings;
+    WallpaperEngine::Scripting::forEachParticleScriptSetting (particle,
+        [&settings] (const std::string& name, auto&) { settings.push_back (name); });
+    REQUIRE (std::none_of (settings.begin (), settings.end (),
+        [] (const auto& name) { return name.starts_with ("operator0_"); }));
+    for (const auto* suffix : {"blendInStart", "blendInEnd", "blendOutStart", "blendOutEnd", "maxSpeed"})
+        REQUIRE (std::find (settings.begin (), settings.end (), "operator1_" + std::string (suffix))
+            != settings.end ());
+    REQUIRE (particle.operators[1]->blendEnvelope->inStart->value->getFloat () == .75f);
+}
+
+TEST_CASE ("Parsed duplicate boids retain original record order and ignore authored age envelopes",
+           "[particle][boids][envelope][parser]") {
+    if (!nativeRuntimeArithmeticAvailable) return;
+    using namespace WallpaperEngine::Data::Model;
+    using WallpaperEngine::Data::Parsers::ObjectParser;
+    using WallpaperEngine::Data::JSON::JSON;
+    using WallpaperEngine::Render::Objects::ParticleInstance;
+    // Original unmodified 2.8.42 interpreter14023fbc0: two literal80-byte
+    // opcode11 records. Independently replayed AB/BA with ages0 or0/3/6/9.
+    // Factory1401c5490 never reads boids blend fields or packs an envelope.
+    const std::array<std::array<float, 12>, 2> native {{
+        {-4.79391289f, -.8532812f, 0, 9.06643867f, -3.48440099f, 0,
+         6.93313789f, -6.11552095f, 0, 20.7934895f, -8.74664116f, 0},
+        {-3.37227654f, -.8532812f, 0, 9.06643867f, -3.48440099f, 0,
+         6.93313789f, -6.11552095f, 0, 19.3718529f, -8.74664116f, 0}
+    }};
+    const auto base = JSON::parse (R"({"id":1,"particle":{"operator":[
+        {"name":"boids","separationthreshold":40,"neighborthreshold":100,"maxspeed":40,
+         "separationfactor":15,"alignmentfactor":4,"cohesionfactor":2,"flags":1},
+        {"name":"boids","separationthreshold":40,"neighborthreshold":100,"maxspeed":40,
+         "separationfactor":15,"alignmentfactor":0,"cohesionfactor":0,"flags":1}]}})");
+    for (bool reverse : {false, true}) for (bool ignoredFields : {false, true}) {
+        auto authored = base;
+        if (reverse) std::swap (authored["particle"]["operator"][0], authored["particle"]["operator"][1]);
+        if (ignoredFields) for (auto& op : authored["particle"]["operator"]) {
+            op["blendinstart"] = .75f; op["blendinend"] = 1;
+            op["blendoutstart"] = 1; op["blendoutend"] = 1;
+        }
+        Project project {};
+        const auto object = ObjectParser::parse (authored, project);
+        const auto& particle = *object->as<Particle> ();
+        REQUIRE (particle.operators.size () == 2);
+        REQUIRE_FALSE (nativeSlotScopeError (particle));
+        for (bool staggeredAge : {false, true}) {
+            CAPTURE (reverse, ignoredFields, staggeredAge);
+            std::vector<ParticleInstance> slots (4);
+            for (unsigned lane = 0; lane < 4; ++lane) {
+                slots[lane].position = {lane * 24.f, 0, 0};
+                slots[lane].velocity = {8, -static_cast<float> (lane) * 3.2f, 0};
+                slots[lane].lifetime = 12;
+                slots[lane].age = staggeredAge ? lane * 3.f : 0;
+            }
+            for (const auto& record : particle.operators) {
+                const auto& op = *record->as<BoidsOperator> ();
+                const BoidsParameters parameters {op.separationThreshold, op.neighborThreshold, op.maxSpeed,
+                    op.separationFactor, op.alignmentFactor, op.cohesionFactor, op.flags};
+                applyNativeBoids (slots, 4, 0, {0, .033333333f}, parameters);
+            }
+            for (unsigned lane = 0; lane < 4; ++lane) for (unsigned axis = 0; axis < 3; ++axis)
+                REQUIRE (slots[lane].velocity[axis] == native[reverse][lane * 3 + axis]);
+        }
+    }
+}
+
 TEST_CASE ("Boids arithmetic matches the unmodified original four-lane interpreter",
            "[particle][boids]") {
     if (!nativeRuntimeArithmeticAvailable) return;

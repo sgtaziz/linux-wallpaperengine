@@ -59,8 +59,6 @@ inline std::optional<std::string> nativeSlotScopeError (
             return owner + " emitter is unsupported: " + emitter.name;
     for (const auto& op : particle.operators) {
         if (!op) continue;
-        if (op->is<BoidsOperator> () && op->blendEnvelope)
-            return owner + " boids blend envelope requires separate per-lane clock validation";
         if (op->is<MovementOperator> () || op->is<CapVelocityOperator> () || op->is<BoidsOperator> ()) continue;
         if (ordinarySlots && (op->is<AngularMovementOperator> () || op->is<CollisionOperator> ()
             || op->is<AlphaFadeOperator> () || op->is<SizeChangeOperator> ()

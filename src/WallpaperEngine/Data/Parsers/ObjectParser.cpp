@@ -698,7 +698,10 @@ ParticleUniquePtr ObjectParser::parseParticle (const JSON& it, const Project& pr
 		        || op.find ("blendinend") != op.end ()
 		        || op.find ("blendoutstart") != op.end ()
 		        || op.find ("blendoutend") != op.end ();
-		    if (hasBlend) {
+            // Native boids always emits its fixed opcode11 record without
+            // reading blend fields. Do not parse ignored settings/scripts:
+            // the shared script visitor would otherwise evaluate them.
+		    if (hasBlend && !oper->is<BoidsOperator> ()) {
 			oper->blendEnvelope.emplace (ParticleOperatorBase::BlendEnvelope {
 			    op.user ("blendinstart", project.properties, 0.0f),
 			    op.user ("blendinend", project.properties, 0.0f),
