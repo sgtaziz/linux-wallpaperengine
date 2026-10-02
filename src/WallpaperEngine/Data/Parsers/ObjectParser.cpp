@@ -243,7 +243,7 @@ ObjectUniquePtr ObjectParser::parse (const JSON& it, const Project& project) {
 	return std::make_unique<SceneCamera> (std::move (basedata), SceneCameraData {
 	    .mode = cameraIt->get<std::string> (),
 	    .path = it.optional<std::string> ("path", ""),
-	    .fov = it.user ("fov", project.properties, 45.0f),
+	    .fov = it.user ("fov", project.properties, 50.0f),
 	    .zoom = it.user ("zoom", project.properties, 1.0f),
 	});
     } else if (lightIt != it.end ()) {

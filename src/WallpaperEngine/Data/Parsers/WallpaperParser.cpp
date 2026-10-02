@@ -12,29 +12,64 @@
 using namespace WallpaperEngine::Data::Parsers;
 
 namespace {
-bool hasRootCameraPaths (const JSON& camera, const Project& project) {
+float cameraPathNumber (const JSON& value) {
+    // Native 086220 accepts literal numbers, bool and null, not strings/settings.
+    if (value.is_null ()) return 0;
+    if (value.is_boolean ()) return value.get<bool> () ? 1.0f : 0.0f;
+    if (value.is_number ()) return value.get<float> ();
+    throw std::invalid_argument ("Camera path scalar is not numeric");
+}
+
+std::vector<CameraPath> rootCameraPaths (const JSON& camera, const Project& project) {
+    std::vector<CameraPath> result;
     const auto files = camera.optional ("paths");
-    if (!files || !files->is_array () || files->empty () || !files->back ().is_string ()) return false;
-    // Native 140186c90 clears the path list before each file, so the final
-    // filename controls whether its orthographic root pose is retained.
-    try {
-        const auto data = WallpaperEngine::Data::JSON::parseAuthoringJson (
-            project.assetLocator->readString (files->back ().get<std::string> ()), "camera path");
-        const auto paths = data.optional ("paths");
-        if (!paths || !paths->is_array ()) return false;
-        // 140198e20 appends enabled segments with a nonempty transforms array.
-        // This only preserves the root-pose contract; path animation is separate.
-        for (const auto& path : *paths) {
-            if (!path.is_object ()) break;
-            const auto transforms = path.optional ("transforms");
-            if (!transforms || !transforms->is_array () || transforms->empty ()) break;
-            const auto disabled = path.optional ("disabled");
-            if (!disabled || !disabled->is_boolean () || !disabled->get<bool> ()) return true;
+    if (!files || !files->is_array ()) return result;
+    for (const auto& filename : *files) {
+        // 186c90 clears the list BEFORE EACH file, even a nonstring entry.
+        result.clear ();
+        if (!filename.is_string ()) continue;
+        try {
+            const auto data = WallpaperEngine::Data::JSON::parseAuthoringJson (
+                project.assetLocator->readString (filename.get<std::string> ()), "camera path");
+            const auto paths = data.optional ("paths");
+            if (!paths || !paths->is_array ()) continue;
+            for (const auto& path : *paths) {
+                if (!path.is_object ()) break;
+                const auto transforms = path.optional ("transforms");
+                if (!transforms || !transforms->is_array () || transforms->empty ()) break;
+                const auto disabled = path.optional ("disabled");
+                if (disabled && disabled->is_boolean () && disabled->get<bool> ()) continue;
+                CameraPath parsed;
+                parsed.duration = cameraPathNumber (path.value ("duration", JSON (nullptr)));
+                for (size_t index = 0; index < transforms->size (); ++index) {
+                    const auto& sample = transforms->at (index);
+                    if (!sample.is_object ()) continue;
+                    const auto disabledSample = sample.optional ("disabled");
+                    if (disabledSample && disabledSample->is_boolean () && disabledSample->get<bool> ()) continue;
+                    CameraPathSample entry;
+                    const auto vector = [&sample] (const char* field) {
+                        const auto value = sample.optional (field);
+                        return value && value->is_string () ? sample.optional (field, glm::vec3 (0)) : glm::vec3 (0);
+                    };
+                    entry.eye = vector ("eye");
+                    entry.center = vector ("center");
+                    entry.up = vector ("up");
+                    const auto zoom = sample.optional ("zoom");
+                    if (zoom) entry.zoom = cameraPathNumber (*zoom);
+                    const auto timestamp = sample.optional ("timestamp");
+                    entry.timestamp = timestamp && timestamp->is_number () ? timestamp->get<float> ()
+                        : index == 0 ? 0 : (static_cast<float> (index)
+                            / static_cast<float> (transforms->size () - 1)) * parsed.duration;
+                    parsed.samples.push_back (entry);
+                }
+                result.push_back (std::move (parsed));
+            }
+        } catch (const std::exception& error) {
+            sLog.error ("Cannot load root camera paths: ", error.what ());
+            result.clear ();
         }
-    } catch (const std::exception& error) {
-        sLog.error ("Cannot inspect root camera paths: ", error.what ());
     }
-    return false;
+    return result;
 }
 } // namespace
 
@@ -57,6 +92,7 @@ SceneUniquePtr WallpaperParser::parseScene (const JSON& file, Project& project) 
     project.sceneVersion = scene.optional ("version", 0);
     const auto camera = scene.require ("camera", "Scenes must have a camera section");
     const auto general = scene.require ("general", "Scenes must have a general section");
+    auto cameraPaths = rootCameraPaths (camera, project);
     const auto projection = general.optional ("orthogonalprojection");
     const bool hasOrthogonalProjection = projection.has_value () && projection->is_object ();
     const bool autoOrthogonalProjection = hasOrthogonalProjection && projection->optional ("auto", false);
@@ -145,7 +181,8 @@ SceneUniquePtr WallpaperParser::parseScene (const JSON& file, Project& project) 
                     .center = camera.require <glm::vec3> ("center", "Camera must have a center position"),
                     .eye = camera.require <glm::vec3> ("eye", "Camera must have an eye position"),
                     .up = camera.require <glm::vec3> ("up", "Camera must have an up position"),
-                    .hasPaths = hasRootCameraPaths (camera, project),
+                    .hasPaths = !cameraPaths.empty (),
+                    .paths = std::move (cameraPaths),
                 },
                 .projection = {
 		    .width  = autoOrthogonalProjection ? 0 : orthogonalWidth,

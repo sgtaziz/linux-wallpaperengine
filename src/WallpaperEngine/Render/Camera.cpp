@@ -5,6 +5,7 @@
 #include <stdexcept>
 
 #include "Camera.h"
+#include "CObject.h"
 #include "Wallpapers/SceneTransform.h"
 
 using namespace WallpaperEngine;
@@ -16,6 +17,11 @@ Camera::Camera (Wallpapers::CScene& scene, const SceneData::Camera& camera,
     m_pose (poseForRootCamera (camera)), m_scriptTransforms {m_pose},
     m_camera (camera), m_activeObject (activeObject), m_scene (scene) {
     if (m_activeObject) m_pose = poseForSceneCamera (*m_activeObject);
+    m_frameFov = m_activeObject ? m_activeObject->fov->value->getFloat ()
+                              : m_camera.projection.fov->value->getFloat ();
+    m_frameZoom = m_activeObject ? m_activeObject->zoom->value->getFloat () : 1.0f;
+    m_runtimeOverride = m_activeObject || (!m_camera.configuration.paths.empty ()
+        && !m_camera.configuration.paths.front ().samples.empty ());
     m_lookat = glm::lookAt (m_pose.eye, m_pose.center, m_pose.up);
     m_renderLookat = m_lookat;
 }
@@ -53,6 +59,56 @@ Camera::Pose Camera::poseForSceneCamera (const SceneCamera& camera) {
         glm::rotate (glm::mat4 (1.0f), angles.y, glm::vec3 (0.0f, 1.0f, 0.0f)) *
         glm::rotate (glm::mat4 (1.0f), angles.x, glm::vec3 (1.0f, 0.0f, 0.0f));
     return {eye, eye - glm::vec3 (rotation[2]), glm::vec3 (rotation[1])};
+}
+
+Camera::Pose Camera::poseForWorldCamera (const glm::mat4& world) {
+    // Native virtual+80 is the full current authored world matrix.
+    const glm::vec3 eye (world[3]);
+    return {eye, eye - glm::vec3 (world[2]), glm::vec3 (world[1])};
+}
+
+void Camera::advanceFrame (float dt, const std::vector<const SceneCamera*>& cameras) {
+    m_activeObject = nullptr;
+    m_frameFov = m_camera.projection.fov->value->getFloat ();
+    m_frameZoom = m_scriptTransforms.zoom;
+    m_pose = m_scriptTransforms.pose;
+    m_runtimeOverride = false;
+    for (auto it = cameras.rbegin (); it != cameras.rend (); ++it) {
+        const auto* camera = *it;
+        const auto resolved = Wallpapers::resolveSceneTransform (*camera,
+            [this] (int id) -> const Object* {
+                const auto* parent = m_scene.getObject (id);
+                return parent ? &parent->getObject () : nullptr;
+            }, [this] (const Object& parent, const std::string& attachment) {
+                return m_scene.getPuppetAttachmentTransform (parent.id, attachment);
+            });
+        if (!resolved.visible) continue;
+        m_activeObject = camera;
+        m_runtimeOverride = true;
+        m_pose = poseForWorldCamera (resolved.authoredMatrix);
+        m_frameFov = camera->fov->value->getFloat ();
+        m_frameZoom = camera->zoom->value->getFloat ();
+        break;
+    }
+    if (!m_activeObject) {
+        if (const auto sample = advanceNativeCameraPath (m_camera.configuration.paths, m_pathCursor, dt)) {
+            m_runtimeOverride = true;
+            m_pose = {sample->eye, sample->center, sample->up};
+            m_frameZoom = sample->zoom;
+        }
+    }
+    m_runtimeTransforms = m_runtimeOverride;
+    m_lookat = glm::lookAt (m_pose.eye, m_pose.center, m_pose.up);
+    if (m_width > 0 && m_height > 0) {
+        if (m_isOrthogonal) setOrthogonalProjection (m_width, m_height);
+        else setPerspectiveProjection (m_width, m_height);
+    }
+}
+
+void Camera::forgetCamera (const SceneCamera& camera) {
+    // Destruction after scripts must not invalidate this frame's cached pose,
+    // FOV or zoom. Admission is reconsidered at the next outer update.
+    if (m_activeObject == &camera) m_activeObject = nullptr;
 }
 
 const glm::vec3& Camera::getCenter () const { return m_pose.center; }
@@ -110,9 +166,10 @@ void Camera::setTransforms (const glm::vec3* eye, const glm::vec3* center,
     m_scriptTransforms = updatedTransforms (m_scriptTransforms, eye, center, up, zoom);
     // Native 1401891a0 chooses an active camera object, then camera paths,
     // before the stored root transforms. Paths are not animated here yet.
-    if (m_activeObject || m_camera.configuration.hasPaths) return;
+    if (m_runtimeOverride) return;
     m_hasScriptTransforms = true;
     m_pose = m_scriptTransforms.pose;
+    m_frameZoom = m_scriptTransforms.zoom;
     m_lookat = glm::lookAt (m_pose.eye, m_pose.center, m_pose.up);
     m_renderLookat = renderLookAtForTransforms (m_pose, m_isOrthogonal, m_width, m_height);
     if (m_width > 0 && m_height > 0) {
@@ -130,8 +187,7 @@ float Camera::getWidth () const { return this->m_width; }
 float Camera::getHeight () const { return this->m_height; }
 
 float Camera::getFov () const {
-    return m_activeObject ? m_activeObject->fov->value->getFloat ()
-                          : m_camera.projection.fov->value->getFloat ();
+    return std::clamp (m_frameFov, 0.1f, 179.9f);
 }
 
 float Camera::getPerspectiveOverrideFov () const {
@@ -146,13 +202,14 @@ void Camera::setOrthogonalProjection (const float width, const float height) {
     this->m_width = width;
     this->m_height = height;
 
-    this->m_projection = m_hasScriptTransforms
+    this->m_projection = (m_hasScriptTransforms || m_runtimeTransforms)
         ? makeProjectionForTransforms (width, height, getFov (), getNearZ (), getFarZ (),
-                                       m_scriptTransforms, true,
+                                       Transforms {m_pose, m_frameZoom}, true,
                                        m_camera.projection.zoom ? m_camera.projection.zoom->value->getFloat () : 1.0f)
         : makeOrthogonalProjectionForScene (width, height, getNearZ (), getFarZ (), getEye ());
     this->m_isOrthogonal = true;
-    m_renderLookat = m_hasScriptTransforms ? renderLookAtForTransforms (m_pose, true, width, height) : m_lookat;
+    m_renderLookat = (m_hasScriptTransforms || m_runtimeTransforms)
+        ? renderLookAtForTransforms (m_pose, true, width, height) : m_lookat;
 }
 
 void Camera::setPerspectiveProjection (float width, float height) {

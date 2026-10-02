@@ -14,6 +14,7 @@
 #include "WallpaperEngine/Input/MouseInput.h"
 #include "WallpaperEngine/Render/Shaders/ShaderUnit.h"
 #include "WallpaperEngine/Scripting/SceneCameraTransforms.h"
+#include "WallpaperEngine/Scripting/ScriptPropertyBindings.h"
 
 #include <cmath>
 #include <glm/gtc/matrix_transform.hpp>
@@ -781,4 +782,149 @@ TEST_CASE ("Native scene clear defaults false and accepts only boolean authoring
         const auto wallpaper = WallpaperParser::parse (JSON ("scene.json"), project);
         REQUIRE (wallpaper->as<Scene> ()->clearEnabled->value->getBool () == expected);
     }
+}
+
+TEST_CASE ("Camera paths sample before time advance and preserve original strict boundaries",
+           "[scene][camera-path]") {
+    using namespace WallpaperEngine::Render;
+    using namespace WallpaperEngine::Data::Model;
+    const CameraPath first {{{0,{0,0,500},{0,0,0},{0,1,0},1},
+                             {4,{80,0,500},{80,0,0},{0,1,0},2}},5};
+    std::vector<CameraPath> paths {first};
+    CameraPathCursor cursor;
+    REQUIRE (advanceNativeCameraPath (paths,cursor,1)->eye.x == 0);
+    REQUIRE (cursor.time == 1);
+    REQUIRE (advanceNativeCameraPath (paths,cursor,0)->eye.x == 16.25f);
+    REQUIRE (cursor.time == 1);
+    cursor.time = 2;
+    const auto midpoint = advanceNativeCameraPath (paths,cursor,2);
+    REQUIRE (midpoint->eye.x == 40);
+    REQUIRE (midpoint->zoom == 1.5f);
+    REQUIRE (cursor.time == 4);
+    REQUIRE (cursor.sample == 0); // Equality does not advance.
+    REQUIRE (advanceNativeCameraPath (paths,cursor,.25f)->eye.x == 80);
+    REQUIRE (cursor.sample == 1);
+    // Native last boundary is duration-currentTimestamp (1), not duration5.
+    REQUIRE (advanceNativeCameraPath (paths,cursor,0)->eye.x == 80);
+    REQUIRE (cursor.sample == 0);
+    REQUIRE (cursor.time == 0);
+    REQUIRE (advanceNativeCameraPath (paths,cursor,10)->eye.x == 0);
+    REQUIRE (cursor.sample == 1); // A long frame advances only one entry.
+    REQUIRE (cursor.time == 10);
+}
+
+TEST_CASE ("Camera paths preserve before-first timestamp and segment wrap semantics",
+           "[scene][camera-path]") {
+    using namespace WallpaperEngine::Render;
+    using namespace WallpaperEngine::Data::Model;
+    const std::vector<CameraPath> paths {
+        {{{2,{10,0,500},{10,0,0},{0,1,0},1},{4,{30,0,500},{30,0,0},{0,1,0},1}},5},
+        {{{0,{90,0,500},{90,0,0},{0,1,0},1}},2}};
+    CameraPathCursor cursor;
+    REQUIRE (advanceNativeCameraPath (paths,cursor,6)->eye.x == 10);
+    REQUIRE (cursor.sample == 0); // Before-first boundary is 2+4, strict.
+    REQUIRE (advanceNativeCameraPath (paths,cursor,.25f));
+    REQUIRE (cursor.sample == 1);
+    REQUIRE (advanceNativeCameraPath (paths,cursor,0)->eye.x == 30);
+    REQUIRE (cursor.path == 1);
+    REQUIRE (cursor.time == 0);
+    REQUIRE (advanceNativeCameraPath (paths,cursor,2)->eye.x == 90);
+    REQUIRE (cursor.path == 1);
+    REQUIRE (advanceNativeCameraPath (paths,cursor,.25f)->eye.x == 90);
+    REQUIRE (cursor.path == 0);
+    REQUIRE (cursor.time == 0);
+    REQUIRE_FALSE (advanceNativeCameraPath ({},cursor,1));
+    REQUIRE_FALSE (advanceNativeCameraPath ({CameraPath {}},cursor,1));
+}
+
+TEST_CASE ("Root path parser preserves authored index timestamps and replaces each resource list",
+           "[scene][camera-path][parser]") {
+    using WallpaperEngine::Assets::AssetLocator;
+    using WallpaperEngine::Data::JSON::JSON;
+    using namespace WallpaperEngine::Data::Model;
+    using WallpaperEngine::Data::Parsers::WallpaperParser;
+    using WallpaperEngine::FileSystem::Container;
+    auto files=std::make_unique<Container> ();
+    const auto scene=[] (JSON paths) {
+        return JSON {{"camera",{{"eye","0 0 500"},{"center","0 0 0"},{"up","0 1 0"},{"paths",paths}}},
+                     {"general",JSON::object ()},{"objects",JSON::array ()}}.dump ();
+    };
+    files->getVFS ().add ("scene.json",scene (JSON::array ({"first.json","last.json"})));
+    files->getVFS ().add ("cleared.json",scene (JSON::array ({"last.json",7})));
+    files->getVFS ().add ("first.json",R"({"paths":[{"duration":10,"transforms":[{"eye":"999 0 0"}]}]})");
+    files->getVFS ().add ("last.json",R"({"paths":[
+      {"disabled":true,"duration":10,"transforms":[{}]},
+      {"duration":8,"transforms":[{"disabled":true},
+       {"eye":"10 20 30","center":"4 5 6","up":"0 1 0","timestamp":true},
+       {"eye":"40 50 60","zoom":false,"timestamp":3}]},
+      {"transforms":[]},{"duration":100,"transforms":[{}]}]})");
+    Project project {};project.type=Project::Type_Scene;
+    project.assetLocator=std::make_unique<AssetLocator> (std::move (files));
+    const auto parsed=WallpaperParser::parse (JSON ("scene.json"),project);
+    const auto& config=parsed->as<Scene> ()->camera.configuration;
+    REQUIRE (config.hasPaths);
+    REQUIRE (config.paths.size ()==1);
+    REQUIRE (config.paths[0].duration==8);
+    REQUIRE (config.paths[0].samples.size ()==2);
+    const auto& first=config.paths[0].samples[0];
+    REQUIRE (first.timestamp==4); // Original index1/2, not retained index0.
+    REQUIRE (first.eye==glm::vec3 (10,20,30));
+    REQUIRE (first.center==glm::vec3 (4,5,6));
+    REQUIRE (first.up==glm::vec3 (0,1,0));
+    REQUIRE (first.zoom==1);
+    REQUIRE (config.paths[0].samples[1].timestamp==3); // No timestamp sorting.
+    REQUIRE (config.paths[0].samples[1].zoom==0);
+    const auto cleared=WallpaperParser::parse (JSON ("cleared.json"),project);
+    REQUIRE_FALSE (cleared->as<Scene> ()->camera.configuration.hasPaths);
+    REQUIRE (cleared->as<Scene> ()->camera.configuration.paths.empty ());
+}
+
+TEST_CASE ("Camera property handles mutate native defaults and admit last visible registration",
+           "[scene][camera-path][script]") {
+    using WallpaperEngine::Data::JSON::JSON;
+    using namespace WallpaperEngine::Data::Model;
+    using WallpaperEngine::Data::Parsers::ObjectParser;
+    using WallpaperEngine::Render::Camera;
+    Project project {};
+    ObjectList cameras;
+    cameras.push_back (ObjectParser::parse (JSON::parse (R"({"id":1,"camera":"default","origin":"0 0 500"})"),project));
+    cameras.push_back (ObjectParser::parse (JSON::parse (R"({"id":2,"camera":"default","origin":"60 0 500"})"),project));
+    auto& last=*cameras.back ()->as<SceneCamera> ();
+    const auto bindings=WallpaperEngine::Scripting::scriptPropertyBindings (last);
+    REQUIRE (bindings.size ()==6);
+    REQUIRE (last.fov->value->getFloat ()==50);
+    REQUIRE (last.zoom->value->getFloat ()==1);
+    for (const auto& binding:bindings) {
+        const std::string name=binding.name;
+        if (name=="fov") binding.value.update (65.0f,DynamicValue::Script);
+        if (name=="zoom") binding.value.update (1.25f,DynamicValue::Script);
+        if (name=="visible") binding.value.update (false,DynamicValue::Script);
+    }
+    REQUIRE (last.fov->value->getFloat ()==65);
+    REQUIRE (last.zoom->value->getFloat ()==1.25f);
+    REQUIRE (Camera::selectActiveSceneCamera (cameras)->id==1);
+    cameras[0]->groupVisible->value->update (false,DynamicValue::Script);
+    REQUIRE (Camera::selectActiveSceneCamera (cameras)==nullptr);
+    last.groupVisible->value->update (true,DynamicValue::Script);
+    REQUIRE (Camera::selectActiveSceneCamera (cameras)->id==2);
+    cameras.pop_back ();
+    REQUIRE (Camera::selectActiveSceneCamera (cameras)==nullptr);
+    cameras.push_back (ObjectParser::parse (JSON::parse (R"({"id":3,"camera":"default","origin":"20 0 500"})"),project));
+    REQUIRE (Camera::selectActiveSceneCamera (cameras)->id==3);
+}
+
+TEST_CASE ("Active camera pose consumes full resolved parent world basis",
+           "[scene][camera-path][parent]") {
+    using WallpaperEngine::Render::Camera;
+    const auto parent=glm::translate (glm::mat4 (1),glm::vec3 (10,20,30))
+        *glm::rotate (glm::mat4 (1),.3f,glm::vec3 (0,0,1))
+        *glm::scale (glm::mat4 (1),glm::vec3 (2,3,4));
+    const auto local=glm::translate (glm::mat4 (1),glm::vec3 (5,-7,10))
+        *glm::rotate (glm::mat4 (1),.2f,glm::vec3 (1,0,0));
+    const auto world=parent*local;
+    const auto pose=Camera::poseForWorldCamera (world);
+    REQUIRE (pose.eye==glm::vec3 (world*glm::vec4 (0,0,0,1)));
+    REQUIRE (pose.center==glm::vec3 (world*glm::vec4 (0,0,-1,1)));
+    REQUIRE (pose.up==glm::vec3 (world*glm::vec4 (0,1,0,0)));
+    REQUIRE (pose.eye!=glm::vec3 (5,-7,10));
 }

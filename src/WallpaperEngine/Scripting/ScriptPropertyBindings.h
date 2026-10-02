@@ -45,6 +45,15 @@ inline auto scriptPropertyBindings (const Particle& particle) {
     }};
 }
 
+inline auto scriptPropertyBindings (const WallpaperEngine::Data::Model::SceneCamera& camera) {
+    // Native 1f3460 registers camera controls alongside base layer transforms.
+    return std::array<ScriptPropertyBinding, 6> {{
+        {"origin", *camera.origin->value}, {"scale", *camera.groupScale->value},
+        {"angles", *camera.groupAngles->value}, {"visible", *camera.groupVisible->value},
+        {"fov", *camera.fov->value}, {"zoom", *camera.zoom->value},
+    }};
+}
+
 inline auto scriptPropertyBindings (const ScenePointLight& light) {
     return std::array<ScriptPropertyBinding, 8> {{
         {"origin", *light.origin->value}, {"scale", *light.groupScale->value},

@@ -47,8 +47,13 @@ class CTransformObject final : public Scripting::ScriptableObject {
 public:
     CTransformObject (CScene& scene, const Object& object) :
         CObject (scene, object), ScriptableObject (scene, object) {
-        for (const auto& binding : Scripting::scriptPropertyBindings (object))
-            registerProperty (binding.name, binding.value);
+        if (object.is<SceneCamera> ()) {
+            for (const auto& binding : Scripting::scriptPropertyBindings (*object.as<SceneCamera> ()))
+                registerProperty (binding.name, binding.value);
+        } else {
+            for (const auto& binding : Scripting::scriptPropertyBindings (object))
+                registerProperty (binding.name, binding.value);
+        }
     }
 };
 
@@ -185,6 +190,11 @@ CScene::CScene (
 	this->addObjectToRenderOrder (*object);
     }
 
+    // Camera priority follows native registration order, independently of
+    // render sorting and dependency expansion.
+    for (const auto& object : scene->objects)
+        if (object->is<SceneCamera> () && m_objects.contains (object->id))
+            m_sceneCameraObjects.push_back (object->as<SceneCamera> ());
     refreshAutomaticProjection ();
     const uint32_t sceneWidth = getWidth ();
     const uint32_t sceneHeight = getHeight ();
@@ -364,8 +374,8 @@ Render::CObject* CScene::dispatchObjectType (const Object& object) {
 	} else if (object.is<SceneModel> ()) {
 	    renderObject = new Objects::CModel (*this, *object.as<SceneModel> ());
 	} else if (object.is<SceneCamera> ()) {
-	    // The camera participates in scene selection but has no draw call.
-	    renderObject = new CObject (*this, object);
+            // Logical cameras expose transform/property handles without drawing.
+            renderObject = new CTransformObject (*this, object);
         } else if (object.is<SceneSpotLight> ()) {
             renderObject = new CSpotLight (*this, *object.as<SceneSpotLight> ());
 	} else if (object.is<ScenePointLight> ()) {
@@ -510,6 +520,9 @@ void CScene::renderFrame (const glm::ivec4& viewport) {
     for (const auto& object : m_objectsByRenderOrder)
         if (object->is<Objects::CParticle> ())
             object->as<Objects::CParticle> ()->advanceFrame ();
+    // Native camera admission/path evaluation follows ALL object outer ticks
+    // and precedes first-image reset, cursor dispatch and SceneScript.
+    m_camera->advanceFrame (getDeltaTime (), m_sceneCameraObjects);
     // Native 1401891a0 resets the first image after object ticks, before scripts.
     refreshAutomaticProjection ();
     if (getScene ().camera.projection.isAuto && viewport.z > 1 && viewport.w > 1)
@@ -1091,7 +1104,7 @@ CObject* CScene::createScriptLayer (const std::string& configurationJson,
     if (config.contains ("size") && config.contains ("color")
         && !config.contains ("image") && !config.contains ("text")
         && !config.contains ("particle") && !config.contains ("sound")
-        && !config.contains ("model") && !config.contains ("light"))
+        && !config.contains ("model") && !config.contains ("light") && !config.contains ("camera"))
         config["image"] = "models/util/solidlayer.json";
     if (m_nextScriptObjectId <= 0) throw std::overflow_error ("SceneScript layer IDs exhausted");
     while (findObjectData (m_nextScriptObjectId) || m_objects.contains (m_nextScriptObjectId)
@@ -1112,7 +1125,7 @@ CObject* CScene::createScriptLayer (const std::string& configurationJson,
     if (!model || (!model->is<Text> () && !model->is<Image> ()
                    && !model->is<Particle> () && !model->is<Sound> ()
                    && !model->is<ScenePointLight> () && !model->is<SceneSpotLight> ()
-                   && !model->is<SceneModel> ()))
+                   && !model->is<SceneModel> () && !model->is<SceneCamera> ()))
         throw std::invalid_argument ("Unsupported SceneScript layer configuration");
     // Destroy hooks run while their layers are still addressable. A new child
     // attached to one of those layers would outlive the parent after flush.
@@ -1144,6 +1157,8 @@ CObject* CScene::createScriptLayer (const std::string& configurationJson,
     }
     if (inserted.first->second->is<SceneSpotLight> ())
         m_spotLightObjects.push_back (inserted.first->second->as<SceneSpotLight> ());
+    if (inserted.first->second->is<SceneCamera> ())
+        m_sceneCameraObjects.push_back (inserted.first->second->as<SceneCamera> ());
     m_objectsByRenderOrder.push_back (result);
     return result;
 }
@@ -1183,6 +1198,11 @@ void CScene::flushDestroyedScriptLayers () {
                 m_scriptEngine->destroyObjectModules (*scriptable);
         std::erase_if (m_objectsByRenderOrder, [&] (const CObject* object) {
             return ids.contains (object->getId ());
+        });
+        std::erase_if (m_sceneCameraObjects, [&] (const SceneCamera* camera) {
+            if (!ids.contains (camera->id)) return false;
+            m_camera->forgetCamera (*camera);
+            return true;
         });
         for (auto* object : removed) {
             const int id = object->getId ();
