@@ -525,6 +525,17 @@ public:
     UserSettingUniquePtr gravity;
 };
 
+class BoidsOperator : public ParticleOperatorBase {
+public:
+    float separationThreshold {20};
+    float neighborThreshold {50};
+    float maxSpeed {500};
+    float separationFactor {15};
+    float alignmentFactor {1};
+    float cohesionFactor {2};
+    uint32_t flags {1};
+};
+
 class CollisionOperator : public ParticleOperatorBase {
 public:
     enum class Kind { Plane, Sphere, Box, Bounds, Quad };
