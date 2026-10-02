@@ -137,10 +137,11 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/output)
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/lib)
 set(TARGET_OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/output)
 
-# RPATH configuration: use build directories during development, but $ORIGIN after installation
-# NOTE: \$ORIGIN must be escaped because CMake treats $VAR as variable expansion.
+# CEF resolves ICU and other resources beside the loaded libcef.so. Prefer the
+# packaged output directory over the SDK's link directory in build trees too.
 # IMPORTANT: This must be set BEFORE any add_executable()/add_library() calls in this directory.
 set(CMAKE_BUILD_WITH_INSTALL_RPATH FALSE)
+set(CMAKE_BUILD_RPATH "\$ORIGIN;\$ORIGIN/lib;\$ORIGIN/lib64")
 set(CMAKE_INSTALL_RPATH "\$ORIGIN;\$ORIGIN/lib;\$ORIGIN/lib64")
 set(CMAKE_INSTALL_RPATH_USE_LINK_PATH FALSE)
 
@@ -761,6 +762,15 @@ add_executable(linux-wallpaperengine
     src/main.cpp)
 
 target_link_libraries (linux-wallpaperengine PUBLIC linux-wallpaperengine-lib)
+
+if(BUILD_TESTING)
+    enable_testing()
+    add_test(NAME cef-packaged-runtime
+        COMMAND ${CMAKE_COMMAND}
+            -DAPPLICATION=$<TARGET_FILE:linux-wallpaperengine>
+            -DAPPLICATION_LIBRARY=$<TARGET_FILE:linux-wallpaperengine-lib>
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/CMakeModules/VerifyCEFRuntime.cmake)
+endif()
 
 # Install the main executable and shared library via install(TARGETS)
 # so that CMake automatically strips/replaces the build-time RPATH.
