@@ -1580,3 +1580,61 @@ TEST_CASE ("A real transparent feedback resource preserves native null SRV alpha
     glDeleteShader (vertex);glDeleteShader (fragment);
     REQUIRE (glGetError () == GL_NO_ERROR);
 }
+
+TEST_CASE ("Effect conditions use numeric instance combos and native conjunctive comparisons", "[render][effect-conditions]") {
+    using WallpaperEngine::Data::JSON::parseAuthoringJson;
+    using WallpaperEngine::Data::Model::effectConditionsMatch;
+    const auto parse = [] (const char* source) {return parseAuthoringJson (source, "native condition fixture");};
+    const auto combos = EffectParser::parseConditionCombos (parse (R"({"N":2.9,"B":true,"S":"2","U":4294967295})"));
+    REQUIRE (combos.at ("N") == 2);
+    REQUIRE (combos.at ("B") == 0);
+    REQUIRE (combos.at ("S") == 0);
+    REQUIRE (combos.at ("U") == -1);
+    const auto matches = [&] (const char* source) {return effectConditionsMatch (EffectParser::parseConditions (parse (source)), combos);};
+    REQUIRE (matches (R"([{"N":2,"MISSING":0},{"B":0,"S":0}])"));
+    REQUIRE_FALSE (matches (R"([{"N":2},{"MISSING":1}])"));
+    REQUIRE_FALSE (matches (R"([{"N":1},{"N":2}])")); // AND, not alternatives.
+    REQUIRE (matches (R"([{"N":{"value":2,"op":"ge"}},{"N":{"value":3,"op":"lt"}}])"));
+    REQUIRE (matches (R"([{"N":{"value":1,"op":"gt"}},{"N":{"value":2,"op":"le"}}])"));
+    REQUIRE_FALSE (matches (R"([{"N":{"value":2,"op":"gt"}}])"));
+    REQUIRE_FALSE (matches (R"([{"N":{"value":2,"op":"lt"}}])"));
+    REQUIRE (matches (R"([{"N":{"value":2.9,"op":"unknown"}}])"));
+    REQUIRE (matches (R"([false,4,null,"ignored",{"N":true,"MISSING":"ignored"}])"));
+    REQUIRE (matches (R"({"N":1})")); // Native ignores nonarray conditions.
+    REQUIRE (matches (R"([{"B":{"value":true}}])")); // Nonnumeric expected value reads zero.
+    REQUIRE (EffectParser::parseConditionCombos (parse (R"({"N":2147483648.0})")).at ("N")
+        == std::numeric_limits<int32_t>::min ());
+}
+
+TEST_CASE ("Conditional effect loading omits inactive resources while preserving authored override ordinals", "[render][effect-conditions]") {
+    using WallpaperEngine::Data::JSON::parseAuthoringJson;
+    Project project {};
+    const auto source = parseAuthoringJson (R"({"passes":[
+        {"material":"missing-disabled-material.json","conditions":[{"LIGHTING":1}]},
+        {"command":"copy","source":"previous","target":"base","bind":[
+            {"index":0,"name":"normal","conditions":[{"LIGHTING":1}]},
+            {"index":1,"name":"base"}],"compose":true},
+        {"command":"swap","source":"base","target":"normal","conditions":[{"LIGHTING":1}]}
+    ],"fbos":[{"name":"base"},{"name":"normal","conditions":[{"LIGHTING":1}]}]})", "conditional graph");
+    const auto inactive = EffectParser::parse (source, project);
+    REQUIRE (inactive->fbos.size () == 1);
+    REQUIRE (inactive->passes.size () == 1);
+    REQUIRE (inactive->passes[0]->authoredIndex == 1);
+    REQUIRE (inactive->passes[0]->binds == WallpaperEngine::Data::Model::TextureMap {{1,"base"}});
+    REQUIRE (inactive->passes[0]->compose);
+    // The disabled material is never loaded. A different effect instance can
+    // enable resources without changing the first instance's admitted graph.
+    auto enabledSource = source;
+    enabledSource["passes"][0].erase ("material");
+    enabledSource["passes"][0]["command"] = "copy";
+    enabledSource["passes"][0]["source"] = "previous";
+    enabledSource["passes"][0]["target"] = "normal";
+    const auto enabled = EffectParser::parse (enabledSource, project, {{"LIGHTING",1}});
+    REQUIRE (enabled->fbos.size () == 2);
+    REQUIRE (enabled->passes.size () == 3);
+    REQUIRE (enabled->passes[0]->authoredIndex == 0);
+    REQUIRE (enabled->passes[1]->authoredIndex == 1);
+    REQUIRE (enabled->passes[1]->binds.size () == 2);
+    REQUIRE (inactive->fbos.size () == 1);
+    REQUIRE (inactive->passes[0]->binds.size () == 1);
+}
