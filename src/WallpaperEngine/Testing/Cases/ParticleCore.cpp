@@ -2773,6 +2773,95 @@ TEST_CASE ("Image emitter retains alpha-threshold pixels in X-major order", "[pa
     REQUIRE (rejected () == 3890346734u);
 }
 
+TEST_CASE ("Image source velocity uses the last ready attempt and current scene delta",
+           "[particle][imageemitter][source-velocity]") {
+    ImageEmitterSourceHistory history;
+    const glm::vec3 pixel (4, -6, 2);
+    REQUIRE (imageEmitterPoint (history.previousWorld, pixel) == pixel);
+    glm::mat4 source = glm::translate (glm::mat4 (1), glm::vec3 (150, 80, 0));
+    source = glm::rotate (source, 0.3f, glm::vec3 (0, 0, 1));
+    source = glm::scale (source, glm::vec3 (1.2f, 0.8f, 1));
+    const auto first = imageEmitterPoint (source, pixel);
+    REQUIRE (first.x == Catch::Approx (156.0041127f));
+    REQUIRE (first.y == Catch::Approx (76.8328819f));
+    // Native allocation starts from identity, so the first ready attempt has
+    // a real velocity. A cold-cache attempt must not consume this history.
+    const auto initialVelocity = imageEmitterSourceVelocity (first, pixel, 1.0f / 30, 0.1f);
+    REQUIRE (initialVelocity.x > 450);
+    history.previousWorld = source;
+    auto moved = source;
+    moved[3].x += 30;
+    const auto current = imageEmitterPoint (moved, pixel);
+    const auto movedVelocity = imageEmitterSourceVelocity (current, first, 1.0f / 30, 0.1f);
+    REQUIRE (movedVelocity.x == Catch::Approx (90));
+    REQUIRE (movedVelocity.y == 0);
+    REQUIRE (movedVelocity.z == 0);
+    // Scheduling is reconstructed on reset; source history is separate and
+    // remains the last attempted source, even across a long emission gap.
+    EmitterScheduleConfig schedule;
+    schedule.instantaneous = 1;
+    auto state = initialState (schedule);
+    state.fractional = 0.75f;
+    state.instantaneousRemaining = 0;
+    state = initialState (schedule);
+    REQUIRE (state.fractional == 0);
+    REQUIRE (state.instantaneousRemaining == 1);
+    REQUIRE (imageEmitterPoint (history.previousWorld, pixel) == first);
+    REQUIRE (imageEmitterSourceVelocity (current, first, 0.1f, 0.1f)
+             == glm::vec3 (30, 0, 0));
+    history.previousWorld = moved;
+    REQUIRE (imageEmitterSourceVelocity (current,
+        imageEmitterPoint (history.previousWorld, pixel), 1.0f / 30, 0.1f) == glm::vec3 (0));
+    // Division-before-multiplication is observable with noninteger speed;
+    // replacing it with a speed/delta factor changes rounding.
+    const float delta = 0.07f, speed = 0.3f;
+    REQUIRE (std::bit_cast<uint32_t> (imageEmitterSourceVelocity (
+        {2.1f, 0, 0}, {0.3f, 0, 0}, delta, speed).x) == 0x40f6db6eu);
+    REQUIRE (std::bit_cast<uint32_t> ((2.1f - 0.3f) * (speed / delta)) == 0x40f6db6fu);
+}
+
+TEST_CASE ("Image emitter uses invocation stack and centers only world births",
+           "[particle][imageemitter][source-velocity]") {
+    const glm::vec2 canvas (768, 432);
+    const glm::mat4 flip = glm::scale (glm::mat4 (1), glm::vec3 (1, -1, 1));
+    auto parent = glm::translate (glm::mat4 (1), glm::vec3 (100, 150, 3));
+    parent = glm::rotate (parent, -0.2f, glm::vec3 (0, 0, 1));
+    parent = glm::scale (parent, glm::vec3 (0.8f, 1.1f, 1));
+    // Include a child transform so inversion cannot be replaced by only the
+    // particle's authored matrix. Nonuniform parent scale produces shear.
+    auto child = glm::rotate (glm::mat4 (1), 0.4f, glm::vec3 (0, 0, 1));
+    child = glm::translate (child, glm::vec3 (11, 7, 2));
+    const glm::mat4 stack = parent * child;
+    const glm::mat4 simulation = glm::translate (glm::mat4 (1), glm::vec3 (-384, 216, 0))
+        * flip * stack * flip;
+    const glm::vec3 localPoint (4, -6, 2);
+    const auto sourcePoint = imageEmitterPoint (stack, localPoint);
+    const auto automatic = imageEmitterPoint (imageEmitterInvocationMatrix (
+        simulation, true, canvas, false, false), sourcePoint);
+    REQUIRE (automatic.x == Catch::Approx (localPoint.x).margin (1e-4));
+    REQUIRE (automatic.y == Catch::Approx (localPoint.y).margin (1e-4));
+    REQUIRE (automatic.z == Catch::Approx (localPoint.z).margin (1e-4));
+    const auto forced = imageEmitterPoint (imageEmitterInvocationMatrix (
+        simulation, true, canvas, true, false), sourcePoint);
+    REQUIRE (forced == sourcePoint);
+    // A forced local image birth is drawn through its own stack again. An
+    // automatic local birth instead cancels that stack at emission time.
+    REQUIRE (glm::distance (imageEmitterPoint (stack, forced), sourcePoint) > 100);
+    REQUIRE (imageEmitterSimulationPosition (forced, false, true, canvas)
+             == glm::vec3 (forced.x, -forced.y, forced.z));
+    const auto world = imageEmitterPoint (imageEmitterInvocationMatrix (
+        simulation, true, canvas, false, true), sourcePoint);
+    REQUIRE (world == sourcePoint);
+    REQUIRE (imageEmitterSimulationPosition ({150, 290, 0}, true, true, canvas)
+             == glm::vec3 (-234, -74, 0));
+    REQUIRE (imageEmitterSimulationPosition ({150, 290, 0}, true, false, canvas)
+             == glm::vec3 (150, -290, 0));
+    // Perspective stacks contain only the local storage reflection.
+    const auto perspective = imageEmitterPoint (imageEmitterInvocationMatrix (
+        stack * flip, false, canvas, false, false), sourcePoint);
+    REQUIRE (glm::distance (perspective, localPoint) < 1e-4);
+}
+
 TEST_CASE ("Local control-point angles rotate box axes after Y reflection", "[particle][child][box]") {
     const glm::mat3 basis = localControlPointBasis (
         {0.0f, 0.0f, glm::half_pi<float> ()});
