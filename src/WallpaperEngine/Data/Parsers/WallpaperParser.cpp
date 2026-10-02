@@ -109,10 +109,21 @@ SceneUniquePtr WallpaperParser::parseScene (const JSON& file, Project& project) 
     const auto lightConfig = general.optional ("lightconfig");
     int pointLightSlots = 0;
     int spotLightSlots = 0;
+    int spotShadowSlots = 0, spotCookieSlots = 0, spotShadowCookieSlots = 0;
     if (lightConfig.has_value ()) {
 	if (!lightConfig->is_object ()) throw std::invalid_argument ("Scene lightconfig must be an object");
 	pointLightSlots = lightConfig->optional ("point", 0);
         spotLightSlots = lightConfig->optional ("spot", 0);
+        spotShadowSlots = lightConfig->optional ("spotshadow", 0);
+        spotCookieSlots = lightConfig->optional ("spotcookie", 0);
+        spotShadowCookieSlots = lightConfig->optional ("spotshadowcookie", 0);
+        for (int count : {spotShadowSlots, spotCookieSlots, spotShadowCookieSlots})
+            if (count < 0 || count > 3)
+                throw std::invalid_argument ("Scene spot feature count exceeds its serialized two-bit count");
+        // Feature categories occupy the first slots of the total, rather than
+        // forming additional ordinary spot lights.
+        if (spotShadowSlots + spotCookieSlots + spotShadowCookieSlots > spotLightSlots)
+            throw std::invalid_argument ("Scene spot feature counts exceed the total spot count");
         if (spotLightSlots < 0 || spotLightSlots > 15)
             throw std::invalid_argument ("Scene spot lightconfig exceeds its serialized four-bit count");
 	if (pointLightSlots < 0 || pointLightSlots > 15)
@@ -144,6 +155,9 @@ SceneUniquePtr WallpaperParser::parseScene (const JSON& file, Project& project) 
         }, SceneData {
             .pointLightSlots = pointLightSlots,
             .spotLightSlots = spotLightSlots,
+            .spotShadowSlots = spotShadowSlots,
+            .spotCookieSlots = spotCookieSlots,
+            .spotShadowCookieSlots = spotShadowCookieSlots,
             .clearEnabled = clearGeneral.user ("clearenabled", properties, false),
             .colors = {
                 .ambient  = general.user ("ambientcolor", properties, glm::vec3 (0.0f)),

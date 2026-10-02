@@ -9,6 +9,13 @@
 #include <memory>
 #include <vector>
 
+namespace WallpaperEngine::Render {
+class DepthTarget;
+}
+namespace WallpaperEngine::Render::Wallpapers {
+struct ShadowAtlasTile;
+}
+
 namespace WallpaperEngine::Render::Objects {
 
 /** Draws a scene MDLV resource with its per-mesh authored materials. */
@@ -19,6 +26,9 @@ public:
 
     void setup () override;
     void render () override;
+    /** Draw this model's casters into one spot-light atlas tile (native shadow stage 2). */
+    void renderShadowCaster (const DepthTarget& atlas, const Wallpapers::ShadowAtlasTile& tile,
+                             const glm::mat4& viewProjection);
     /** Refresh material structure before rebuilding the secondary draw list. */
     [[nodiscard]] bool requiresSceneReflection ();
     [[nodiscard]] std::vector<ParticleCore::CollisionCapsule> collisionCapsules (
@@ -28,6 +38,7 @@ private:
     void rebuildDynamic ();
     void updateDynamic ();
     [[nodiscard]] glm::mat4 authoredWorld () const;
+    [[nodiscard]] bool castsShadow () const;
     struct MeshDraw;
     const Data::Model::SceneModel& m_model;
     std::vector<Data::Model::MaterialUniquePtr> m_materials;
@@ -36,6 +47,7 @@ private:
     uint64_t m_dynamicStructureRevision = 0;
     glm::mat4 m_world {1.0f};
     glm::vec3 m_eyePosition {0.0f};
+    glm::mat4 m_shadowWorld {1.0f};
     glm::mat4 m_viewProjection {1.0f};
     glm::mat4 m_mvp {1.0f};
     glm::mat4 m_mvpInverse {1.0f};

@@ -54,6 +54,9 @@ struct SceneData {
     /** Serialized native point-light shader slots; object count may differ. */
     int pointLightSlots = 0;
     int spotLightSlots = 0;
+    int spotShadowSlots = 0;
+    int spotCookieSlots = 0;
+    int spotShadowCookieSlots = 0;
     /** Context bit5 initially false; controls color and depth clear for scene stages. */
     UserSettingUniquePtr clearEnabled;
     struct {

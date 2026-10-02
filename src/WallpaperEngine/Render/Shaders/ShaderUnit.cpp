@@ -7,11 +7,13 @@
 #include <cstdint>
 #include <cmath>
 #include <functional>
+#include <map>
 #include <regex>
 #include <stack>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -54,6 +56,8 @@
 	  "#define int3 ivec3\n"                                                                                       \
 	  "#define int4 ivec4\n"                                                                                       \
 	  "#define saturate(x) (clamp(x, 0.0, 1.0))\n"                                                                 \
+	  "#define sampler2DComparison sampler2DShadow\n"                                                           \
+	  "#define texSample2DCompare(s, uv, ref) vec4(texture(s, vec3(uv, ref)))\n"                               \
 	  "#define texSample2D texture\n"                                                                              \
 	  "#define texSample2DLod textureLod\n"                                                                        \
 	  "#define log10(x) (log2(x) * 0.301029995663981)\n"                                                           \
@@ -317,6 +321,8 @@ void ShaderUnit::preprocessIncludes () {
     const auto firstFunctionLine = [](const std::string& source) {
         struct Token { std::string text; size_t start; bool identifier; };
         std::vector<Token> tokens;
+        // A generated #require module is a function definition at its directive.
+        size_t requireLine = std::string::npos;
         bool blockComment = false;
         bool lineComment = false;
         bool lineStart = true;
@@ -329,6 +335,11 @@ void ShaderUnit::preprocessIncludes () {
             } else if (source.compare (i, 2, "//") == 0) { lineComment = true; i += 2; }
             else if (source.compare (i, 2, "/*") == 0) { blockComment = true; i += 2; }
             else if (source[i] == '#' && lineStart) {
+                if (source.compare (i, 8, "#require") == 0) {
+                    const size_t previous = i == 0 ? std::string::npos : source.rfind ('\n', i - 1);
+                    requireLine = previous == std::string::npos ? size_t (0) : previous + 1;
+                    break;
+                }
                 const size_t end = source.find ('\n', i);
                 i = end == std::string::npos ? source.size () : end;
             }
@@ -360,7 +371,7 @@ void ShaderUnit::preprocessIncludes () {
                 return previous == std::string::npos ? size_t (0) : previous + 1;
             }
         }
-        return std::string::npos;
+        return requireLine;
     };
     std::function<std::string(const std::string&, bool)> expand = [&](const std::string& source, bool root) {
         std::string result;
@@ -539,6 +550,18 @@ std::string ShaderUnit::generateLightingV1 () const {
         : spotAuthored != m_combos.end () ? spotAuthored->second : 0;
     if (spotCount < 0 || spotCount > 15)
         throw std::invalid_argument ("LightingV1 spot-light count exceeds native four-bit lightconfig range");
+    const auto count = [this] (const char* key) {
+        const auto override = m_overrideCombos.find (key), authored = m_combos.find (key);
+        return override != m_overrideCombos.end () ? override->second
+            : authored != m_combos.end () ? authored->second : 0;
+    };
+    const int bothCount = count ("LIGHTS_SPOT_SHADOW_COOKIE");
+    const int cookieCount = count ("LIGHTS_SPOT_COOKIE");
+    const int shadowCount = count ("LIGHTS_SPOT_SHADOW");
+    const int featureCount = bothCount + cookieCount + shadowCount;
+    for (int value : {bothCount, cookieCount, shadowCount})
+        if (value < 0 || value > 3) throw std::invalid_argument ("LightingV1 spot feature count exceeds native range");
+    if (featureCount > spotCount) throw std::invalid_argument ("LightingV1 features exceed total spot count");
     // Native generates this module from the light-count combo. Its
     // unshadowed point branch calls the shipped common_pbr_2.h helper with
     // the scene's premultiplied color/radius and world origin/exponent arrays.
@@ -550,6 +573,9 @@ std::string ShaderUnit::generateLightingV1 () const {
         for (const char* name : {"Color", "Origin", "Direction", "Exponent"})
             result += std::string ("uniform vec4 g_LSpot_") + name
                 + "[" + std::to_string (spotCount) + "];\n";
+    if (featureCount > 0)
+        result += "uniform mat4 g_LFeature_ShadowProjection[" + std::to_string (featureCount) + "];\n"
+                  "uniform vec4 g_LFeature_ShadowProjectionTransform[" + std::to_string (featureCount) + "];\n";
     result += "vec3 PerformLighting_V1(vec3 worldPos, vec3 color, vec3 normal, vec3 viewVector,\n"
               "    vec3 specularTint, vec3 ambient, float roughness, float metallic)\n"
               "{\n    vec3 light = CAST3(0.0);\n";
@@ -560,15 +586,27 @@ std::string ShaderUnit::generateLightingV1 () const {
                   "g_LPoint_Color[i].rgb, g_LPoint_Color[i].w, g_LPoint_Origin[i].w, "
                   "specularTint, ambient, roughness, metallic, 1.0); }\n";
     }
-    // Native plain unshadowed cone branch, separate from cookies.
+    // Native emits leading feature categories in the order both,
+    // cookie, shadow, then the remaining ordinary cone lights.
     for (int index = 0; index < spotCount; ++index) {
+        const bool cookie = index < bothCount + cookieCount;
+        const bool shadow = index < bothCount ||
+            (index >= bothCount + cookieCount && index < featureCount);
         result += "    { const uint i = " + std::to_string (index) + "u;\n"
-                  "      vec3 lightDelta = g_LSpot_Origin[i].xyz - worldPos;\n"
-                  "      float spotCookie = -dot(normalize(lightDelta), g_LSpot_Direction[i].xyz);\n"
-                  "      spotCookie = smoothstep(g_LSpot_Direction[i].w, g_LSpot_Origin[i].w, spotCookie);\n"
-                  "      light += ComputePBRLightShadow(normal, lightDelta, viewVector, color, "
-                  "g_LSpot_Color[i].rgb * spotCookie, g_LSpot_Color[i].w, g_LSpot_Exponent[i].x, "
-                  "specularTint, ambient, roughness, metallic, 1.0); }\n";
+                  "      vec3 lightDelta = g_LSpot_Origin[i].xyz - worldPos;\n";
+        if (!cookie)
+            result += "      float spotCookie = -dot(normalize(lightDelta), g_LSpot_Direction[i].xyz);\n"
+                      "      spotCookie = smoothstep(g_LSpot_Direction[i].w, g_LSpot_Origin[i].w, spotCookie);\n";
+        if (index < featureCount)
+            result += "      vec3 projectedCoords = CalculateProjectedCoords(worldPos, g_LFeature_ShadowProjection[i]);\n";
+        if (shadow)
+            result += "      float shadowFactor = PerformShadowMapping(projectedCoords, g_LFeature_ShadowProjectionTransform[i]);\n";
+        if (cookie)
+            result += "      vec3 colorCookie = texSample2D(COOKIE_SAMPLER, projectedCoords.xy).rgb;\n";
+        result += "      light += ComputePBRLightShadow(normal, lightDelta, viewVector, color, "
+                  "g_LSpot_Color[i].rgb * " + std::string (cookie ? "colorCookie" : "spotCookie") +
+                  ", g_LSpot_Color[i].w, g_LSpot_Exponent[i].x, specularTint, ambient, roughness, metallic, "
+                  + std::string (shadow ? "shadowFactor" : "1.0") + "); }\n";
     }
     result += "    return light;\n}\n#else\n"
               "vec3 PerformLighting_V1(vec3 worldPos, vec3 color, vec3 normal, vec3 viewVector,\n"
@@ -964,6 +1002,75 @@ std::string ShaderUnit::applyFragmentTexCoordCompatibility (std::string source) 
     return rewritten;
 }
 
+std::string ShaderUnit::applyBuiltinDeclarationLowering (std::string source) const {
+    if (m_type != GLSLContext::UnitType_Vertex) return source;
+    // Conditional declarations (for example `#if HLSL`) belong to another
+    // backend; only unconditional global declarations are active here.
+    std::vector<std::pair<size_t, int>> lineDepths;
+    int conditionalDepth = 0;
+    for (size_t start = 0; start < source.size ();) {
+        const size_t newline = source.find ('\n', start);
+        const size_t end = newline == std::string::npos ? source.size () : newline;
+        const size_t first = source.find_first_not_of (" \t\r", start);
+        lineDepths.emplace_back (start, conditionalDepth);
+        if (first != std::string::npos && first < end && source[first] == '#') {
+            const auto directive = source.substr (first, std::min<size_t> (end - first, 7));
+            if (directive.starts_with ("#if")) lineDepths.back ().second = ++conditionalDepth;
+            else if (directive.starts_with ("#endif") && conditionalDepth > 0) --conditionalDepth;
+        }
+        start = end + 1;
+    }
+    const auto depthAt = [&lineDepths] (size_t position) {
+        const auto line = std::upper_bound (lineDepths.begin (), lineDepths.end (), position,
+            [] (size_t value, const auto& entry) { return value < entry.first; });
+        return line == lineDepths.begin () ? 0 : std::prev (line)->second;
+    };
+    const auto tokens = shaderTokens (source);
+    struct Lowered { std::string type; bool output; };
+    std::map<std::string, Lowered> lowered;
+    std::vector<std::pair<size_t, size_t>> declarations;
+    int braces = 0;
+    for (size_t i = 0; i < tokens.size (); ++i) {
+        if (tokens[i].text == "{") ++braces;
+        else if (tokens[i].text == "}") --braces;
+        if (braces != 0 || i + 3 >= tokens.size () || !tokens[i + 2].text.starts_with ("gl_")
+            || !tokens[i + 1].identifier || tokens[i + 3].text != ";" || depthAt (tokens[i].start) != 0)
+            continue;
+        const auto& qualifier = tokens[i].text;
+        if (qualifier != "in" && qualifier != "out" && qualifier != "varying" && qualifier != "attribute")
+            continue;
+        if (i > 0 && tokens[i - 1].text != ";" && tokens[i - 1].text != "}") continue;
+        const auto& name = tokens[i + 2].text;
+        // HLSL system values: vertex/instance inputs map to the GLSL builtins;
+        // the viewport index output is not a GLSL 330 vertex builtin.
+        const bool output = qualifier == "out" || qualifier == "varying";
+        if (output ? name != "gl_ViewportIndex" : name != "gl_InstanceID" && name != "gl_VertexID") continue;
+        lowered[name] = {tokens[i + 1].text, output};
+        declarations.emplace_back (tokens[i].start, tokens[i + 3].end);
+    }
+    if (declarations.empty ()) return source;
+    std::vector<std::tuple<size_t, size_t, std::string>> edits;
+    for (const auto& [start, end] : declarations) {
+        const auto name = std::ranges::find_if (tokens, [start] (const auto& token) { return token.start == start; });
+        const auto declared = lowered.find ((name + 2)->text);
+        edits.emplace_back (start, end, declared != lowered.end () && declared->second.output
+            ? declared->second.type + " _wpe_" + declared->first + ";" : std::string ());
+    }
+    for (const auto& token : tokens) {
+        const auto found = lowered.find (token.text);
+        if (found == lowered.end ()) continue;
+        if (std::ranges::any_of (declarations, [&token] (const auto& declaration) {
+                return token.start >= declaration.first && token.end <= declaration.second; }))
+            continue;
+        edits.emplace_back (token.start, token.end, found->second.output
+            ? "_wpe_" + found->first : found->second.type + "(" + found->first + ")");
+    }
+    std::ranges::sort (edits, [] (const auto& left, const auto& right) { return std::get<0> (left) > std::get<0> (right); });
+    for (const auto& [start, end, replacement] : edits) source.replace (start, end - start, replacement);
+    sLog.debug ("Lowered builtin declarations in ", this->m_file);
+    return source;
+}
+
 void ShaderUnit::parseComboConfiguration (const std::string& content, const int defaultValue) {
     // Native stores only combo/default for runtime compilation.
     // Authored `require` controls editor visibility; it must not gate an
@@ -1311,6 +1418,7 @@ const std::string& ShaderUnit::compile () {
     shaderSource = this->applyFragmentTexCoordCompatibility (std::move (shaderSource));
     shaderSource = this->applyVertexPointerUVCompatibility (std::move (shaderSource));
     shaderSource = this->applySampledLocalConstCompatibility (std::move (shaderSource));
+    shaderSource = this->applyBuiltinDeclarationLowering (std::move (shaderSource));
     this->m_final += shaderSource;
 
     // the pass itself handles shader compilation, the unit doesn't have enough information for this step

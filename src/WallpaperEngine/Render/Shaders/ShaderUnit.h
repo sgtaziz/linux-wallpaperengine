@@ -116,6 +116,12 @@ private:
     [[nodiscard]] std::string applySampledLocalConstCompatibility (std::string source) const;
     /** Select the two pointer UV lanes used by an authored vec2 iris offset. */
     [[nodiscard]] std::string applyVertexPointerUVCompatibility (std::string source) const;
+    /**
+     * Lower unconditional HLSL-style vertex system-value declarations of gl_InstanceID,
+     * gl_VertexID and gl_ViewportIndex to the GLSL 330 builtins. The backend draws one
+     * viewport at a time, so the viewport-index output becomes a private value.
+     */
+    [[nodiscard]] std::string applyBuiltinDeclarationLowering (std::string source) const;
 
     /**
      * Parses a COMBO value to add the proper define to the code

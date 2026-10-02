@@ -35,6 +35,12 @@ public:
     void render ();
 
     void setDestination (std::shared_ptr<const CFBO> drawTo);
+    /** A depth-only shadow-atlas tile; replaces the color destination when set. */
+    struct DepthDestination {
+        GLuint framebuffer;
+        glm::ivec4 viewport;
+    };
+    void setDepthDestination (std::optional<DepthDestination> destination);
     void setInput (std::shared_ptr<const TextureProvider> input);
     void setTexture0Override (std::shared_ptr<const TextureProvider> texture);
     void setTextureFrameOverride (std::optional<uint32_t> frame);
@@ -49,6 +55,8 @@ public:
     void setBlendingMode (BlendingMode blendingmode);
     [[nodiscard]] BlendingMode getBlendingMode () const;
     [[nodiscard]] std::shared_ptr<const CFBO> resolveFBO (const std::string& name) const;
+    /** Scene light resources first, then render targets. */
+    [[nodiscard]] std::shared_ptr<const TextureProvider> resolveResource (const std::string& name) const;
 
     [[nodiscard]] std::shared_ptr<const FBOProvider> getFBOProvider () const;
     [[nodiscard]] const CRenderable& getRenderable () const;
@@ -176,6 +184,8 @@ private:
     void bindTextureOverrides (uint32_t currentTexture, std::shared_ptr<const TextureProvider>& texture0);
     void setupRenderUniforms ();
     void setupRenderReferenceUniforms ();
+    void bindLightResourceState (int index, const std::string& resource,
+                                 const std::shared_ptr<const TextureProvider>& texture, uint32_t frame);
     void setupRenderAttributes () const;
     void renderGeometry () const;
     void cleanupRenderSetup ();
@@ -211,6 +221,9 @@ private:
      */
     std::map<int, std::shared_ptr<TextureChainEntry>> m_textures = {};
     std::map<int, glm::vec4> m_textureResolutions = {};
+    std::map<int, glm::vec4> m_textureTexels = {};
+    std::vector<GLuint> m_samplerUnits = {};
+    std::optional<DepthDestination> m_depthDestination = std::nullopt;
     [[nodiscard]] std::shared_ptr<const TextureProvider> resolveChainTexture (const TextureChainEntry& entry) const;
 
     Render::Shaders::Shader* m_shader = nullptr;
