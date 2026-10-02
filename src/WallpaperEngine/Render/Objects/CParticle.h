@@ -180,6 +180,7 @@ protected:
     OperatorFunc createMaintainDistanceBetweenControlPointsOperator (const MaintainDistanceBetweenControlPointsOperator& op);
     OperatorFunc createReduceMovementNearControlPointOperator (const ReduceMovementNearControlPointOperator& op);
     OperatorFunc createMovementOperator (const MovementOperator& op);
+    OperatorFunc createCollisionOperator (const CollisionOperator& op);
     OperatorFunc createAngularMovementOperator (const AngularMovementOperator& op);
     OperatorFunc createCapVelocityOperator (const CapVelocityOperator& op);
     OperatorFunc createScalarRemapValueOperator (const ScalarRemapValueOperator& op, bool birth = false);

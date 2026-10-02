@@ -1207,7 +1207,47 @@ ParticleOperatorUniquePtr ObjectParser::parseParticleOperator (
     const JSON& it, const Properties& properties, bool birth, bool orthogonalScene) {
     std::string name = it.optional<std::string> ("name", "");
 
-    if (name == "inheritvaluefromevent") {
+    if (name == "collisionplane" || name == "collisionsphere" || name == "collisionbox"
+        || name == "collisionbounds" || name == "collisionquad") {
+        if (birth) return nullptr;
+        // These are literal compiled records, not runtime user settings.
+        if (it.contains ("bouncefactor") && !it.at ("bouncefactor").is_number ()) return nullptr;
+        if (name == "collisionplane" && it.contains ("distance") && !it.at ("distance").is_number ()) return nullptr;
+        if (name == "collisionsphere" && it.contains ("radius") && !it.at ("radius").is_number ()) return nullptr;
+        for (const auto* key : {"flags", "controlpoint"})
+            if (it.contains (key) && !it.at (key).is_number_integer ()) return nullptr;
+        if (it.contains ("collisionbehavior") && !it.at ("collisionbehavior").is_string ()) return nullptr;
+        const auto literalVector = [&it] (const char* key) { return !it.contains (key) || it.at (key).is_string (); };
+        if ((name == "collisionplane" && !literalVector ("plane"))
+            || (name == "collisionsphere" && !literalVector ("origin"))
+            || (name == "collisionquad" && (!literalVector ("origin") || !literalVector ("plane")
+                || !literalVector ("forward") || !literalVector ("size")))) return nullptr;
+        auto result = std::make_unique<CollisionOperator> ();
+        using Kind = CollisionOperator::Kind;
+        result->kind = name == "collisionplane" ? Kind::Plane : name == "collisionsphere" ? Kind::Sphere
+            : name == "collisionbox" ? Kind::Box : name == "collisionbounds" ? Kind::Bounds : Kind::Quad;
+        const auto behavior = it.optional<std::string> ("collisionbehavior", "bounce");
+        result->behavior = behavior == "slide" ? CollisionOperator::Behavior::Slide
+            : behavior == "stop" ? CollisionOperator::Behavior::Stop
+            : behavior == "delete" ? CollisionOperator::Behavior::Delete : CollisionOperator::Behavior::Bounce;
+        result->bounceFactor = it.optional<float> ("bouncefactor", 0.5f);
+        result->flags = static_cast<uint32_t> (it.optional<int> ("flags", 0));
+        result->controlPoint = std::min (static_cast<uint32_t> (it.optional<int> ("controlpoint", 0)), 7u);
+        if (result->kind == Kind::Plane || result->kind == Kind::Quad)
+            result->plane = it.optional ("plane", glm::vec3 (0, 1, 0));
+        if (result->kind == Kind::Plane)
+            result->distance = it.optional<float> ("distance", orthogonalScene ? -150.0f : 0.0f);
+        if (result->kind == Kind::Sphere || result->kind == Kind::Quad)
+            result->origin = it.optional ("origin", glm::vec3 (0, orthogonalScene
+                ? (result->kind == Kind::Sphere ? -200.0f : -150.0f) : 0.0f, 0));
+        if (result->kind == Kind::Sphere)
+            result->radius = it.optional<float> ("radius", orthogonalScene ? 50.0f : 1.0f);
+        if (result->kind == Kind::Quad) {
+            result->forward = it.optional ("forward", glm::vec3 (0, 0, 1));
+            result->size = it.optional ("size", glm::vec2 (orthogonalScene ? 200.0f : 1.0f));
+        }
+        return result;
+    } else if (name == "inheritvaluefromevent") {
         auto result = std::make_unique<InheritValueFromEventOperator> ();
         result->mode = eventInheritanceMode (it, "setcoloropacity");
         return result;

@@ -1,4 +1,5 @@
 #include "WallpaperEngine/Render/Objects/ParticleCore.h"
+#include "WallpaperEngine/Render/Objects/ParticleCollision.h"
 #include "WallpaperEngine/Render/Objects/ParticlePuppetEmission.h"
 #include "WallpaperEngine/Render/Objects/ImageAlignment.h"
 #include "WallpaperEngine/Render/Objects/CParticle.h"
@@ -32,6 +33,153 @@
 #include <glm/gtc/matrix_transform.hpp>
 
 using namespace WallpaperEngine::Render::Objects::ParticleCore;
+
+TEST_CASE ("Primitive collision responses retain original machine kernel arithmetic",
+           "[particle][collision]") {
+    if (!nativeRuntimeArithmeticAvailable) return;
+    const auto quad = collisionQuad ({0, 0, 0}, {1, 0, 0}, {0, 1, 0}, {40, 40});
+    for (int primitive = 0; primitive < 3; ++primitive) {
+        for (int behavior = 0; behavior < 4; ++behavior) {
+            for (bool clearAngular : {false, true}) {
+                CAPTURE (primitive, behavior, clearAngular);
+                CollisionState state {{-2, primitive == 1 ? 0 : 5, 0},
+                    {primitive == 1 ? 4 : -4, 3, 2}, {1, 2, 3}, .25f, 8};
+                const auto response = static_cast<CollisionResponse> (behavior);
+                const bool hit = primitive == 0
+                    ? collidePlane (state, {1, 0, 0}, 0, response, .5f, clearAngular)
+                    : primitive == 1 ? collideSphere (state, {0, 0, 0}, 4, response, .5f, clearAngular)
+                    : collideQuad (state, {2, 5, 0}, quad, response, .5f, clearAngular);
+                REQUIRE (hit);
+                REQUIRE (state.angularVelocity == (clearAngular ? glm::vec3 (0) : glm::vec3 (1, 2, 3)));
+                // Recorded original wallpaper64 2.8.42 SSE kernel vectors,
+                // not an idealized normal/reflection oracle.
+                if (behavior == 3) {
+                    REQUIRE (state.age == 8);
+                    REQUIRE (state.position == glm::vec3 (-2, primitive == 1 ? 0 : 5, 0));
+                    REQUIRE (state.velocity == glm::vec3 (primitive == 1 ? 4 : -4, 3, 2));
+                } else {
+                    REQUIRE (state.age == .25f);
+                    REQUIRE (state.position.x == (primitive == 0 ? 0.0f
+                        : primitive == 1 ? -4.0f : 0.09999990463256836f));
+                    const float expectedX = behavior == 2 ? 0.0f : primitive == 1
+                        ? (behavior == 0 ? -1.99853515625f : 0.0009765625f)
+                        : (behavior == 0 ? 2.0f : 0.0f);
+                    REQUIRE (state.velocity == glm::vec3 (expectedX, behavior == 2 ? 0 : 3,
+                                                          behavior == 2 ? 0 : 2));
+                }
+            }
+        }
+    }
+    // Current-point collisions also respond to an already outward velocity;
+    // adding an approach-only predicate would depart from the native kernel.
+    CollisionState outward {{-2, 0, 0}, {4, 0, 0}, {0, 0, 0}, 1, 8};
+    REQUIRE (collidePlane (outward, {1, 0, 0}, 0, CollisionResponse::Bounce, .5f));
+    REQUIRE (outward.velocity.x == -2);
+}
+
+TEST_CASE ("Bounds collision selects one last violated plane and leaves angular streams",
+           "[particle][collision]") {
+    const auto bounds = collisionBounds ({100, 80}, glm::mat4 (1));
+    for (int mode = 0; mode < 4; ++mode) {
+        for (const auto point : {glm::vec3 (-2, -3, 0), glm::vec3 (102, 83, 0)}) {
+            CollisionState state {point, {-4, -6, 2}, {1, 2, 3}, .25f, 8};
+            REQUIRE (collideBounds (state, bounds, static_cast<CollisionResponse> (mode), .5f));
+            REQUIRE (state.angularVelocity == glm::vec3 (1, 2, 3));
+            REQUIRE (state.position.x == point.x); // Native corner does not project both axes.
+            if (mode == 3) {
+                REQUIRE (state.position == point);
+                REQUIRE (state.age == 8);
+            } else {
+                REQUIRE (state.position.y == (point.y < 0 ? 0 : 80));
+                REQUIRE (state.velocity == (mode == 2 ? glm::vec3 (0)
+                    : glm::vec3 (-4, mode == 0 ? 3 : 0, 2)));
+            }
+        }
+    }
+    // Native transforms local canvas planes AND corner points through the
+    // full inverse node stack; translated/nonuniform local bounds differ.
+    const auto inverse = glm::inverse (glm::translate (glm::mat4 (1), {10, 20, 0})
+        * glm::scale (glm::mat4 (1), {2, 4, 1}));
+    const auto local = collisionBounds ({100, 80}, inverse);
+    REQUIRE (local.normals[0] == glm::vec3 (.5f, 0, 0));
+    REQUIRE (local.normals[1] == glm::vec3 (0, .25f, 0));
+    REQUIRE (local.distances[0] == -2.5f);
+    REQUIRE (local.distances[1] == -1.25f);
+}
+
+TEST_CASE ("Finite quad contacts require crossing and strict authored extents",
+           "[particle][collision]") {
+    const auto quad = collisionQuad ({0, 0, 0}, {2, 0, 0}, {0, 3, 0}, {40, 40});
+    CollisionState state {{-2, 5, 0}, {-4, 0, 0}, {0, 0, 0}, 1, 8};
+    REQUIRE_FALSE (collideQuad (state, {-1, 5, 0}, quad, CollisionResponse::Bounce, .5f));
+    REQUIRE_FALSE (collideQuad (state, {0, 5, 0}, quad, CollisionResponse::Bounce, .5f));
+    state.position.y = 20;
+    REQUIRE_FALSE (collideQuad (state, {2, 20, 0}, quad, CollisionResponse::Bounce, .5f));
+    state.position = {0, 5, 0};
+    REQUIRE (collideQuad (state, {2, 5, 0}, quad, CollisionResponse::Bounce, .5f));
+    REQUIRE (state.velocity.x == 2);
+    const auto rectangle = collisionQuad ({0, 0, 0}, {1, 0, 0}, {0, 1, 0}, {8, 40});
+    REQUIRE (rectangle.halfSize == glm::vec2 (20, 4));
+    state = {{-2, 15, 3}, {-4, 0, 0}, {0, 0, 0}, 1, 8};
+    REQUIRE (collideQuad (state, {2, 15, 3}, rectangle, CollisionResponse::Stop, .5f));
+    state = {{-2, 5, 4}, {-4, 0, 0}, {0, 0, 0}, 1, 8};
+    REQUIRE_FALSE (collideQuad (state, {2, 5, 4}, rectangle, CollisionResponse::Stop, .5f));
+    // Duplicate movement records each refresh previous position. A second
+    // step starting behind the plane cannot reuse the first step's crossing.
+    state = {{2, 5, 0}, {-4, 0, 0}, {0, 0, 0}, 1, 8};
+    glm::vec3 previous = state.position;
+    integrateAxis (state.position.x, state.velocity.x, 0, 0, {1, 1});
+    const auto stale = previous;
+    previous = state.position;
+    integrateAxis (state.position.x, state.velocity.x, 0, 0, {1, 1});
+    auto staleState = state;
+    REQUIRE_FALSE (collideQuad (state, previous, quad, CollisionResponse::Bounce, .5f));
+    REQUIRE (collideQuad (staleState, stale, quad, CollisionResponse::Bounce, .5f));
+}
+
+TEST_CASE ("Collision parser preserves ordered duplicates defaults and recognized box no-op",
+           "[particle][collision]") {
+    using namespace WallpaperEngine::Data::Model;
+    using WallpaperEngine::Data::Parsers::ObjectParser;
+    using WallpaperEngine::Data::JSON::JSON;
+    Project project {};
+    project.sceneOrthogonalProjection = true;
+    const auto parsed = ObjectParser::parse (JSON::parse (R"({"id":1,"particle":{"operator":[
+        {"name":"collisionplane"},{"name":"movement"},{"name":"collisionsphere"},
+        {"name":"collisionbox","collisionbehavior":"stop","flags":3,"controlpoint":-1},
+        {"name":"collisionbounds"},{"name":"collisionquad"},
+        {"name":"collisionplane","collisionbehavior":"unrecognized"},
+        {"name":"collisionplane","distance":{"value":3}},
+        {"name":"collisionquad","size":[20,30]},
+        {"name":"collisionsphere","flags":2.5}]}})"), project);
+    const auto& particle = *parsed->as<Particle> ();
+    REQUIRE (particle.operators.size () == 7);
+    REQUIRE (particle.hasUnsupportedComponents);
+    REQUIRE (particle.operators[1]->is<MovementOperator> ());
+    const auto& plane = *particle.operators[0]->as<CollisionOperator> ();
+    const auto& sphere = *particle.operators[2]->as<CollisionOperator> ();
+    const auto& box = *particle.operators[3]->as<CollisionOperator> ();
+    const auto& quad = *particle.operators[5]->as<CollisionOperator> ();
+    REQUIRE (plane.distance == -150);
+    REQUIRE (plane.plane == glm::vec3 (0, 1, 0));
+    REQUIRE (plane.bounceFactor == .5f);
+    REQUIRE (sphere.origin == glm::vec3 (0, -200, 0));
+    REQUIRE (sphere.radius == 50);
+    REQUIRE (box.kind == CollisionOperator::Kind::Box);
+    REQUIRE (box.behavior == CollisionOperator::Behavior::Stop);
+    REQUIRE (box.controlPoint == 7);
+    REQUIRE (quad.origin == glm::vec3 (0, -150, 0));
+    REQUIRE (quad.size == glm::vec2 (200));
+    REQUIRE (particle.operators[6]->as<CollisionOperator> ()->behavior == CollisionOperator::Behavior::Bounce);
+    project.sceneOrthogonalProjection = false;
+    const auto spatial = ObjectParser::parse (JSON::parse (R"({"id":2,"particle":{"operator":[
+        {"name":"collisionplane"},{"name":"collisionsphere"},{"name":"collisionquad"}]}})"), project);
+    const auto& ops = spatial->as<Particle> ()->operators;
+    REQUIRE (ops[0]->as<CollisionOperator> ()->distance == 0);
+    REQUIRE (ops[1]->as<CollisionOperator> ()->radius == 1);
+    REQUIRE (ops[1]->as<CollisionOperator> ()->origin == glm::vec3 (0));
+    REQUIRE (ops[2]->as<CollisionOperator> ()->size == glm::vec2 (1));
+}
 
 TEST_CASE ("Image emission alignment retains built integer offsets until geometry callback rebuild",
            "[particle][image-alignment]") {
