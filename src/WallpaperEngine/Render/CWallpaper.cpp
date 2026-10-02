@@ -683,7 +683,6 @@ void CWallpaper::setupFramebuffers (TextureFormat format) {
 	"_rt_FullFrameBuffer", format, clamp, 1.0, { width, height }, { width, height }
     );
 
-    this->alias ("_rt_MipMappedFrameBuffer", "_rt_FullFrameBuffer");
 }
 
 AudioContext& CWallpaper::getAudioContext () const { return this->m_audioContext; }
@@ -691,6 +690,28 @@ AudioContext& CWallpaper::getAudioContext () const { return this->m_audioContext
 const WallpaperState& CWallpaper::getState () const { return this->m_state; }
 
 std::shared_ptr<const CFBO> CWallpaper::findFBO (const std::string& name) const {
+    if (name == "_rt_MipMappedFrameBuffer") {
+        if (!m_mipMappedSceneFBO) {
+            // Native allocates RGB storage independently of the scene RT.
+            // Never sample the framebuffer that the current layer is writing.
+            GLint draw = 0, read = 0, texture = 0;
+            glGetIntegerv (GL_DRAW_FRAMEBUFFER_BINDING, &draw);
+            glGetIntegerv (GL_READ_FRAMEBUFFER_BINDING, &read);
+            glGetIntegerv (GL_TEXTURE_BINDING_2D, &texture);
+            const auto width = std::max (2u, m_sceneFBO->getTextureWidth (0));
+            const auto height = std::max (2u, m_sceneFBO->getTextureHeight (0));
+            m_mipMappedSceneFBO = std::make_shared<CFBO> (
+                name, m_sceneFBO->getFormat () == TextureFormat_RGBA16161616f
+                    ? TextureFormat_RGB161616f : TextureFormat_RGB888,
+                TextureFlags_ClampUVs, 1.0f, width, height, width, height);
+            m_mipMappedSceneFBO->setMaxAnisotropy (1.0f);
+            m_mipMappedSceneFBO->enableSceneReflectionMipmaps ();
+            glBindFramebuffer (GL_DRAW_FRAMEBUFFER, draw);
+            glBindFramebuffer (GL_READ_FRAMEBUFFER, read);
+            glBindTexture (GL_TEXTURE_2D, texture);
+        }
+        return m_mipMappedSceneFBO;
+    }
     const auto fbo = this->find (name);
 
     if (fbo == nullptr) {

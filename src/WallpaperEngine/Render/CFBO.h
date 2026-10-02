@@ -2,6 +2,7 @@
 
 #include <string>
 #include <optional>
+#include <memory>
 #include <glm/vec4.hpp>
 
 #include "TextureProvider.h"
@@ -9,6 +10,7 @@
 using namespace WallpaperEngine::Render;
 
 namespace WallpaperEngine::Render {
+class ReflectionMipmapGenerator;
 class CFBO final : public TextureProvider {
 public:
     CFBO (
@@ -30,6 +32,11 @@ public:
     void resize (uint32_t realWidth, uint32_t realHeight, uint32_t textureWidth, uint32_t textureHeight);
     /** Keep the render-target sampler choice when resize replaces its GL texture. */
     void setMaxAnisotropy (float value);
+    /** Enable the native, limited scene-reflection mip chain. */
+    void enableSceneReflectionMipmaps ();
+    /** Copy a completed scene before presentation; consumers use this next frame. */
+    void snapshotFrom (const CFBO& source);
+    [[nodiscard]] uint32_t getMipLevelCount (uint32_t imageIndex) const override;
     [[nodiscard]] GLuint getTextureID (uint32_t imageIndex) const override;
     [[nodiscard]] uint32_t getTextureWidth (uint32_t imageIndex) const override;
     [[nodiscard]] uint32_t getTextureHeight (uint32_t imageIndex) const override;
@@ -58,6 +65,9 @@ private:
     TextureFormat m_format = TextureFormat_UNKNOWN;
     uint32_t m_flags = TextureFlags_NoFlags;
     float m_maxAnisotropy = 8.0f;
+    bool m_sceneReflectionMipmaps = false;
+    uint32_t m_mipLevelCount = 1;
+    std::unique_ptr<ReflectionMipmapGenerator> m_reflectionGenerator;
     /** Placeholder for frames, FBOs only have ONE */
     std::vector<FrameSharedPtr> m_frames = {};
 };
