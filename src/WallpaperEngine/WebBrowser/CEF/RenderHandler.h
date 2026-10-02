@@ -18,6 +18,9 @@ public:
     //! \brief
     ~RenderHandler () override = default;
 
+    // Late browser callbacks must not access a wallpaper being destroyed.
+    void detach ();
+
     //! \brief CefRenderHandler interface
     void GetViewRect (CefRefPtr<CefBrowser> browser, CefRect& rect) override;
 
@@ -33,6 +36,7 @@ public:
 
 private:
     WallpaperEngine::Render::Wallpapers::CWeb* m_webdata = nullptr;
+    CefRect m_viewRect { 0, 0, 1, 1 };
 
     [[nodiscard]] int getWidth () const;
     [[nodiscard]] int getHeight () const;
