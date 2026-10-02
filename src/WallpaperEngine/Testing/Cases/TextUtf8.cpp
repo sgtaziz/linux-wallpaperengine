@@ -249,13 +249,44 @@ TEST_CASE ("HarfBuzz shapes Latin ligature and Arabic order with the selected Fr
     REQUIRE (salaam.glyphs.size () < arabic.size ());
     REQUIRE (salaam.glyphs[0].cluster == 3);
 
-    const std::vector<char32_t> mixed {'A', 'V', ' ', 0x0633, 0x0644, 0x0627, 0x0645,
-                                       ' ', 'f', 'i'};
-    const auto mixedRow = shapeTextRow (face, mixed);
-    REQUIRE (mixedRow.glyphs.size () == 8);
-    REQUIRE (mixedRow.glyphs[7].glyphIndex == fi.glyphs[0].glyphIndex);
-    REQUIRE (mixedRow.glyphs[3].glyphIndex == salaam.glyphs[0].glyphIndex);
-    REQUIRE (mixedRow.glyphs[3].cluster == 6);
+    // Native full-face-run controls: a space must not split the RTL words.
+    const auto twoWords = decodeTextCodepoints ("مرحبا بالعالم");
+    const auto rtlRow = shapeTextRow (face, twoWords);
+    REQUIRE (rtlRow.direction == HB_DIRECTION_RTL);
+    REQUIRE (rtlRow.glyphs.size () == twoWords.size ());
+    REQUIRE (rtlRow.glyphs.front ().cluster == twoWords.size () - 1);
+    REQUIRE (rtlRow.glyphs.back ().cluster == 0);
+    REQUIRE (std::is_sorted (rtlRow.glyphs.begin (), rtlRow.glyphs.end (),
+        [] (const auto& left, const auto& right) { return left.cluster > right.cluster; }));
+
+    // Native mixed text guesses the first strong script once. It does not
+    // apply paragraph bidi or independently reconnect each later script.
+    const auto latinFirst = decodeTextCodepoints ("ABC مرحبا XYZ بالعالم");
+    const auto ltrMixed = shapeTextRow (face, latinFirst);
+    REQUIRE (ltrMixed.direction == HB_DIRECTION_LTR);
+    REQUIRE (ltrMixed.glyphs.front ().glyphIndex == FT_Get_Char_Index (face, 'A'));
+    REQUIRE (ltrMixed.glyphs[4].cluster == 4);
+    REQUIRE (ltrMixed.glyphs[4].glyphIndex == FT_Get_Char_Index (face, 0x0645));
+    REQUIRE (ltrMixed.glyphs.back ().cluster == latinFirst.size () - 1);
+
+    const auto arabicFirst = decodeTextCodepoints ("مرحبا ABC بالعالم 123");
+    const auto rtlMixed = shapeTextRow (face, arabicFirst);
+    REQUIRE (rtlMixed.direction == HB_DIRECTION_RTL);
+    REQUIRE (rtlMixed.glyphs.front ().glyphIndex == FT_Get_Char_Index (face, '3'));
+    REQUIRE (rtlMixed.glyphs[1].glyphIndex == FT_Get_Char_Index (face, '2'));
+    REQUIRE (rtlMixed.glyphs[2].glyphIndex == FT_Get_Char_Index (face, '1'));
+    REQUIRE (rtlMixed.glyphs[12].glyphIndex == FT_Get_Char_Index (face, 'C'));
+    REQUIRE (rtlMixed.glyphs.back ().cluster == 0);
+
+    const auto combining = decodeTextCodepoints ("Café Ä ñ");
+    const auto accents = shapeTextRow (face, combining);
+    REQUIRE (accents.glyphs.size () == 8);
+    REQUIRE (accents.glyphs[3].glyphIndex == FT_Get_Char_Index (face, 0x00e9));
+    REQUIRE (accents.glyphs[5].glyphIndex == FT_Get_Char_Index (face, 0x00c4));
+    REQUIRE (accents.glyphs[7].glyphIndex == FT_Get_Char_Index (face, 0x00f1));
+    REQUIRE (accents.glyphs[3].cluster == 3);
+    REQUIRE (accents.glyphs[5].cluster == 6);
+    REQUIRE (accents.glyphs[7].cluster == 9);
 
     FT_Done_Face (face);
     FT_Done_FreeType (library);
