@@ -1,6 +1,7 @@
 #include "CParticle.h"
 #include "ParticleRemapOperators.h"
 #include "ParticleNativeSlotScope.h"
+#include "ParticleDependencyBindings.h"
 #include "ParticleCore.h"
 #include "ParticleBirthGeometry.h"
 #include "ParticleInitialColor.h"
@@ -19,6 +20,7 @@
 #include "WallpaperEngine/Data/Parsers/ObjectParser.h"
 #include "WallpaperEngine/Logging/Log.h"
 #include "WallpaperEngine/Maths.h"
+#include "WallpaperEngine/Render/CTexture.h"
 #include "WallpaperEngine/Render/Utils/NoiseUtils.h"
 #include "WallpaperEngine/Render/Utils/NativeParticleGradientNoise.h"
 #include "WallpaperEngine/Render/TextureAnimation.h"
@@ -971,7 +973,8 @@ ParticleInstance& CParticle::emittedParticleTarget (std::vector<ParticleInstance
     return particle;
 }
 
-void CParticle::finishEmittedParticle (ParticleInstance& particle, uint32_t& count) {
+void CParticle::finishEmittedParticle (ParticleInstance& particle, uint32_t& count,
+                                     const glm::vec3* rawBirthColor) {
     if (!m_slotStreams) {
         ++count;
         return;
@@ -985,9 +988,9 @@ void CParticle::finishEmittedParticle (ParticleInstance& particle, uint32_t& cou
     // Birth remaps consume the baseline proxy during ordered initialization.
     // Native current streams remain at raw defaults until interpreter restore;
     // unseparated RGB/alpha streams alias their updated baselines instead.
-    particle.size = 0.5f;
-    if (m_resetColorEachPass) particle.color = instanceBirthRgbGain ();
-    if (m_resetAlphaEachPass) particle.alpha = alphaOverrideValue ()->getFloat ();
+    ParticleCore::restorePhysicalBirthCurrentDefaults (
+        particle, rawBirthColor ? *rawBirthColor : instanceBirthRgbGain (),
+        alphaOverrideValue ()->getFloat (), m_resetColorEachPass, m_resetAlphaEachPass);
     m_slotStreams->commitBirth (particle.poolSlot);
     count = m_slotStreams->nativeCount ();
 }
@@ -1831,27 +1834,11 @@ EmitterFunc CParticle::createBoxEmitter (const ParticleEmitter& emitter, size_t 
 		    m_rng, speedBounds.x, speedBounds.y);
 		p.velocity = directionLength > 0.0f
 		    ? velocityDirection * (speed / directionLength) : glm::vec3 (0.0f);
-		p.acceleration = glm::vec3 (0.0f);
-		p.rotation = glm::vec3 (0.0f);
-		p.angularVelocity = glm::vec3 (0.0f);
-		p.angularAcceleration = glm::vec3 (0.0f);
-
-		p.color = instanceBirthRgbGain ();
-		p.alpha = alphaOverrideValue ()->getFloat ();
-		p.size = m_slotStreams ? 0.5f : 20.0f * ((m_particle.flags & 0x80u) != 0
-		    ? 1.0f : sizeOverrideValue ()->getFloat ());
-		p.lifetime = m_slotStreams ? 1.0f : lifetimeOverrideValue ()->getFloat ();
-		p.age = 0.0f;
-		p.oscillatorRandom = WallpaperEngine::Maths::randomFloat (m_rng, 0.0f, 1.0f);
-		p.alive = true;
-	    p.previousPosition = p.position;
-	    p.sequenceFraction = m_particle.animationMode == "randomframe" ? p.oscillatorRandom : 0.0f;
-		p.frame = -1.0f;
-
-		p.initial.color = p.color;
-		p.initial.alpha = p.alpha;
-		p.initial.size = p.size;
-		p.initial.lifetime = p.lifetime;
+        ParticleCore::initializeEmitterBirth (
+            p, instanceBirthRgbGain (), alphaOverrideValue ()->getFloat (),
+            20.0f * ((m_particle.flags & 0x80u) != 0 ? 1.0f : sizeOverrideValue ()->getFloat ()),
+            lifetimeOverrideValue ()->getFloat (), ParticleCore::nativeRandomUnit (m_rng),
+            m_slotStreams.has_value (), m_particle.animationMode == "randomframe");
 
 		// Native passes this emitter's selected CP upper 3x3 to
 		// initializer opcode 9, independently of the spawn-offset branch.
@@ -1966,27 +1953,11 @@ EmitterFunc CParticle::createSphereEmitter (const ParticleEmitter& emitter, size
 	    p.velocity = directionLength > 0.0f
 		? velocityDirection * (speed / directionLength) : glm::vec3 (0.0f);
 
-	    p.acceleration = glm::vec3 (0.0f);
-	    p.rotation = glm::vec3 (0.0f);
-	    p.angularVelocity = glm::vec3 (0.0f);
-	    p.angularAcceleration = glm::vec3 (0.0f);
-
-	    p.color = instanceBirthRgbGain ();
-	    p.alpha = alphaOverrideValue ()->getFloat ();
-	    p.size = m_slotStreams ? 0.5f : 20.0f * ((m_particle.flags & 0x80u) != 0
-	        ? 1.0f : sizeOverrideValue ()->getFloat ());
-	    p.lifetime = m_slotStreams ? 1.0f : lifetime;
-	    p.age = 0.0f;
-	    p.oscillatorRandom = WallpaperEngine::Maths::randomFloat (m_rng, 0.0f, 1.0f);
-	    p.alive = true;
-		p.previousPosition = p.position;
-		p.sequenceFraction = m_particle.animationMode == "randomframe" ? p.oscillatorRandom : 0.0f;
-	    p.frame = -1.0f;
-
-	    p.initial.color = p.color;
-	    p.initial.alpha = p.alpha;
-	    p.initial.size = p.size;
-	    p.initial.lifetime = p.lifetime;
+        ParticleCore::initializeEmitterBirth (
+            p, instanceBirthRgbGain (), alphaOverrideValue ()->getFloat (),
+            20.0f * ((m_particle.flags & 0x80u) != 0 ? 1.0f : sizeOverrideValue ()->getFloat ()),
+            lifetime, ParticleCore::nativeRandomUnit (m_rng), m_slotStreams.has_value (),
+            m_particle.animationMode == "randomframe");
 
 	    m_birthInitializerBasis = birthTransform.basis;
 	    for (auto& init : m_initializers) {
@@ -2061,6 +2032,13 @@ EmitterFunc CParticle::createImageEmitter (const ParticleEmitter& emitter, size_
         const bool puppet = image->hasPuppetEmissionDeformation ();
         const auto source = image->getTexture ();
         if (!source || !source->isReady ()) return;
+        const auto staticTexture = [] (const TextureProvider& texture) {
+            return dynamic_cast<const CTexture*> (&texture) && !texture.isAnimated ()
+                && (texture.getFlags () & Data::Assets::TextureFlags_Video) == 0;
+        };
+        if (m_slotStreams && (puppet || !staticTexture (*source)))
+            throw std::invalid_argument (
+                "Native model collision physical IMAGE emission requires an ordinary static image texture");
         std::shared_ptr<const TextureProvider> mask;
         if (!maskPath.empty ()) {
             try {
@@ -2084,6 +2062,9 @@ EmitterFunc CParticle::createImageEmitter (const ParticleEmitter& emitter, size_
             return;
         }
         cache->warnedMask = false;
+        if (m_slotStreams && mask && !staticTexture (*mask))
+            throw std::invalid_argument (
+                "Native model collision physical IMAGE emission requires a static opacity mask texture");
         const GLuint textureId = source->getTextureID (0);
         const GLuint maskTextureId = mask ? mask->getTextureID (0) : 0;
         const uint32_t width = source->getRealWidth (), height = source->getRealHeight ();
@@ -2185,25 +2166,14 @@ EmitterFunc CParticle::createImageEmitter (const ParticleEmitter& emitter, size_
                     birth, previous, getScene ().getDeltaTime (), speed);
                 particle.velocity = {velocity.x, -velocity.y, velocity.z};
             }
-            particle.acceleration = glm::vec3 (0.0f);
-            particle.rotation = glm::vec3 (0.0f);
-            particle.angularVelocity = glm::vec3 (0.0f);
-            particle.angularAcceleration = glm::vec3 (0.0f);
-            particle.color = instanceBirthRgbGain ();
+            glm::vec3 birthColor = instanceBirthRgbGain ();
             if ((emitter.flags & 0x10000u) != 0)
-                particle.color *= glm::vec3 (sample.red, sample.green, sample.blue) / 255.0f;
-            particle.alpha = alphaOverrideValue ()->getFloat ();
-            particle.size = 20.0f * ((m_particle.flags & 0x80u) != 0
-                ? 1.0f : sizeOverrideValue ()->getFloat ());
-            particle.lifetime = lifetimeOverrideValue ()->getFloat ();
-            particle.age = 0.0f;
-            particle.oscillatorRandom = ParticleCore::nativeRandomUnit (m_rng);
-            particle.alive = true;
-            particle.frame = -1.0f;
-            particle.initial.color = particle.color;
-            particle.initial.alpha = particle.alpha;
-            particle.initial.size = particle.size;
-            particle.initial.lifetime = particle.lifetime;
+                birthColor *= glm::vec3 (sample.red, sample.green, sample.blue) / 255.0f;
+            ParticleCore::initializeEmitterBirth (
+                particle, birthColor, alphaOverrideValue ()->getFloat (),
+                20.0f * ((m_particle.flags & 0x80u) != 0 ? 1.0f : sizeOverrideValue ()->getFloat ()),
+                lifetimeOverrideValue ()->getFloat (), ParticleCore::nativeRandomUnit (m_rng),
+                m_slotStreams.has_value (), m_particle.animationMode == "randomframe");
             if (emitted == 0 && traceParticleChildren (*this))
                 sLog.out ("Particle image emitter birth: particle=", getId (),
                     " source=", sourceId, " selected=", chosen,
@@ -2215,7 +2185,7 @@ EmitterFunc CParticle::createImageEmitter (const ParticleEmitter& emitter, size_
             m_birthInitializerBasis = world && m_forcedEmitCount == 0
                 ? glm::mat3 (m_simulationModelMatrix) : glm::mat3 (1.0f);
             for (auto& initializer : m_initializers) initializer (particle);
-            finishEmittedParticle (particle, count);
+            finishEmittedParticle (particle, count, &birthColor);
         }
         history.previousWorld = sourceWorld;
     };
@@ -2904,13 +2874,10 @@ OperatorFunc CParticle::createCollisionOperator (const CollisionOperator& op) {
     // authored response, CP and angular-clear fields.
     if (op.kind == Kind::Box) return [] (auto&, uint32_t, auto&, float, MovementTime) {};
     if (op.kind == Kind::Model) {
-        int sourceId = -1;
-        for (const auto& dependency : m_particle.typedDependencies)
-            if (dependency.type == "collisionmodel" && dependency.index == static_cast<int> (op.dependencyIndex)) {
-                sourceId = dependency.id;
-                break;
-            }
-        if (sourceId < 0) throw std::invalid_argument ("Collision model has no matching compiled dependency ordinal");
+        const auto* dependency = modelCollisionDependency (
+            m_particle.typedDependencies, op.dependencyBindingIndex);
+        if (!dependency) return [] (auto&, uint32_t, auto&, float, MovementTime) {};
+        const int sourceId = dependency->id;
         return [this, sourceId, response = static_cast<CollisionResponse> (op.behavior), bounce = op.bounceFactor,
                 cachedFrame = UINT32_MAX, cachedCapsules = std::vector<CollisionCapsule> {}, warned = false]
                (std::vector<ParticleInstance>& particles, uint32_t count,

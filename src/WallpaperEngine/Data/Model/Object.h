@@ -552,6 +552,7 @@ public:
     float distance {0};
     float radius {1};
     uint32_t dependencyIndex {0}; // Compiled dependency-vector ordinal, not operator index.
+    uint32_t dependencyBindingIndex {0}; // Scene link ordinal within collisionmodel links only.
 };
 
 class AngularMovementOperator : public ParticleOperatorBase {

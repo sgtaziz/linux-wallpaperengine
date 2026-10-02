@@ -683,14 +683,17 @@ ParticleUniquePtr ObjectParser::parseParticle (const JSON& it, const Project& pr
 	std::vector<ParticleOperatorUniquePtr> operators;
     uint32_t compiledDependency = static_cast<uint32_t> (std::count_if (
         emitters.begin (), emitters.end (), [] (const auto& emitter) { return emitter.name == "layerimage"; }));
+    uint32_t modelDependency = 0;
 	const auto operatorsIt = particleJson.find ("operator");
 	if (operatorsIt != particleJson.end () && operatorsIt->is_array ()) {
 	    for (size_t index = 0; index < operatorsIt->size (); ++index) {
 	const auto& op = (*operatorsIt)[index];
 		auto oper = parseParticleOperator (op, project.properties, false, project.sceneOrthogonalProjection);
 		if (oper) {
-            if (oper->is<CollisionOperator> () && oper->as<CollisionOperator> ()->kind == CollisionOperator::Kind::Model)
+            if (oper->is<CollisionOperator> () && oper->as<CollisionOperator> ()->kind == CollisionOperator::Kind::Model) {
                 oper->as<CollisionOperator> ()->dependencyIndex = compiledDependency++;
+                oper->as<CollisionOperator> ()->dependencyBindingIndex = modelDependency++;
+            }
 		    const bool hasBlend = op.find ("blendinstart") != op.end ()
 		        || op.find ("blendinend") != op.end ()
 		        || op.find ("blendoutstart") != op.end ()
