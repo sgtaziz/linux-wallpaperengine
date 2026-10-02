@@ -149,6 +149,7 @@ private:
     std::shared_ptr<const CFBO> m_activeRenderTarget = nullptr;
     glm::mat4 m_activeRenderProjection {1.0f};
     glm::mat4 m_rootRenderClipTransform {1.0f};
+    bool m_secondaryReflectionStage = false;
     bool m_childCompositionScope = false;
     bool m_maxAlphaCompositionScope = false;
     glm::vec2 m_mousePosition = {};

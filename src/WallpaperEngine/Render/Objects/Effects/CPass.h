@@ -56,6 +56,8 @@ public:
     [[nodiscard]] std::optional<std::reference_wrapper<std::string>> getTarget () const;
     [[nodiscard]] Render::Shaders::Shader* getShader () const;
     [[nodiscard]] GLuint getProgramID () const;
+    /** Active compiled resource admission used by native MODEL scene flags. */
+    [[nodiscard]] bool requiresSceneReflection () const;
 
     // Custom geometry rendering support (for particles, etc.)
     using GeometryCallback = std::function<void ()>;

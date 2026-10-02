@@ -175,6 +175,8 @@ ObjectUniquePtr ObjectParser::parse (const JSON& it, const Project& project) {
 	    .parent = it.optional<int> ("parent"),
 	    .attachment = it.optional<std::string> ("attachment"),
 	    .solid = it.optional ("solid", true),
+	    .reflected = !it.contains ("reflected") || !it.at ("reflected").is_boolean ()
+	        || it.at ("reflected").get<bool> (),
 	    .disablePropagation = it.optional ("disablepropagation", false),
 	    .origin = it.user ("origin", project.properties, glm::vec3 (0.0f)),
 	    .groupScale = it.user ("scale", project.properties, glm::vec3 (1.0f)),
@@ -202,6 +204,8 @@ ObjectUniquePtr ObjectParser::parse (const JSON& it, const Project& project) {
 	    .parent = it.optional<int> ("parent"),
 	    .attachment = it.optional<std::string> ("attachment"),
 	    .solid = it.optional ("solid", true),
+	    .reflected = !it.contains ("reflected") || !it.at ("reflected").is_boolean ()
+	        || it.at ("reflected").get<bool> (),
 	    .disablePropagation = it.optional ("disablepropagation", false),
 	    .origin = it.user ("origin", project.properties, glm::vec3 (0.0f)),
 	    .groupScale = it.user ("scale", project.properties, glm::vec3 (1.0f)),

@@ -582,7 +582,10 @@ void CScene::renderFrame (const glm::ivec4& viewport) {
 
     glDepthMask (GL_TRUE);
     glClearDepth (1.0);
-    glClear (GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    const auto* sceneData = m_wallpaperData.as<Scene> ();
+    const bool clearEnabled = sceneData->clearEnabled && sceneData->clearEnabled->value->getBool ();
+    const auto clearColor = sceneData->colors.clear->value->getVec3 ();
+    glClearColor (clearColor.r, clearColor.g, clearColor.b, 1.0f);
 
     m_activeRenderTarget = getFBO ();
     m_activeRenderProjection = m_rootRenderClipTransform
@@ -592,6 +595,7 @@ void CScene::renderFrame (const glm::ivec4& viewport) {
 
     const auto& debug = this->getContext ().getApp ().getContext ().settings.render.debug;
     if (debug.objectFilter.has_value () || !debug.skipObjects.empty ()) {
+        if (clearEnabled) glClear (GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 	const auto scheduled = m_objectsByRenderOrder;
 	for (auto* cur : scheduled) {
 	    if (debug.objectFilter.has_value () && cur->getId () != debug.objectFilter.value ()) continue;
@@ -626,6 +630,11 @@ void CScene::renderFrame (const glm::ivec4& viewport) {
 	if (owner) children[*owner].push_back (object);
 	else roots.push_back (object);
     }
+
+    std::set<int> reflectionConsumers;
+    for (auto* object : m_objectsByRenderOrder)
+        if (object->is<Objects::CModel> () && object->as<Objects::CModel> ()->requiresSceneReflection ())
+            reflectionConsumers.insert (object->getId ());
 
     std::function<void (CObject*)> renderNode = [&] (CObject* object) {
 	const auto childIt = children.find (object->getId ());
@@ -680,6 +689,47 @@ void CScene::renderFrame (const glm::ivec4& viewport) {
 	    restore ();
 	});
     };
+    if (!reflectionConsumers.empty ()) {
+        const auto target = std::const_pointer_cast<CFBO> (findFBO ("_rt_Reflection"));
+        target->attachSharedDepth (m_sceneFBO);
+        const auto primaryProjection = m_activeRenderProjection;
+        m_activeRenderTarget = target;
+        m_activeRenderProjection = secondarySceneProjectionForCamera (
+            m_rootRenderClipTransform, getCamera ().getProjection (), getCamera ().getRenderLookAt (),
+            sceneAuthoredToCamera (getWidth (), getHeight (), getCamera ().isOrthogonal ()));
+        m_secondaryReflectionStage = true;
+        glBindFramebuffer (GL_FRAMEBUFFER, target->getFramebuffer ());
+        glViewport (0, 0, target->getRealWidth (), target->getRealHeight ());
+        glColorMask (GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+        glDepthMask (GL_TRUE);
+        if (clearEnabled)
+            glClear (GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        const auto restore = [&] {
+            m_secondaryReflectionStage = false;
+            m_activeRenderTarget = m_sceneFBO;
+            m_activeRenderProjection = primaryProjection;
+            glBindFramebuffer (GL_FRAMEBUFFER, m_sceneFBO->getFramebuffer ());
+            glViewport (0, 0, m_sceneFBO->getRealWidth (), m_sceneFBO->getRealHeight ());
+            glColorMask (GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+            glDepthMask (GL_TRUE);
+        };
+        try {
+            // Native 18aac0 draws only list roots (composition children carry
+            // bit2). An admitted image then draws its visible children through
+            // 207b50 without consulting their reflection-list membership.
+            for (auto* root : roots) {
+                if (!root->getObject ().reflected || reflectionConsumers.contains (root->getId ())
+                    || !(root->is<Objects::CImage> () || root->is<Objects::CModel> ()
+                         || root->is<Objects::CParticle> () || root->is<Objects::CText> ())) continue;
+                renderNode (root);
+            }
+        } catch (...) {
+            restore ();
+            throw;
+        }
+        restore ();
+    }
+    if (clearEnabled) glClear (GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
     for (auto* root : roots) renderNode (root);
     // Native copies the completed scene and generates reflection mips before
     // DOF/HDR presentation. This snapshot is consumed by the next scene frame.
@@ -702,6 +752,8 @@ void CScene::resizeSceneTargets (int width, int height) {
     // Retain CFBO objects (and therefore references held by effect passes).
     // CFBO::resize also replaces the root D16 attachment and texture storage.
     resize (m_sceneFBO, width, height);
+    resize (m_reflectionSceneFBO, width, height);
+    if (m_reflectionSceneFBO) m_reflectionSceneFBO->attachSharedDepth (m_sceneFBO);
     resize (m_mipMappedSceneFBO, std::max (2, width), std::max (2, height));
     resize (_rt_shadowAtlas, width, height);
     resize (_rt_4FrameBuffer, std::max (1, width / 4), std::max (1, height / 4));

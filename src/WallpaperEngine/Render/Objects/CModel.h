@@ -18,6 +18,8 @@ public:
 
     void setup () override;
     void render () override;
+    /** Refresh material structure before rebuilding the secondary draw list. */
+    [[nodiscard]] bool requiresSceneReflection ();
 
 private:
     void rebuildDynamic ();

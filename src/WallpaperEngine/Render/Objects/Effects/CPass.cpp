@@ -125,7 +125,7 @@ std::shared_ptr<const TextureProvider> CPass::resolveTexture (
 }
 
 std::shared_ptr<const CFBO> CPass::resolveFBO (const std::string& name) const {
-    if (name == "_rt_MipMappedFrameBuffer") return m_renderable.getScene ().findFBO (name);
+    if (name == "_rt_MipMappedFrameBuffer" || name == "_rt_Reflection") return m_renderable.getScene ().findFBO (name);
     auto fbo = this->m_fboProvider->find (name);
 
     if (fbo == nullptr) {
@@ -353,6 +353,15 @@ CPass::resolveTextureAnimationState (const std::shared_ptr<const TextureProvider
     return state;
 }
 
+bool CPass::requiresSceneReflection () const {
+    for (const auto& [index, chain] : m_textures) {
+        if (chain->resourceName == "_rt_Reflection"
+            && glGetUniformLocation (m_programID, ("g_Texture" + std::to_string (index)).c_str ()) >= 0)
+            return true;
+    }
+    return false;
+}
+
 void CPass::bindTextureUnit (int index, const std::shared_ptr<const TextureProvider>& texture, uint32_t frame) {
     if (index >= 0 && static_cast<size_t> (index) < m_textureMipLevelCounts.size ())
         m_textureMipLevelCounts[index] = texture ? texture->getMipLevelCount (frame) : 1.0f;
@@ -360,8 +369,12 @@ void CPass::bindTextureUnit (int index, const std::shared_ptr<const TextureProvi
 	return;
     }
 
+    const auto resolved = m_drawTo && texture->getTextureID (frame) == m_drawTo->getTextureID (0)
+        ? m_renderable.getScene ().findFBO ("_alias_NullShaderResource") : nullptr;
     glActiveTexture (GL_TEXTURE0 + index);
-    glBindTexture (GL_TEXTURE_2D, texture->getTextureID (frame));
+    // D3D unbinds simultaneous RTV/SRV aliases. Its null SRV yields zero
+    // RGBA; GL's incomplete texture instead yields alpha1, so use real zeros.
+    glBindTexture (GL_TEXTURE_2D, resolved ? resolved->getTextureID (0) : texture->getTextureID (frame));
 }
 
 void CPass::bindTextureOverrides (uint32_t currentTexture, std::shared_ptr<const TextureProvider>& texture0) {
@@ -827,7 +840,7 @@ void CPass::setupTextureUniforms () {
     // but for now just set first vertex's textures
     // and then try with fragment's and override any existing
     for (const auto& [index, textureName] : this->m_shader->getVertex ().getTextures ()) {
-	if (textureName == "_rt_MipMappedFrameBuffer"
+	if ((textureName == "_rt_MipMappedFrameBuffer" || textureName == "_rt_Reflection")
             && glGetUniformLocation (m_programID, ("g_Texture" + std::to_string (index)).c_str ()) < 0) continue;
 	try {
 	    auto texture = textureName.find ("_rt_") == 0 || textureName.find ("_alias_") == 0
@@ -846,7 +859,7 @@ void CPass::setupTextureUniforms () {
     }
 
     for (const auto& [index, textureName] : this->m_shader->getFragment ().getTextures ()) {
-	if (textureName == "_rt_MipMappedFrameBuffer"
+	if ((textureName == "_rt_MipMappedFrameBuffer" || textureName == "_rt_Reflection")
             && glGetUniformLocation (m_programID, ("g_Texture" + std::to_string (index)).c_str ()) < 0) continue;
 	try {
 	    auto texture = textureName.find ("_rt_") == 0 || textureName.find ("_alias_") == 0

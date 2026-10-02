@@ -610,7 +610,7 @@ TEST_CASE ("Camera transforms copy partial input and preserve omitted pose field
     // Actual 2.8 full/partial runtime fixture gives these projected landmarks;
     // an init-only call is overwritten by the native loader (script phase gate).
     const auto vp = Camera::makeProjectionForTransforms (1280, 960, 50, 100, 1000, state, false)
-        * Camera::renderLookAtForTransforms (state.pose, false);
+        * Camera::renderLookAtForTransforms (state.pose, false, 1280, 960);
     const auto screen = [&] (glm::vec3 point) {
         const auto clip = vp * glm::vec4 (point, 1);
         return (glm::vec2 (clip) / clip.w * 0.5f + 0.5f) * glm::vec2 (1280, 960);
@@ -629,7 +629,7 @@ TEST_CASE ("Camera up-only updates rotate the native perspective landmarks", "[s
     const glm::vec3 up (1, 0, 0);
     state = Camera::updatedTransforms (state, nullptr, nullptr, &up, nullptr);
     const auto vp = Camera::makeProjectionForTransforms (1280, 960, 50, 100, 1000, state, false)
-        * Camera::renderLookAtForTransforms (state.pose, false);
+        * Camera::renderLookAtForTransforms (state.pose, false, 1280, 960);
     const auto clip = vp * glm::vec4 (-80, 60, 0, 1);
     const auto screen = (glm::vec2 (clip) / clip.w * 0.5f + 0.5f) * glm::vec2 (1280, 960);
     // Native rectangle rotates from center (474.5,356) to (516,644.5).
@@ -649,7 +649,7 @@ TEST_CASE ("Script orthographic camera changes basis and zooms about the canvas 
     const auto project = [&] (const Camera::Transforms& state, float authoredZoom = 1.0f) {
         const auto vp = Camera::makeProjectionForTransforms (
             320, 240, 50, 0.1f, 1000, state, true, authoredZoom)
-            * Camera::renderLookAtForTransforms (state.pose, true);
+            * Camera::renderLookAtForTransforms (state.pose, true, 320, 240);
         const auto clip = vp * glm::vec4 (centeredMarker, 1);
         return (glm::vec2 (clip) / clip.w * 0.5f + 0.5f) * output;
     };
@@ -673,7 +673,34 @@ TEST_CASE ("Script orthographic camera changes basis and zooms about the canvas 
     // Native raw view remains separate from its GL drawing basis.
     const auto native = glm::lookAt (translated.pose.eye, translated.pose.center, translated.pose.up);
     const auto flip = glm::scale (glm::mat4 (1), glm::vec3 (1, -1, 1));
-    REQUIRE (Camera::renderLookAtForTransforms (translated.pose, true) == flip * native * flip);
+    REQUIRE (Camera::renderLookAtForTransforms (translated.pose, true, 320, 240) == flip * native * flip);
+}
+
+TEST_CASE ("Script camera roll preserves native canvas-before-view zoom ordering",
+           "[scene][camera][script]") {
+    using WallpaperEngine::Render::Camera;
+    const auto flip = glm::scale (glm::mat4 (1), glm::vec3 (1,-1,1));
+    for (const auto size : {glm::vec2 (768,432), glm::vec2 (311,197)}) {
+        const glm::vec3 half (size.x*.5f,size.y*.5f,0);
+        const auto bridge = flip*glm::translate (glm::mat4 (1),-half);
+        const Camera::Transforms state {{{10,20,200},{10,20,0},{std::sin (.15f),std::cos (.15f),0}},1.15f};
+        const auto nativeView = glm::lookAt (state.pose.eye,state.pose.center,state.pose.up);
+        // 17fa70 first right-translates the raw canvas projection to its
+        // center, scales, and translates back. View multiplication follows.
+        const auto nativeVP = glm::ortho (0.f,size.x,0.f,size.y,-2000.f,2000.f)
+            *glm::translate (glm::mat4 (1),half)
+            *glm::scale (glm::mat4 (1),glm::vec3 (state.zoom*1.2f,state.zoom*1.2f,1))
+            *glm::translate (glm::mat4 (1),-half)*nativeView;
+        const auto glVP = Camera::makeProjectionForTransforms (
+            size.x,size.y,60,.1f,1000,state,true,1.2f)
+            *Camera::renderLookAtForTransforms (state.pose,true,size.x,size.y);
+        for (const auto point : {glm::vec4 (10,80,0,1),glm::vec4 (size.x*.75f,size.y*.2f,17,1)}) {
+            const auto actual = flip*glVP*bridge*point;
+            const auto expected = nativeVP*point;
+            for (int axis=0;axis<4;++axis)
+                REQUIRE (actual[axis] == Catch::Approx (expected[axis]).margin (1e-5f));
+        }
+    }
 }
 
 TEST_CASE ("Camera API parser copies permissive vectors without coercing components", "[scene][camera][script]") {
@@ -714,4 +741,44 @@ TEST_CASE ("Camera API parser copies permissive vectors without coercing compone
     JSValue exception = JS_GetException (context);
     REQUIRE_FALSE (JS_IsNull (exception));
     JS_FreeValue (context, exception);
+}
+
+TEST_CASE ("Native secondary membership ignores nonboolean reflected values and survives clones",
+           "[scene][parser][secondary-reflection]") {
+    using WallpaperEngine::Data::JSON::JSON;
+    using WallpaperEngine::Data::Model::Project;
+    using WallpaperEngine::Data::Parsers::ObjectParser;
+    Project project {};
+    for (const auto value : {"null", "0", "1", "\"false\"", "{}", "true", "false"}) {
+        const auto config = JSON::parse (std::string ("{\"id\":1,\"name\":\"layer\",\"reflected\":") + value + "}");
+        const auto layer = ObjectParser::parse (config, project);
+        REQUIRE (layer->reflected == (std::string (value) != "false"));
+        auto cloneConfig = JSON::parse (layer->initialConfiguration);
+        cloneConfig["id"] = 2;
+        REQUIRE (ObjectParser::parse (cloneConfig, project)->reflected == layer->reflected);
+    }
+    REQUIRE (ObjectParser::parse (JSON::parse (R"({"id":3,"name":"omitted"})"), project)->reflected);
+}
+
+TEST_CASE ("Native scene clear defaults false and accepts only boolean authoring values",
+           "[scene][parser][secondary-reflection]") {
+    using WallpaperEngine::Assets::AssetLocator;
+    using WallpaperEngine::Data::JSON::JSON;
+    using WallpaperEngine::Data::Model::Project;
+    using WallpaperEngine::Data::Model::Scene;
+    using WallpaperEngine::Data::Parsers::WallpaperParser;
+    using WallpaperEngine::FileSystem::Container;
+    for (const auto [value, expected] : std::vector<std::pair<std::string, bool>> {
+        {"null", false}, {"0", false}, {"\"true\"", false}, {"{}", false},
+        {"true", true}, {"false", false}, {R"({"value":true})", true},
+        {R"({"value":"true"})", false}}) {
+        auto files = std::make_unique<Container> ();
+        files->getVFS ().add ("scene.json", std::string (R"({"camera":{"center":"0 0 0","eye":"0 0 1","up":"0 1 0"},"general":{"clearenabled":)")
+            + value + R"(,"orthogonalprojection":{"width":768,"height":432}},"objects":[]})");
+        Project project {};
+        project.type = Project::Type_Scene;
+        project.assetLocator = std::make_unique<AssetLocator> (std::move (files));
+        const auto wallpaper = WallpaperParser::parse (JSON ("scene.json"), project);
+        REQUIRE (wallpaper->as<Scene> ()->clearEnabled->value->getBool () == expected);
+    }
 }

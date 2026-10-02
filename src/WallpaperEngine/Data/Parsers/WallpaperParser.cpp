@@ -83,6 +83,13 @@ SceneUniquePtr WallpaperParser::parseScene (const JSON& file, Project& project) 
 	    throw std::invalid_argument ("Scene point lightconfig exceeds its serialized four-bit count");
     }
     const auto& properties = project.properties;
+    // Native 19b920 ignores wrong JSON types. Preserve registered bool user
+    // settings, while invalid authored values retain the initial false bit.
+    auto clearGeneral = general;
+    if (const auto value = general.optional ("clearenabled"); value
+        && !value->is_boolean ()
+        && !(value->is_object () && value->contains ("value") && value->at ("value").is_boolean ()))
+        clearGeneral["clearenabled"] = false;
 
     // Shipped scenes author these projection fields under general. Keep camera
     // as a fallback for older definitions that placed them there.
@@ -101,6 +108,7 @@ SceneUniquePtr WallpaperParser::parseScene (const JSON& file, Project& project) 
         }, SceneData {
             .pointLightSlots = pointLightSlots,
             .spotLightSlots = spotLightSlots,
+            .clearEnabled = clearGeneral.user ("clearenabled", properties, false),
             .colors = {
                 .ambient  = general.user ("ambientcolor", properties, glm::vec3 (0.0f)),
                 .skylight = general.user ("skylightcolor", properties, glm::vec3 (0.0f)),

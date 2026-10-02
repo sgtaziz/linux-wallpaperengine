@@ -143,6 +143,10 @@ struct CModel::MeshDraw final : CRenderable {
     [[nodiscard]] const glm::vec4& getColor4 () const override { return m_white4; }
     [[nodiscard]] const glm::vec3& getCompositeColor () const override { return m_white; }
 
+    [[nodiscard]] bool requiresSceneReflection () const {
+        return std::ranges::any_of (m_passes, [] (const auto& pass) { return pass->requiresSceneReflection (); });
+    }
+
     [[nodiscard]] bool depthFirst () const {
         if (m_passes.empty ()) return true;
         const auto mode = m_passes.front ()->getBlendingMode ();
@@ -267,6 +271,12 @@ void CModel::updateDynamic () {
     if (!m_model.dynamic || m_dynamicRevision == m_model.dynamic->revision) return;
     for (const auto& mesh : m_meshes) mesh->update (m_model.dynamic->shapes.at (mesh->m_shapeIndex));
     m_dynamicRevision = m_model.dynamic->revision;
+}
+
+bool CModel::requiresSceneReflection () {
+    if (m_model.dynamic && m_dynamicStructureRevision != m_model.dynamic->structureRevision)
+        rebuildDynamic ();
+    return std::ranges::any_of (m_meshes, [] (const auto& mesh) { return mesh->requiresSceneReflection (); });
 }
 
 void CModel::render () {

@@ -5,6 +5,7 @@
 #include <stdexcept>
 
 #include "Camera.h"
+#include "Wallpapers/SceneTransform.h"
 
 using namespace WallpaperEngine;
 using namespace WallpaperEngine::Render;
@@ -77,14 +78,14 @@ Camera::Transforms Camera::updatedTransforms (
     return current;
 }
 
-glm::mat4 Camera::renderLookAtForTransforms (const Pose& pose, bool orthogonal) {
+glm::mat4 Camera::renderLookAtForTransforms (const Pose& pose, bool orthogonal, float width, float height) {
     const auto nativeView = glm::lookAt (pose.eye, pose.center, pose.up);
     if (!orthogonal) return nativeView;
-    // Orthographic image/particle positions are already expressed in the
-    // centered GL basis. Change both ends of the native view's basis; simply
-    // reflecting the three lookAt vectors would change its handedness.
-    const auto flip = glm::scale (glm::mat4 (1.0f), glm::vec3 (1, -1, 1));
-    return flip * nativeView * flip;
+    // Native 17fa70 applies P*T(canvasHalf)*zoom*T(-canvasHalf) before
+    // the authored view. Our objects already use the centered GL basis,
+    // so conjugate that entire basis, including its canvas translation.
+    const auto bridge = Wallpapers::sceneAuthoredToCamera (width, height, true);
+    return bridge * nativeView * glm::inverse (bridge);
 }
 
 glm::mat4 Camera::makeScriptOrthogonalProjection (float width, float height, float zoom) {
@@ -113,7 +114,7 @@ void Camera::setTransforms (const glm::vec3* eye, const glm::vec3* center,
     m_hasScriptTransforms = true;
     m_pose = m_scriptTransforms.pose;
     m_lookat = glm::lookAt (m_pose.eye, m_pose.center, m_pose.up);
-    m_renderLookat = renderLookAtForTransforms (m_pose, m_isOrthogonal);
+    m_renderLookat = renderLookAtForTransforms (m_pose, m_isOrthogonal, m_width, m_height);
     if (m_width > 0 && m_height > 0) {
         if (m_isOrthogonal) setOrthogonalProjection (m_width, m_height);
         else setPerspectiveProjection (m_width, m_height);
@@ -151,7 +152,7 @@ void Camera::setOrthogonalProjection (const float width, const float height) {
                                        m_camera.projection.zoom ? m_camera.projection.zoom->value->getFloat () : 1.0f)
         : makeOrthogonalProjectionForScene (width, height, getNearZ (), getFarZ (), getEye ());
     this->m_isOrthogonal = true;
-    m_renderLookat = m_hasScriptTransforms ? renderLookAtForTransforms (m_pose, true) : m_lookat;
+    m_renderLookat = m_hasScriptTransforms ? renderLookAtForTransforms (m_pose, true, width, height) : m_lookat;
 }
 
 void Camera::setPerspectiveProjection (float width, float height) {

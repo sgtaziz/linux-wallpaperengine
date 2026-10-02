@@ -69,6 +69,31 @@ inline glm::mat4 sceneAuthoredToCamera (float width, float height, bool orthogra
         * glm::scale (glm::mat4 (1.0f), glm::vec3 (1, -1, 1));
 }
 
+// Native 17fa70 reflects the view's input Y and reverses only projection
+// element [1][1] for the D3D output convention, retaining canvas translation.
+inline glm::mat4 secondarySceneProjection (
+    const glm::mat4& clip, glm::mat4 projection, const glm::mat4& view
+) {
+    projection[1][1] = -projection[1][1];
+    return clip * projection * view
+        * glm::scale (glm::mat4 (1.0f), glm::vec3 (1, -1, 1));
+}
+
+// Reconstruct the native canvas projection/view before its single-element
+// projection toggle. The centered GL view includes canvas translation,
+// which must not change the authored pivot of the reflected stage.
+inline glm::mat4 secondarySceneProjectionForCamera (
+    const glm::mat4& clip, const glm::mat4& projection,
+    const glm::mat4& view, const glm::mat4& authoredToCamera
+) {
+    const auto flip = glm::scale (glm::mat4 (1), glm::vec3 (1,-1,1));
+    const auto inverseBridge = glm::inverse (authoredToCamera);
+    auto nativeProjection = flip * projection * authoredToCamera;
+    nativeProjection[1][1] *= -1;
+    const auto nativeView = inverseBridge * view * authoredToCamera;
+    return clip * flip * nativeProjection * nativeView * flip * inverseBridge;
+}
+
 inline bool modelPresentationReversesWinding (bool orthographic, bool childScope) {
     return orthographic || !childScope;
 }

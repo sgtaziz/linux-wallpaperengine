@@ -40,6 +40,8 @@ struct ObjectData {
     std::optional<std::string> attachment;
     /** Authored hit-test participation for SceneScript cursor events. */
     bool solid = true;
+    /** Native secondary draw-list admission; only literal false excludes a layer. */
+    bool reflected = true;
     /** Authored stop flag for overlapping SceneScript cursor targets. */
     bool disablePropagation = false;
     /** The point of origin of the object */
