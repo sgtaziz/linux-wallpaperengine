@@ -120,3 +120,47 @@ TEST_CASE ("Node pause keeps aging clock and allows forced emissions independent
     dispatchTick (clock, [&] (float dt) { age += dt; }, [] (MovementTime) {});
     REQUIRE (age > 0.35f); // API pause is an emitter gate, not a frozen lifetime.
 }
+
+TEST_CASE ("Hidden root reset retains CP and publication while forced births remain independent of admission",
+           "[particle-admission]") {
+    GeometryPublication publication;
+    REQUIRE (publication.beginStream (0, 1, false));
+    publication.append ({0, false, {0}, {0, 1, 2}});
+    uint32_t liveCount = 1;
+    float cp = 24;
+    bool enabled = false;
+    uint32_t resets = 0;
+    const auto reset = [&] { ++resets; liveCount = 0; };
+    resetHiddenRoot (true, liveCount, reset);
+    REQUIRE (resets == 0);
+    resetHiddenRoot (false, liveCount, reset);
+    REQUIRE (liveCount == 0);
+    REQUIRE (resets == 1);
+    REQUIRE (cp == 24);
+    REQUIRE_FALSE (enabled);
+    REQUIRE_FALSE (publication.beginStream (0, liveCount, false));
+    REQUIRE (publication.streams ()[0][0].vertices[0] == 0);
+    // Admission does not disable the forced API or overwrite the root's API
+    // pause bit. A hidden API birth advances its retained CP, then is cleared
+    // at the next outer admission check, leaving the old GPU stream intact.
+    REQUIRE_FALSE (automaticEmissionAllowed (true, false, 0, false));
+    REQUIRE (automaticEmissionAllowed (enabled, false, 1, false));
+    const float hiddenBirth = cp;
+    cp += 24;
+    liveCount = 1;
+    resetHiddenRoot (false, liveCount, reset);
+    REQUIRE (hiddenBirth == 24);
+    REQUIRE (liveCount == 0);
+    REQUIRE (cp == 48);
+    REQUIRE (resets == 2);
+    resetHiddenRoot (false, liveCount, reset);
+    REQUIRE (resets == 2); // Empty roots do not reset descendants/clocks.
+    resetHiddenRoot (true, liveCount, reset);
+    const float visibleBirth = cp;
+    liveCount = 1;
+    REQUIRE (visibleBirth == 48);
+    REQUIRE (publication.streams ()[0][0].vertices[0] == 0);
+    REQUIRE (publication.beginStream (0, liveCount, false));
+    publication.append ({0, false, {visibleBirth}, {0, 1, 2}});
+    REQUIRE (publication.streams ()[0][0].vertices[0] == 48);
+}
