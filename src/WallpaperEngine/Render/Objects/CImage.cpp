@@ -4,6 +4,7 @@
 #include "ImageDeviceColor.h"
 #include "ImageDimensions.h"
 #include "ImagePrelighting.h"
+#include "ImageQuadUV.h"
 #include "ModelNormalMatrix.h"
 #include "PuppetMeshParser.h"
 
@@ -455,6 +456,9 @@ CImage::~CImage () {
     glDeleteBuffers (1, &this->m_copySpacePosition);
     glDeleteBuffers (1, &this->m_passSpacePosition);
     glDeleteBuffers (1, &this->m_texcoordCopy);
+    glDeleteBuffers (1, &this->m_texcoordDirect);
+    glDeleteBuffers (1, &this->m_texcoordComposite);
+    glDeleteBuffers (1, &this->m_texcoordCompositePresented);
     glDeleteBuffers (1, &this->m_texcoordPass);
     glDeleteBuffers (1, &this->m_texcoordPassPresented);
     if (this->m_puppetSpacePosition != GL_NONE) {
@@ -1410,13 +1414,29 @@ void CImage::setupPasses (const std::function<void (std::shared_ptr<const CFBO>)
 	// and effect quads use an identity clip-space projection: native 1401e8aa0
 	// and 1402066a0 preserve framebuffer orientation there, so reversing V
 	// would mirror the already projected scene a second time.
+        // Offscreen base passes retain the full source UV range. Native only
+        // applies the ordinary model padding on its direct scene quad.
+        if (isFirstPass && !m_hasPuppetMesh && !m_puppetChannelFBO
+            && drawTo == getScene ().getActiveRenderTarget ())
+            texcoord = m_texcoordDirect;
+        else if (!isFirstPass && !m_hasPuppetMesh && !m_puppetChannelFBO
+                 && drawTo == getScene ().getActiveRenderTarget ())
+            texcoord = m_texcoordComposite;
 	if (!isFirstPass
 	    && (projection == &m_modelViewProjectionScreen || projection == &m_lightingMvp)
 	    && drawTo == this->getScene ().getActiveRenderTarget ()
 	    && !this->getScene ().getCamera ().isOrthogonal ()
 	    && !this->getScene ().isChildCompositionScope ())
-	    texcoord = m_texcoordPassPresented;
-	if (texcoord == m_texcoordPass)
+	    texcoord = texcoord == m_texcoordComposite
+                ? m_texcoordCompositePresented : m_texcoordPassPresented;
+	if (texcoord == m_texcoordDirect)
+            pass->setTexCoord (texcoord, m_texcoordDirectTopV, m_texcoordDirectBottomV);
+        else if (texcoord == m_texcoordComposite)
+            pass->setTexCoord (texcoord, m_texcoordCompositeTopV, m_texcoordCompositeBottomV);
+        else if (texcoord == m_texcoordCompositePresented)
+            pass->setTexCoord (texcoord, 1.0f - m_texcoordCompositeTopV,
+                              1.0f - m_texcoordCompositeBottomV);
+        else if (texcoord == m_texcoordPass)
 	    pass->setTexCoord (texcoord, 1.0f, 0.0f);
 	else if (texcoord == m_texcoordCopy)
 	    pass->setTexCoord (texcoord, m_texcoordCopyTopV, m_texcoordCopyBottomV);
@@ -1873,6 +1893,33 @@ void CImage::uploadGeometryBuffers (const glm::vec2& size) {
     glBufferData (GL_ARRAY_BUFFER, sizeof (copySpacePosition), copySpacePosition, GL_DYNAMIC_DRAW);
     glBindBuffer (GL_ARRAY_BUFFER, this->m_texcoordCopy);
     glBufferData (GL_ARRAY_BUFFER, sizeof (texcoordCopy), texcoordCopy, GL_DYNAMIC_DRAW);
+    const auto texture = getTexture ();
+    const auto& model = *getImage ().model;
+    const auto directUV = directImageQuadUV (
+        width, height, texture ? texture->getTextureWidth (0) : 0,
+        texture ? texture->getTextureHeight (0) : 0,
+        model.fullscreen, model.nopadding, model.passthrough, model.solidlayer);
+    const auto directCoordinates = directUV.triangles ();
+    m_texcoordDirectTopV = directUV.top;
+    m_texcoordDirectBottomV = directUV.bottom;
+    if (m_texcoordDirect == GL_NONE) glGenBuffers (1, &m_texcoordDirect);
+    glBindBuffer (GL_ARRAY_BUFFER, m_texcoordDirect);
+    glBufferData (GL_ARRAY_BUFFER, sizeof (directCoordinates), directCoordinates.data (), GL_DYNAMIC_DRAW);
+    const auto compositeUV = compositeImageQuadUV (
+        texture ? texture->getTextureWidth (0) : 0,
+        texture ? texture->getTextureHeight (0) : 0,
+        model.fullscreen, model.passthrough, model.solidlayer);
+    auto compositeCoordinates = compositeUV.triangles ();
+    m_texcoordCompositeTopV = compositeUV.top;
+    m_texcoordCompositeBottomV = compositeUV.bottom;
+    if (m_texcoordComposite == GL_NONE) glGenBuffers (1, &m_texcoordComposite);
+    glBindBuffer (GL_ARRAY_BUFFER, m_texcoordComposite);
+    glBufferData (GL_ARRAY_BUFFER, sizeof (compositeCoordinates), compositeCoordinates.data (), GL_DYNAMIC_DRAW);
+    for (size_t index = 1; index < compositeCoordinates.size (); index += 2)
+        compositeCoordinates[index] = 1.0f - compositeCoordinates[index];
+    if (m_texcoordCompositePresented == GL_NONE) glGenBuffers (1, &m_texcoordCompositePresented);
+    glBindBuffer (GL_ARRAY_BUFFER, m_texcoordCompositePresented);
+    glBufferData (GL_ARRAY_BUFFER, sizeof (compositeCoordinates), compositeCoordinates.data (), GL_DYNAMIC_DRAW);
 
     const glm::vec2 projectionSize = imageBackingDimensions (size);
     this->m_modelViewProjectionCopy = this->getImage ().model->passthrough
