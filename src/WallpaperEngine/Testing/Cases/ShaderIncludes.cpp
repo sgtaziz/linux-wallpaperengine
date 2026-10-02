@@ -8,6 +8,7 @@
 #include "WallpaperEngine/Render/Shaders/Shader.h"
 #include "WallpaperEngine/Render/Shaders/ExactSourceCache.h"
 #include "WallpaperEngine/Render/Shaders/SceneShaderCombos.h"
+#include "WallpaperEngine/Render/Shaders/NativeReflectionVectors.h"
 
 using WallpaperEngine::Assets::AssetLocator;
 using WallpaperEngine::FileSystem::Container;
@@ -22,6 +23,84 @@ using WallpaperEngine::Data::Builders::UserSettingBuilder;
 static const ShaderConstantMap emptyConstants;
 static const TextureMap emptyTextures;
 static const ComboMap emptyCombos;
+
+TEST_CASE ("Native reflection vector bridge preserves guarded export and lighting stages",
+           "[shader][reflection-mips]") {
+    using WallpaperEngine::Render::Shaders::nativeReflectionVectorSource;
+    auto files = std::make_unique<Container> ();
+    AssetLocator assets (std::move (files));
+    const std::string prefix =
+        "uniform vec3 u_Tangent; uniform vec3 u_Bitangent;\n"
+        "varying vec3 v_Tangent; varying vec3 v_Bitangent;\n"
+        "varying vec3 v_ScreenPos; varying float v_Lighting;\n"
+        "void main(){ v_Tangent=u_Tangent; v_Bitangent=u_Bitangent;\n"
+        "v_ScreenPos=vec3(0.25,0.5,1.0); v_Lighting=0.0;\n"
+        "#if LIGHTING\nv_Lighting=v_Bitangent.y;\n#endif\n"
+        "#if REFLECTION && NORMALMAP\n";
+    const std::string body =
+        "v_ScreenPos.y = -v_ScreenPos.y;\n"
+        "v_Tangent.y = -v_Tangent.y; // exported vector, after lighting\n"
+        "v_Bitangent.y = -v_Bitangent.y;\n"
+        "#endif\n#endif\ngl_Position=vec4(0,0,0,1);}\n";
+    const std::string fragment =
+        "varying vec3 v_Tangent; varying vec3 v_Bitangent;\n"
+        "varying vec3 v_ScreenPos; varying float v_Lighting;\n"
+        "void main(){ gl_FragColor=vec4(v_Tangent.y,v_Bitangent.y,v_Lighting,v_ScreenPos.y);}\n";
+    for (const std::string guard : {"#ifdef HLSL", "#if HLSL", "#if defined(HLSL)"}) {
+        for (const bool crlf : {false, true}) {
+        std::string source;
+        for (const char c : prefix + guard + '\n' + body) {
+            if (crlf && c == '\n') source += '\r';
+            source += c;
+        }
+        const auto bridged = nativeReflectionVectorSource (source);
+        REQUIRE (nativeReflectionVectorSource (bridged) == bridged);
+        REQUIRE (bridged.find ("v_Lighting=v_Bitangent.y;")
+                 < bridged.find ("// Native reflection vector coordinate bridge"));
+        for (const int reflection : {0, 1}) {
+            for (const int normalMap : {0, 1}) {
+                for (const int lighting : {0, 1}) {
+                    for (const int hlsl : {-1, 0, 1}) {
+                        ComboMap combos {{"REFLECTION", reflection}, {"NORMALMAP", normalMap}, {"LIGHTING", lighting}};
+                        if (hlsl >= 0) combos.emplace ("HLSL", hlsl);
+                        ShaderUnit vertex (GLSLContext::UnitType_Vertex, "custom-screen-vectors.vert", source,
+                            assets, emptyConstants, emptyTextures, emptyTextures, combos, emptyCombos);
+                        ShaderUnit pixel (GLSLContext::UnitType_Fragment, "custom-screen-vectors.frag", fragment,
+                            assets, emptyConstants, emptyTextures, emptyTextures, combos, emptyCombos);
+                        const auto translated = GLSLContext::get ().toGlsl (vertex.compile (), pixel.compile ());
+                        REQUIRE_FALSE (translated.first.empty ());
+                        const auto executable = translated.first.substr (0, translated.first.find ("#if 0"));
+                        const auto flip = executable.find ("v_Bitangent.y = -v_Bitangent.y;");
+                        if (reflection && normalMap) {
+                            REQUIRE (flip != std::string::npos);
+                            REQUIRE (executable.find ("v_Bitangent.y = -v_Bitangent.y;", flip + 1) == std::string::npos);
+                        } else REQUIRE (flip == std::string::npos);
+                        if (lighting && reflection && normalMap)
+                            REQUIRE (executable.find ("v_Lighting = v_Bitangent.y;") < flip);
+                    }
+                }
+            }
+        }
+    }
+    }
+    const std::string outside =
+        "varying vec3 v_Bitangent;\n#ifdef HLSL\nv_Bitangent.y=-v_Bitangent.y;\n#endif\n";
+    REQUIRE (nativeReflectionVectorSource (outside) == outside);
+    REQUIRE (nativeReflectionVectorSource ("/* " + prefix + "#ifdef HLSL\n" + body + " */")
+             == "/* " + prefix + "#ifdef HLSL\n" + body + " */");
+    const auto unrelated = prefix + "#ifdef HLSL\nnormal.y=-normal.y;\n#endif\n#endif\n}\n";
+    REQUIRE (nativeReflectionVectorSource (unrelated) == unrelated);
+    const std::string local =
+        "#if REFLECTION && NORMALMAP\nvoid main(){ vec3 v_Tangent=vec3(1);\n"
+        "#ifdef HLSL\nv_Tangent.y=-v_Tangent.y;\n#endif\n}\n#endif\n";
+    REQUIRE (nativeReflectionVectorSource (local) == local);
+    const auto differentInput = prefix + "#ifdef HLSL\nv_Tangent.y=-v_Bitangent.y;\n#endif\n#endif\n}\n";
+    REQUIRE (nativeReflectionVectorSource (differentInput) == differentInput);
+    const std::string modern =
+        "varying vec3 v_Tangent; varying vec3 v_Bitangent;\n"
+        "#if LIGHTING || REFLECTION\nvoid main(){v_Tangent=vec3(1,0,0);}\n#endif\n";
+    REQUIRE (nativeReflectionVectorSource (modern) == modern);
+}
 
 TEST_CASE ("Prelighting variants compile override combos separately from authored shader metadata",
            "[shader][scene][prelighting]") {
@@ -252,21 +331,24 @@ TEST_CASE ("GLSL translation cache reuses successful exact source pairs", "[shad
     const std::string vertex = "#version 330\n// translation-cache-test-v\nvoid main() { gl_Position = vec4(1.0); }\n";
     const std::string fragment = "#version 330\n// translation-cache-test-f\nout vec4 color; void main() { color = vec4(1.0); }\n";
     const auto before = context.translationCacheEntries ();
+    // Production shader permutations can fill this shared bounded cache
+    // before this test runs; successful insertion then evicts an old entry.
+    const auto expectedEntries = [before] (size_t added) { return std::min (before + added, size_t (128)); };
     const auto first = context.toGlsl (vertex, fragment);
     REQUIRE_FALSE (first.first.empty ());
     REQUIRE_FALSE (first.second.empty ());
-    REQUIRE (context.translationCacheEntries () == before + 1);
+    REQUIRE (context.translationCacheEntries () == expectedEntries (1));
     REQUIRE (context.toGlsl (vertex, fragment) == first);
-    REQUIRE (context.translationCacheEntries () == before + 1);
+    REQUIRE (context.translationCacheEntries () == expectedEntries (1));
     const auto second = context.toGlsl (vertex, fragment + "// distinct fragment\n");
     REQUIRE_FALSE (second.second.empty ());
-    REQUIRE (context.translationCacheEntries () == before + 2);
+    REQUIRE (context.translationCacheEntries () == expectedEntries (2));
     const auto third = context.toGlsl (vertex + "// distinct vertex\n", fragment);
     REQUIRE_FALSE (third.first.empty ());
-    REQUIRE (context.translationCacheEntries () == before + 3);
+    REQUIRE (context.translationCacheEntries () == expectedEntries (3));
     const auto failed = context.toGlsl (vertex, "#version 330\nthis is invalid shader syntax\n");
     REQUIRE (failed.first.empty ());
-    REQUIRE (context.translationCacheEntries () == before + 3);
+    REQUIRE (context.translationCacheEntries () == expectedEntries (3));
 }
 
 TEST_CASE ("Shader includes retain directive order and conditional scope", "[shader][include]") {

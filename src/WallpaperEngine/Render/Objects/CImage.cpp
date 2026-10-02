@@ -5,6 +5,7 @@
 #include "ImageDimensions.h"
 #include "ImagePrelighting.h"
 #include "ImageQuadUV.h"
+#include "ImageCompositeSampler.h"
 #include "ModelNormalMatrix.h"
 #include "PuppetMeshParser.h"
 
@@ -285,12 +286,13 @@ CImage::CImage (Wallpapers::CScene& scene, const Image& image) :
     nameB << "_rt_imageLayerComposite_" << this->getImage ().id << "_b";
     CompositeMappingRollback compositeRollback {scene, this->getImage ().id, m_mainFBO, m_subFBO};
     const auto compositeFormat = scene.getFBO ()->getFormat ();
+    const auto compositeFlags = imageCompositeTextureFlags (m_texture->getFlags ());
 
     this->m_currentMainFBO = this->m_mainFBO = scene.create (
-	nameA.str (), compositeFormat, this->m_texture->getFlags (), 1, backingSize, backingSize
+	nameA.str (), compositeFormat, compositeFlags, 1, backingSize, backingSize
     );
     this->m_currentSubFBO = this->m_subFBO = scene.create (
-	nameB.str (), compositeFormat, this->m_texture->getFlags (), 1, backingSize, backingSize
+	nameB.str (), compositeFormat, compositeFlags, 1, backingSize, backingSize
     );
     m_targetBaseSize = backingSize;
 

@@ -1,4 +1,6 @@
 #include "CFBO.h"
+#include "SceneReflectionMipmaps.h"
+#include "ReflectionMipmapGenerator.h"
 #include "WallpaperEngine/Logging/Log.h"
 
 #include <stdexcept>
@@ -131,6 +133,55 @@ void CFBO::setMaxAnisotropy (float value) {
     glBindTexture (GL_TEXTURE_2D, static_cast<GLuint> (previousTexture));
 }
 
+void CFBO::enableSceneReflectionMipmaps () {
+    if (m_sceneReflectionMipmaps) return;
+    auto generator = std::make_unique<ReflectionMipmapGenerator> ();
+    GLint previousTexture = 0;
+    glGetIntegerv (GL_TEXTURE_BINDING_2D, &previousTexture);
+    glBindTexture (GL_TEXTURE_2D, m_texture);
+    m_sceneReflectionMipmaps = true;
+    m_mipLevelCount = sceneReflectionMipLevels (getTextureWidth (0), getTextureHeight (0));
+    glTexParameteri (GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, m_mipLevelCount - 1);
+    glTexParameteri (GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+    glGenerateMipmap (GL_TEXTURE_2D);
+    m_reflectionGenerator = std::move (generator);
+    glBindTexture (GL_TEXTURE_2D, previousTexture);
+}
+
+uint32_t CFBO::getMipLevelCount (uint32_t imageIndex) const { return m_mipLevelCount; }
+
+void CFBO::snapshotFrom (const CFBO& source) {
+    if (&source == this) throw std::invalid_argument ("Scene snapshot cannot alias its source");
+    GLint previousDraw = 0, previousRead = 0, previousTexture = 0;
+    glGetIntegerv (GL_DRAW_FRAMEBUFFER_BINDING, &previousDraw);
+    glGetIntegerv (GL_READ_FRAMEBUFFER_BINDING, &previousRead);
+    glGetIntegerv (GL_TEXTURE_BINDING_2D, &previousTexture);
+    const bool scissor = glIsEnabled (GL_SCISSOR_TEST);
+    glDisable (GL_SCISSOR_TEST);
+    glBindFramebuffer (GL_READ_FRAMEBUFFER, source.getFramebuffer ());
+    glBindFramebuffer (GL_DRAW_FRAMEBUFFER, m_framebuffer);
+    glBlitFramebuffer (0, 0, source.getTextureWidth (0), source.getTextureHeight (0),
+                       0, 0, getTextureWidth (0), getTextureHeight (0),
+                       GL_COLOR_BUFFER_BIT, GL_NEAREST);
+    const auto restore = [&] {
+        glBindFramebuffer (GL_DRAW_FRAMEBUFFER, previousDraw);
+        glBindFramebuffer (GL_READ_FRAMEBUFFER, previousRead);
+        glBindTexture (GL_TEXTURE_2D, previousTexture);
+        if (scissor) glEnable (GL_SCISSOR_TEST);
+    };
+    try {
+        if (m_sceneReflectionMipmaps) {
+            m_reflectionGenerator->generate (m_texture, getTextureWidth (0), getTextureHeight (0),
+                m_mipLevelCount,
+                m_format == TextureFormat_RGB888 || m_format == TextureFormat_ARGB8888);
+        }
+    } catch (...) {
+        restore ();
+        throw;
+    }
+    restore ();
+}
+
 const std::string& CFBO::getName () const { return this->m_name; }
 
 const float& CFBO::getScale () const { return this->m_scale; }
@@ -230,6 +281,12 @@ void CFBO::resize (uint32_t realWidth, uint32_t realHeight, uint32_t textureWidt
     const auto filter = m_flags & TextureFlags_NoInterpolation ? GL_NEAREST : GL_LINEAR;
     glTexParameteri (GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filter);
     glTexParameteri (GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, filter);
+    const auto replacementMipCount = m_sceneReflectionMipmaps
+        ? sceneReflectionMipLevels (textureWidth, textureHeight) : 1;
+    if (m_sceneReflectionMipmaps) {
+        glTexParameteri (GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, replacementMipCount - 1);
+        glTexParameteri (GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+    }
     glTexParameterf (GL_TEXTURE_2D, GL_TEXTURE_MAX_ANISOTROPY, m_maxAnisotropy);
     GLuint replacementDepth = GL_NONE;
     if (m_depthbuffer != GL_NONE) {
@@ -256,6 +313,11 @@ void CFBO::resize (uint32_t realWidth, uint32_t realHeight, uint32_t textureWidt
             glFramebufferRenderbuffer (GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
                                        GL_RENDERBUFFER, m_depthbuffer);
     }
+    if (status == GL_FRAMEBUFFER_COMPLETE && m_sceneReflectionMipmaps) {
+        // New storage starts black, including every generated mip level.
+        clear (glm::vec4 (0.0f));
+        glGenerateMipmap (GL_TEXTURE_2D);
+    }
     glBindFramebuffer (GL_DRAW_FRAMEBUFFER, previousDrawFramebuffer);
     glBindFramebuffer (GL_READ_FRAMEBUFFER, previousReadFramebuffer);
     glBindTexture (GL_TEXTURE_2D, status == GL_FRAMEBUFFER_COMPLETE && previousTexture == static_cast<GLint> (m_texture)
@@ -272,6 +334,7 @@ void CFBO::resize (uint32_t realWidth, uint32_t realHeight, uint32_t textureWidt
 
     const auto previousTargetTexture = m_texture;
     m_texture = replacement;
+    m_mipLevelCount = replacementMipCount;
     glDeleteTextures (1, &previousTargetTexture);
     if (replacementDepth != GL_NONE) {
         const auto previousDepth = m_depthbuffer;

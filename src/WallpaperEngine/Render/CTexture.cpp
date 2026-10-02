@@ -330,6 +330,17 @@ uint32_t CTexture::getTextureHeight (const uint32_t imageIndex) const {
     return (*this->m_header->images[imageIndex].begin ())->height;
 }
 
+uint32_t CTexture::mipLevelCount (const Texture& header, uint32_t imageIndex) {
+    if (header.isVideoMp4 || header.flags & TextureFlags_Video) return 1;
+    if (imageIndex >= header.imageCount) imageIndex = 0;
+    const auto image = header.images.find (imageIndex);
+    return image == header.images.end () ? 0 : image->second.size ();
+}
+
+uint32_t CTexture::getMipLevelCount (uint32_t imageIndex) const {
+    return mipLevelCount (*m_header, imageIndex);
+}
+
 uint32_t CTexture::getRealWidth () const {
     return this->isAnimated () ? this->getHeader ().gifWidth : this->getHeader ().width;
 }

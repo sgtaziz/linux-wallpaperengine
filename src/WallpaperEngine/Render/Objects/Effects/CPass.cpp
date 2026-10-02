@@ -125,6 +125,7 @@ std::shared_ptr<const TextureProvider> CPass::resolveTexture (
 }
 
 std::shared_ptr<const CFBO> CPass::resolveFBO (const std::string& name) const {
+    if (name == "_rt_MipMappedFrameBuffer") return m_renderable.getScene ().findFBO (name);
     auto fbo = this->m_fboProvider->find (name);
 
     if (fbo == nullptr) {
@@ -352,7 +353,9 @@ CPass::resolveTextureAnimationState (const std::shared_ptr<const TextureProvider
     return state;
 }
 
-void CPass::bindTextureUnit (int index, const std::shared_ptr<const TextureProvider>& texture, uint32_t frame) const {
+void CPass::bindTextureUnit (int index, const std::shared_ptr<const TextureProvider>& texture, uint32_t frame) {
+    if (index >= 0 && static_cast<size_t> (index) < m_textureMipLevelCounts.size ())
+        m_textureMipLevelCounts[index] = texture ? texture->getMipLevelCount (frame) : 1.0f;
     if (texture == nullptr) {
 	return;
     }
@@ -443,6 +446,9 @@ void CPass::setupRenderUniforms () {
     const auto& scene = m_renderable.getScene ();
     m_sceneTexelSize = {1.0f / scene.getWidth (), 1.0f / scene.getHeight ()};
     m_sceneTexelSizeHalf = m_sceneTexelSize * 0.5f;
+    const auto root = scene.getFBO ();
+    m_sceneScreen = {root->getRealWidth (), root->getRealHeight (),
+                     static_cast<float> (root->getRealWidth ()) / root->getRealHeight ()};
     // add uniforms
     for (const auto& value : this->m_uniforms | std::views::values) {
 	switch (value->type) {
@@ -821,6 +827,8 @@ void CPass::setupTextureUniforms () {
     // but for now just set first vertex's textures
     // and then try with fragment's and override any existing
     for (const auto& [index, textureName] : this->m_shader->getVertex ().getTextures ()) {
+	if (textureName == "_rt_MipMappedFrameBuffer"
+            && glGetUniformLocation (m_programID, ("g_Texture" + std::to_string (index)).c_str ()) < 0) continue;
 	try {
 	    auto texture = textureName.find ("_rt_") == 0 || textureName.find ("_alias_") == 0
 		? this->resolveFBO (textureName)
@@ -838,6 +846,8 @@ void CPass::setupTextureUniforms () {
     }
 
     for (const auto& [index, textureName] : this->m_shader->getFragment ().getTextures ()) {
+	if (textureName == "_rt_MipMappedFrameBuffer"
+            && glGetUniformLocation (m_programID, ("g_Texture" + std::to_string (index)).c_str ()) < 0) continue;
 	try {
 	    auto texture = textureName.find ("_rt_") == 0 || textureName.find ("_alias_") == 0
 		? this->resolveFBO (textureName)
@@ -1045,6 +1055,9 @@ void CPass::setupUniforms () {
     this->addUniform ("g_EffectTextureProjectionMatrixInverse", glm::mat4 (1.0));
     this->addUniform ("g_TexelSize", &m_sceneTexelSize);
     this->addUniform ("g_TexelSizeHalf", &m_sceneTexelSizeHalf);
+    this->addUniform ("g_Screen", &m_sceneScreen);
+    for (size_t slot = 0; slot < m_textureMipLevelCounts.size (); ++slot)
+        addUniform ("g_Texture" + std::to_string (slot) + "MipMapInfo", &m_textureMipLevelCounts[slot]);
     this->addUniform ("g_AudioSpectrum16Left", spectrum.audio16[0].data (), 16);
     this->addUniform ("g_AudioSpectrum16Right", spectrum.audio16[1].data (), 16);
     this->addUniform ("g_AudioSpectrum32Left", spectrum.audio32[0].data (), 32);
