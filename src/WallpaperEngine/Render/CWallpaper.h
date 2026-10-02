@@ -184,6 +184,8 @@ protected:
     std::shared_ptr<CFBO> m_sceneFBO = nullptr;
     // Lazily acquired by compiled samplers; retained across scene resizing.
     mutable std::shared_ptr<CFBO> m_mipMappedSceneFBO;
+    mutable std::shared_ptr<CFBO> m_reflectionSceneFBO;
+    mutable std::shared_ptr<CFBO> m_nullShaderResourceFBO;
     std::shared_ptr<CFBO> m_hdrOutput = nullptr;
 
     GLuint m_vaoBuffer = GL_NONE;

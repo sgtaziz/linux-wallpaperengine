@@ -5,6 +5,7 @@
 #include "WallpaperEngine/Render/Wallpapers/SceneTransform.h"
 #include "WallpaperEngine/Render/Objects/ParticleBirthGeometry.h"
 #include "WallpaperEngine/Render/WallpaperState.h"
+#include "WallpaperEngine/Render/Camera.h"
 
 #include <glm/gtc/constants.hpp>
 #include <glm/gtc/matrix_transform.hpp>
@@ -786,4 +787,60 @@ TEST_CASE ("Model presentation culling retains authored mirrored facing", "[scen
     // Perspective child composition has no authored canvas/local Y reflection.
     REQUIRE_FALSE (modelPresentationReversesWinding (false, true));
     REQUIRE (modelPresentationReversesWinding (false, false));
+}
+
+TEST_CASE ("Secondary projection preserves canvas offsets and reflects the view input",
+           "[render][secondary-reflection]") {
+    using WallpaperEngine::Render::Wallpapers::secondarySceneProjection;
+    // Native captured orthographic MODEL stage/main both have these clip
+    // coordinates. Canvas translation must survive the two Y sign changes.
+    auto canvas = glm::ortho (0.0f,768.0f,0.0f,432.0f,-2000.0f,2000.0f);
+    const auto reflected = secondarySceneProjection (glm::mat4 (1), canvas, glm::mat4 (1));
+    const auto point = reflected * glm::vec4 (384,100,0,1);
+    REQUIRE (point.x == Catch::Approx (0));
+    REQUIRE (point.y == Catch::Approx (-0.537037037f));
+    // A translated view is not a global clip Y reversal: X translation
+    // survives, the reflected output Y translation changes its sign.
+    auto view = glm::translate (glm::mat4 (1), glm::vec3 (5,7,0));
+    const auto posed = secondarySceneProjection (glm::mat4 (1), canvas, view) * glm::vec4 (384,100,0,1);
+    REQUIRE (posed.x == Catch::Approx (10.0f/768));
+    REQUIRE (posed.y == Catch::Approx (186.0f/432-1));
+    // Source toggles a single element, not the whole Y column. Oblique terms
+    // are retained; this guards accidental broad conjugation of projection.
+    glm::mat4 oblique (1); oblique[1][0] = .25f; oblique[3][1] = .3f;
+    const auto projected = secondarySceneProjection (glm::mat4 (1), oblique, glm::mat4 (1))
+        * glm::vec4 (2,4,0,1);
+    REQUIRE (projected.x == Catch::Approx (1));
+    REQUIRE (projected.y == Catch::Approx (4.3f));
+}
+
+TEST_CASE ("Secondary projection uses the camera's normalized render basis",
+           "[render][secondary-reflection]") {
+    using WallpaperEngine::Render::Camera;
+    using namespace WallpaperEngine::Render::Wallpapers;
+    const auto flip = glm::scale (glm::mat4 (1), glm::vec3 (1,-1,1));
+    // Exercise the same camera builders and authored-point adapter consumed
+    // by CScene/CModel. Native camera-space values are normalized at both
+    // ends of the orthographic view; perspective keeps the native view.
+    for (bool orthographic : {false,true}) {
+        const Camera::Transforms transforms {{{15,23,200},{3,-9,0},{.2f,1,.1f}},1.3f};
+        const auto nativeView = glm::lookAt (transforms.pose.eye,
+            transforms.pose.center, transforms.pose.up);
+        const auto renderView = Camera::renderLookAtForTransforms (transforms.pose,orthographic,768,432);
+        const auto projection = Camera::makeProjectionForTransforms (
+            768,432,60,.1f,1000,transforms,orthographic,1.2f);
+        const auto bridge = sceneAuthoredToCamera (768,432,orthographic);
+        const auto nativeProjection = flip*projection*bridge;
+        const auto point = glm::vec4 (384,100,17,1);
+        const auto nativeInput = point;
+        auto nativeReflectedProjection = nativeProjection;
+        nativeReflectedProjection[1][1] *= -1;
+        const auto nativeReflected = nativeReflectedProjection*nativeView*flip*nativeInput;
+        const auto nativeToRenderClip = flip;
+        const auto expected = nativeToRenderClip*nativeReflected;
+        const auto actual = secondarySceneProjectionForCamera (glm::mat4 (1),projection,renderView,bridge)
+            *sceneAuthoredToCamera (768,432,orthographic)*point;
+        for (int i=0;i<4;++i)
+            REQUIRE (actual[i] == Catch::Approx (expected[i]).margin (1e-5f));
+    }
 }

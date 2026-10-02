@@ -41,6 +41,8 @@ struct SceneData {
     /** Serialized native point-light shader slots; object count may differ. */
     int pointLightSlots = 0;
     int spotLightSlots = 0;
+    /** Context bit5 initially false; controls color and depth clear for scene stages. */
+    UserSettingUniquePtr clearEnabled;
     struct {
 	UserSettingUniquePtr ambient;
 	UserSettingUniquePtr skylight;

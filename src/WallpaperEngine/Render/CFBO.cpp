@@ -192,10 +192,35 @@ uint32_t CFBO::getFlags () const { return this->m_flags; }
 
 GLuint CFBO::getFramebuffer () const { return this->m_framebuffer; }
 
-GLuint CFBO::getDepthbuffer () const { return this->m_depthbuffer; }
+GLuint CFBO::getDepthbuffer () const { return m_depthSource ? m_depthSource->getDepthbuffer () : m_depthbuffer; }
+
+void CFBO::attachSharedDepth (std::shared_ptr<const CFBO> source) {
+    if (!source || source.get () == this || m_depthbuffer != GL_NONE
+        || source->getDepthbuffer () == GL_NONE
+        || source->getTextureWidth (0) != getTextureWidth (0)
+        || source->getTextureHeight (0) != getTextureHeight (0))
+        throw std::invalid_argument ("Invalid shared framebuffer depth attachment");
+    for (auto* owner = source.get (); owner; owner = owner->m_depthSource.get ())
+        if (owner == this)
+            throw std::invalid_argument ("Cyclic shared framebuffer depth attachment");
+    const auto previousDepth = getDepthbuffer ();
+    GLint draw = 0, read = 0;
+    glGetIntegerv (GL_DRAW_FRAMEBUFFER_BINDING, &draw);
+    glGetIntegerv (GL_READ_FRAMEBUFFER_BINDING, &read);
+    glBindFramebuffer (GL_FRAMEBUFFER, m_framebuffer);
+    glFramebufferRenderbuffer (GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, source->getDepthbuffer ());
+    const auto status = glCheckFramebufferStatus (GL_FRAMEBUFFER);
+    if (status != GL_FRAMEBUFFER_COMPLETE)
+        glFramebufferRenderbuffer (GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, previousDepth);
+    glBindFramebuffer (GL_DRAW_FRAMEBUFFER, draw);
+    glBindFramebuffer (GL_READ_FRAMEBUFFER, read);
+    if (status != GL_FRAMEBUFFER_COMPLETE)
+        throw std::runtime_error ("Incomplete shared framebuffer depth attachment");
+    m_depthSource = std::move (source);
+}
 
 void CFBO::attachDepth16 () {
-    if (m_depthbuffer != GL_NONE) return;
+    if (m_depthbuffer != GL_NONE || m_depthSource) return;
     GLint previousDraw = 0;
     GLint previousRead = 0;
     GLint previousRenderbuffer = 0;
