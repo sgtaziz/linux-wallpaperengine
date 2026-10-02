@@ -105,6 +105,7 @@ private:
     glm::vec2 m_presentationTextureSize {0.0f};
     [[nodiscard]] bool rendersAtOutputSize () const override { return true; }
     void resizeSceneTargets (int width, int height);
+    void refreshAutomaticProjection ();
     Render::CObject* createObject (const Object& object);
     [[nodiscard]] const Object* findObjectData (int id) const;
     void flushDestroyedScriptLayers ();

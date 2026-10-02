@@ -113,20 +113,25 @@ template <> void WallpaperState::updateTextureUVs<WallpaperState::TextureUVsScal
 
 template <> void WallpaperState::updateTextureUVs<WallpaperState::TextureUVsScaling::DefaultUVs> () {
     this->resetUVs ();
+    const float viewportWidth = this->getViewportWidth ();
+    const float viewportHeight = this->getViewportHeight ();
+    const float projectionWidth = this->getProjectionWidth ();
+    const float projectionHeight = this->getProjectionHeight ();
+    if (viewportWidth <= 0 || viewportHeight <= 0 || projectionWidth <= 0 || projectionHeight <= 0) return;
 
-    const int viewportWidth = this->getViewportWidth ();
-    const int viewportHeight = this->getViewportHeight ();
-    const int projectionWidth = this->getProjectionWidth ();
-    const int projectionHeight = this->getProjectionHeight ();
-
-    if ((viewportHeight > viewportWidth && projectionWidth >= projectionHeight)
-	|| (viewportWidth > viewportHeight && projectionHeight > projectionWidth)) {
-	updateUs (projectionWidth, projectionHeight);
-    }
-
-    if ((viewportWidth > viewportHeight && projectionWidth >= projectionHeight)
-	|| (viewportHeight > viewportWidth && projectionHeight > projectionWidth)) {
-	updateVs (projectionWidth, projectionHeight);
+    // Native 140183a70 default mode crops the axis selected by the content
+    // and client aspect ratios. Retain fractional extents: rounding an
+    // intermediate scaled canvas changes the orthographic projection.
+    if (viewportWidth / viewportHeight < projectionWidth / projectionHeight) {
+        const float inset = (projectionWidth - (projectionHeight / viewportHeight) * viewportWidth)
+            * 0.5f / projectionWidth;
+        this->m_UVs.ustart = inset;
+        this->m_UVs.uend = 1.0f - inset;
+    } else {
+        const float inset = (projectionHeight - (projectionWidth / viewportWidth) * viewportHeight)
+            * 0.5f / projectionHeight;
+        this->m_UVs.vstart = m_vflip ? inset : 1.0f - inset;
+        this->m_UVs.vend = m_vflip ? 1.0f - inset : inset;
     }
 }
 

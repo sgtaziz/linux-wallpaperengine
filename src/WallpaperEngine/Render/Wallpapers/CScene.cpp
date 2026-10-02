@@ -1,7 +1,7 @@
 #include "SpotLightUniforms.h"
 #include "LegacyLightUniforms.h"
 #include "WallpaperEngine/Render/Objects/CImage.h"
-#include "WallpaperEngine/Render/Objects/ImageDimensions.h"
+#include "SceneAutoProjection.h"
 #include "WallpaperEngine/Render/Objects/CModel.h"
 #include "WallpaperEngine/Render/Objects/CParticle.h"
 #include "WallpaperEngine/Render/Objects/CSound.h"
@@ -109,37 +109,9 @@ CScene::CScene (
     float width = scene->camera.projection.width;
     float height = scene->camera.projection.height;
 
-    // detect size if the orthogonal project is auto
-    if (scene->camera.projection.isAuto) {
-	glm::vec2 maxExtent = { 0.0f, 0.0f };
-
-	for (const auto& object : scene->objects) {
-	    if (!object->is<Image> ()) {
-		continue;
-	    }
-
-	    const auto* image = object->as<Image> ();
-	    if (!image->origin || !image->origin->value) {
-		continue;
-	    }
-
-	    const glm::vec3 origin = image->origin->value->getVec3 ();
-	    const auto authored = Data::JSON::JSON::parse (image->initialConfiguration);
-	    const std::optional<glm::vec2> authoredSize = authored.contains ("size")
-	        ? std::optional<glm::vec2> (image->size->value->getVec2 ()) : std::nullopt;
-	    maxExtent = glm::max (maxExtent, Objects::imageAutoProjectionExtent (
-	        glm::vec2 (origin), authoredSize));
-	}
-
-	if (maxExtent.x > 0.0f && maxExtent.y > 0.0f) {
-	    width = maxExtent.x * 2.0f;
-	    height = maxExtent.y * 2.0f;
-	} else {
-	    width = this->getContext ().getOutput ().getFullWidth ();
-	    height = this->getContext ().getOutput ().getFullHeight ();
-	    sLog.debug ("Auto projection: falling back to screen resolution ", width, "x", height);
-	}
-    }
+    // Native context logical dimensions start at 1 before source loading.
+    // Automatic selection is performed after the current main list exists.
+    if (scene->camera.projection.isAuto) width = height = 1.0f;
 
     this->m_parallaxDisplacement = { 0, 0 };
 
@@ -161,12 +133,18 @@ CScene::CScene (
     // request no depth attachment. Keep that lifetime tied to this target.
     this->m_sceneFBO->attachDepth16 ();
 
-    const uint32_t sceneWidth = this->m_camera->getWidth ();
-    const uint32_t sceneHeight = this->m_camera->getHeight ();
+    // Logical automatic dimensions are independent of physical client targets
+    // and g_Screen. Keep source loading against the native 1x1 logical context.
+    const uint32_t initialTargetWidth = scene->camera.projection.isAuto
+        ? std::max (2, getContext ().getOutput ().getFullWidth ()) : getWidth ();
+    const uint32_t initialTargetHeight = scene->camera.projection.isAuto
+        ? std::max (2, getContext ().getOutput ().getFullHeight ()) : getHeight ();
+    if (scene->camera.projection.isAuto)
+        m_sceneFBO->resize (initialTargetWidth, initialTargetHeight, initialTargetWidth, initialTargetHeight);
 
     this->_rt_shadowAtlas = this->create (
-	"_rt_shadowAtlas", TextureFormat_ARGB8888, TextureFlags_ClampUVs, 1.0, { sceneWidth, sceneHeight },
-	{ sceneWidth, sceneHeight }
+	"_rt_shadowAtlas", TextureFormat_ARGB8888, TextureFlags_ClampUVs, 1.0,
+        { initialTargetWidth, initialTargetHeight }, { initialTargetWidth, initialTargetHeight }
     );
     this->alias ("_alias_lightCookie", "_rt_shadowAtlas");
 
@@ -207,18 +185,24 @@ CScene::CScene (
 	this->addObjectToRenderOrder (*object);
     }
 
+    refreshAutomaticProjection ();
+    const uint32_t sceneWidth = getWidth ();
+    const uint32_t sceneHeight = getHeight ();
+    const uint32_t targetWidth = scene->camera.projection.isAuto ? initialTargetWidth : sceneWidth;
+    const uint32_t targetHeight = scene->camera.projection.isAuto ? initialTargetHeight : sceneHeight;
+
     // create extra framebuffers for the bloom effect
     this->_rt_4FrameBuffer = this->create (
-	"_rt_4FrameBuffer", sceneFormat, TextureFlags_ClampUVs, 1.0, { sceneWidth / 4, sceneHeight / 4 },
-	{ sceneWidth / 4, sceneHeight / 4 }
+	"_rt_4FrameBuffer", sceneFormat, TextureFlags_ClampUVs, 1.0, { targetWidth / 4, targetHeight / 4 },
+	{ targetWidth / 4, targetHeight / 4 }
     );
     this->_rt_8FrameBuffer = this->create (
-	"_rt_8FrameBuffer", sceneFormat, TextureFlags_ClampUVs, 1.0, { sceneWidth / 8, sceneHeight / 8 },
-	{ sceneWidth / 8, sceneHeight / 8 }
+	"_rt_8FrameBuffer", sceneFormat, TextureFlags_ClampUVs, 1.0, { targetWidth / 8, targetHeight / 8 },
+	{ targetWidth / 8, targetHeight / 8 }
     );
     this->_rt_Bloom = this->create (
-	"_rt_Bloom", sceneFormat, TextureFlags_ClampUVs, 1.0, { sceneWidth / 8, sceneHeight / 8 },
-	{ sceneWidth / 8, sceneHeight / 8 }
+	"_rt_Bloom", sceneFormat, TextureFlags_ClampUVs, 1.0, { targetWidth / 8, targetHeight / 8 },
+	{ targetWidth / 8, targetHeight / 8 }
     );
     if (m_hdrPostprocessing) {
 	this->setHdrPresentation ({
@@ -467,16 +451,19 @@ const Audio::Drivers::Recorders::StereoSpectrum::Bands& CScene::getAudioSpectrum
 
 void CScene::renderFrame (const glm::ivec4& viewport) {
     m_particleFrameDurations.publish (getDeltaTime (), getContext ().getDriver ().getFrameCounter ());
-    // Native WM_SIZE -> 14017f1b0 resizes root/auxiliary targets in both
-    // camera modes. Authored orthographic dimensions remain scene units;
-    // 140183a70 applies the output crop through projection instead.
-    if (viewport.z > 1 && viewport.w > 1) {
-        resizeSceneTargets (viewport.z, viewport.w);
+    const auto refreshPresentation = [&] {
         auto presentation = getState ();
         presentation.updateState (viewport, false, getWidth (), getHeight ());
         const auto uv = presentation.getTextureUVs ();
         m_rootRenderClipTransform = scenePresentationClipTransform (
             {uv.ustart, uv.uend, uv.vstart, uv.vend});
+    };
+    // Native WM_SIZE -> 14017f1b0 resizes root/auxiliary targets in both
+    // camera modes. Authored orthographic dimensions remain scene units;
+    // 140183a70 applies the output crop through projection instead.
+    if (viewport.z > 1 && viewport.w > 1) {
+        resizeSceneTargets (viewport.z, viewport.w);
+        refreshPresentation ();
         m_presentationTextureSize = glm::vec2 (viewport.z, viewport.w);
     }
     // Native 14017fa70:217–225 advances this scene clock before its particle
@@ -523,6 +510,10 @@ void CScene::renderFrame (const glm::ivec4& viewport) {
     for (const auto& object : m_objectsByRenderOrder)
         if (object->is<Objects::CParticle> ())
             object->as<Objects::CParticle> ()->advanceFrame ();
+    // Native 1401891a0 resets the first image after object ticks, before scripts.
+    refreshAutomaticProjection ();
+    if (getScene ().camera.projection.isAuto && viewport.z > 1 && viewport.w > 1)
+        refreshPresentation ();
     // Native cursor dispatch (140189e10) precedes SceneScript update (140171440).
     dispatchCursorEvents ();
     // run a tick in the javascript logic
@@ -734,6 +725,20 @@ void CScene::renderFrame (const glm::ivec4& viewport) {
     // Native copies the completed scene and generates reflection mips before
     // DOF/HDR presentation. This snapshot is consumed by the next scene frame.
     if (m_mipMappedSceneFBO) m_mipMappedSceneFBO->snapshotFrom (*m_sceneFBO);
+}
+
+void CScene::refreshAutomaticProjection () {
+    const auto& projection = getScene ().camera.projection;
+    if (!projection.isAuto || !projection.isOrthogonal) return;
+    auto* image = firstAutomaticProjectionImage (m_objectsByRenderOrder, [this] (CObject* object) {
+        // The internal bloom presentation object is not in native scene158.
+        return object != m_bloomObject && object->is<Objects::CImage> ()
+            ? object->as<Objects::CImage> () : nullptr;
+    });
+    if (!image) return;
+    const auto size = image->getLoadedLogicalSize ();
+    image->getImage ().origin->value->update (automaticProjectionImageOrigin (size), DynamicValue::Script);
+    m_camera->setOrthogonalProjection (size.x, size.y);
 }
 
 void CScene::resizeSceneTargets (int width, int height) {

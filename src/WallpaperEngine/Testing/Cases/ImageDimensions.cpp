@@ -1,6 +1,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/catch_approx.hpp>
 #include <algorithm>
+#include <vector>
 
 #include "WallpaperEngine/Assets/AssetLocator.h"
 #include "WallpaperEngine/Data/Model/Object.h"
@@ -9,6 +10,9 @@
 #include "WallpaperEngine/Data/Parsers/ObjectParser.h"
 #include "WallpaperEngine/FileSystem/Container.h"
 #include "WallpaperEngine/Render/Objects/ImageDimensions.h"
+#include "WallpaperEngine/Render/Wallpapers/SceneAutoProjection.h"
+#include "WallpaperEngine/Render/Wallpapers/SceneTransform.h"
+#include "WallpaperEngine/Render/WallpaperState.h"
 #include "WallpaperEngine/Render/Objects/ImagePrelighting.h"
 
 using namespace WallpaperEngine::Data::Model;
@@ -190,18 +194,58 @@ TEST_CASE ("Native composite target extents follow source and model kind indepen
     REQUIRE (halves.backing == glm::vec2 (5, 6));
 }
 
-TEST_CASE ("Automatic projection preserves omitted image size independently of logical defaults",
-           "[scene][image][size][projection]") {
-    using WallpaperEngine::Render::Objects::imageAutoProjectionExtent;
-    // Native and accepted rendering of an omitted-size autosize image with
-    // a 500x291 source has a 500x291 canvas, not 501x292 from logical default1.
-    REQUIRE (imageAutoProjectionExtent ({250, 145.5f}, std::nullopt) * 2.0f == glm::vec2 (500, 291));
-    REQUIRE (imageAutoProjectionExtent ({-250, -145.5f}, std::nullopt) * 2.0f == glm::vec2 (500, 291));
-    // Explicit sizes still contribute their authored extent, including zero
-    // and one-axis values; they must not be treated as omitted constructor data.
-    REQUIRE (imageAutoProjectionExtent ({100, 80}, glm::vec2 (80, 70)) == glm::vec2 (140, 115));
-    REQUIRE (imageAutoProjectionExtent ({100, 80}, glm::vec2 (0, 70)) == glm::vec2 (100, 115));
-    REQUIRE (imageAutoProjectionExtent ({100, 80}, glm::vec2 (0)) == glm::vec2 (100, 80));
+TEST_CASE ("Automatic projection follows current order including hidden loaded images",
+           "[scene][image][first-auto]") {
+    using namespace WallpaperEngine::Render::Wallpapers;
+    struct Layer { bool image; bool visible; glm::vec2 loaded; glm::vec3 origin; };
+    Layer text {false, true, {1000, 1000}, {0, 0, 0}};
+    Layer first {true, true, {128, 96}, {40, 20, 7}};
+    Layer second {true, false, {256, 128}, {240, 100, 0}};
+    Layer green {true, true, {8, 8}, {100, 70, 0}};
+    std::vector<Layer*> order {&text, &first, &second, &green};
+    const auto image = [] (Layer* object) { return object->image ? object : nullptr; };
+    // Native auto/manual controls: this is the first loaded logical canvas,
+    // not the maximum authored bounds or the dimensions of the hidden layer.
+    auto* selected = firstAutomaticProjectionImage (order, image);
+    REQUIRE (selected == &first);
+    first.origin = automaticProjectionImageOrigin (selected->loaded);
+    REQUIRE (first.origin == glm::vec3 (64, 48, 0));
+    REQUIRE (second.origin == glm::vec3 (240, 100, 0));
+    // Native sortLayer(second,0) changes selection on the next outer update.
+    std::rotate (order.begin (), order.begin () + 2, order.begin () + 3);
+    selected = firstAutomaticProjectionImage (order, image);
+    REQUIRE (selected == &second);
+    second.origin = automaticProjectionImageOrigin (selected->loaded);
+    REQUIRE (second.origin == glm::vec3 (128, 64, 0));
+    REQUIRE (first.origin == glm::vec3 (64, 48, 0));
+    REQUIRE_FALSE (selected->visible);
+    order = {&text};
+    REQUIRE (firstAutomaticProjectionImage (order, image) == nullptr);
+    order.clear ();
+    REQUIRE (firstAutomaticProjectionImage (order, image) == nullptr);
+}
+
+TEST_CASE ("Automatic projection consumes loaded logical source extent before recentering",
+           "[scene][image][first-auto]") {
+    using WallpaperEngine::Render::Objects::loadedImageDimensions;
+    using WallpaperEngine::Render::Wallpapers::automaticProjectionImageOrigin;
+    // Accepted animated autosize source500x291: omitted authored dimensions
+    // remain constructor1, and the pre-load projection is1x1. Texture loading
+    // supplies the native logical extent; origin inference would be wrong.
+    const auto gif = loadedImageDimensions ({1, 1}, {.autosize = true, .animated = true},
+                                            glm::vec2 (500, 291), {1, 1});
+    REQUIRE (gif.logical == glm::vec2 (500, 291));
+    REQUIRE (automaticProjectionImageOrigin (gif.logical) == glm::vec3 (250, 145.5f, 0));
+    // Fullscreen geometry uses the projection, while native auto still reads
+    // the built logical source dimensions, not geometry or allocated padding.
+    const auto full = loadedImageDimensions ({64, 32}, {.fullscreen = true},
+                                             glm::vec2 (31, 19), {1, 1});
+    REQUIRE (full.geometry == glm::vec2 (1));
+    REQUIRE (full.logical == glm::vec2 (31, 19));
+    REQUIRE (automaticProjectionImageOrigin (full.logical) == glm::vec3 (15.5f, 9.5f, 0));
+    REQUIRE (automaticProjectionImageOrigin ({31.75f, 19.5f}) == glm::vec3 (15.875f, 9.75f, 0));
+    // The source stores float logical extents; integer context conversion is
+    // distinct from half-size origin and must not truncate the latter first.
 }
 
 TEST_CASE ("Autosize project layers retain scene dimensions when the root source resizes",
@@ -234,4 +278,42 @@ TEST_CASE ("Autosize project layers retain scene dimensions when the root source
     REQUIRE (animated.logical == source);
     REQUIRE (animated.geometry == source);
     REQUIRE (animated.backing == source);
+}
+
+TEST_CASE ("Native default projection selects the fill axis for both camera modes",
+           "[scene][presentation][first-auto]") {
+    using WallpaperEngine::Render::WallpaperState;
+    using WallpaperEngine::Render::Wallpapers::scenePresentationClipTransform;
+    using Mode = WallpaperState::TextureUVsScaling;
+    for (const auto output : {glm::ivec2 (1280, 720), glm::ivec2 (720, 1280)}) {
+        for (const auto size : {glm::ivec2 (128, 96), glm::ivec2 (256, 128), glm::ivec2 (311, 197)}) {
+            for (bool flip : {false, true}) {
+                CAPTURE (output.x, output.y, size.x, size.y, flip);
+                WallpaperState state (Mode::DefaultUVs, 0);
+                state.updateState ({0, 0, output.x, output.y}, flip, size.x, size.y);
+                const auto uv = state.getTextureUVs ();
+                const auto clip = scenePresentationClipTransform ({uv.ustart, uv.uend, uv.vstart, uv.vend});
+                const auto projection = clip * glm::ortho (-size.x * 0.5f, size.x * 0.5f,
+                                                           -size.y * 0.5f, size.y * 0.5f);
+                const float nativeScale = std::max (float (output.x) / size.x, float (output.y) / size.y);
+                REQUIRE (projection[0][0] * output.x * 0.5f == Catch::Approx (nativeScale));
+                REQUIRE (projection[1][1] * output.y * 0.5f == Catch::Approx (nativeScale));
+                // Native centers the uncropped opposite axis, including odd extents.
+                const auto center = projection * glm::vec4 (0, 0, 0, 1);
+                REQUIRE (center.x == Catch::Approx (0).margin (1e-6));
+                REQUIRE (center.y == Catch::Approx (0).margin (1e-6));
+                REQUIRE ((uv.vstart > uv.vend) != flip);
+            }
+        }
+    }
+    // The existing explicit CLI strategies remain distinct for wide content.
+    for (const auto mode : {Mode::ZoomFillUVs, Mode::ZoomFitUVs, Mode::StretchUVs}) {
+        WallpaperState state (mode, 0);
+        state.updateState ({0, 0, 1280, 720}, false, 256, 128);
+        const auto uv = state.getTextureUVs ();
+        const auto clip = scenePresentationClipTransform ({uv.ustart, uv.uend, uv.vstart, uv.vend});
+        const auto projection = clip * glm::ortho (-128.0f, 128.0f, -64.0f, 64.0f);
+        REQUIRE (projection[0][0] * 640 == Catch::Approx (mode == Mode::ZoomFillUVs ? 5.625f : 5.0f));
+        REQUIRE (projection[1][1] * 360 == Catch::Approx (mode == Mode::ZoomFitUVs ? 5.0f : 5.625f));
+    }
 }

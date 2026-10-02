@@ -54,6 +54,7 @@ public:
     [[nodiscard]] bool assignPuppetEmissionBones (std::span<ParticleCore::ImageEmitterSample> samples) const;
     [[nodiscard]] bool hasPuppetEmissionDeformation () const;
     [[nodiscard]] glm::vec2 getSize () const;
+    [[nodiscard]] glm::vec2 getLoadedLogicalSize () const { return m_loadedLogicalSize; }
     /** Execute a named authored material function on this image's effect targets. */
     bool executeMaterialFunction (const std::string& name);
     [[nodiscard]] std::shared_ptr<ImageTextureAnimation> getTextureAnimation ();
