@@ -8,6 +8,7 @@
 #include "WallpaperEngine/Render/UserTextureSelection.h"
 #include "WallpaperEngine/Data/Parsers/EffectParser.h"
 #include "WallpaperEngine/Render/Objects/ImageCompositeSteps.h"
+#include "WallpaperEngine/Render/Objects/ImageQuadUV.h"
 #include "WallpaperEngine/Data/Model/Project.h"
 #include "WallpaperEngine/Data/Model/Wallpaper.h"
 #include "WallpaperEngine/Data/Model/Material.h"
@@ -68,6 +69,63 @@ GLint internalFormat (const CFBO& fbo) {
     glBindTexture (GL_TEXTURE_2D, fbo.getTextureID (0));
     glGetTexLevelParameteriv (GL_TEXTURE_2D, 0, GL_TEXTURE_INTERNAL_FORMAT, &internal);
     return internal;
+}
+
+TEST_CASE ("Direct image padding uses allocated texels and model exclusions", "[render][image-quad-uv]") {
+    using WallpaperEngine::Render::Objects::directImageQuadUV;
+    // Native positive controls use both 32-square and odd 31x19 sources.
+    const auto square = directImageQuadUV (1, 1, 32, 32, false, false, false, false);
+    REQUIRE (square.left == Catch::Approx (0.0046875f));
+    REQUIRE (square.right - square.left == Catch::Approx (0.990625f));
+    const auto odd = directImageQuadUV (1, 1, 31, 19, false, false, false, false);
+    REQUIRE (odd.right - odd.left == Catch::Approx (1.0f - 0.3f / 31));
+    REQUIRE (odd.top - odd.bottom == Catch::Approx (1.0f - 0.3f / 19));
+    // Cropped logical pixels retain their existing extent within allocation;
+    // padding must not divide by logical dimensions or shrink their ratio.
+    const auto cropped = directImageQuadUV (31.0f / 64, 19.0f / 32, 64, 32,
+                                           false, false, false, false);
+    REQUIRE (cropped.left == Catch::Approx (0.15f / 64));
+    REQUIRE (cropped.right == Catch::Approx (30.85f / 64));
+    REQUIRE (cropped.top == Catch::Approx (18.85f / 32));
+    for (int flag = 0; flag < 4; ++flag) {
+        const auto excluded = directImageQuadUV (0.75f, 0.5f, 32, 16,
+                                                flag == 0, flag == 1, flag == 2, flag == 3);
+        REQUIRE (excluded.left == 0);
+        REQUIRE (excluded.bottom == 0);
+        REQUIRE (excluded.right == 0.75f);
+        REQUIRE (excluded.top == 0.5f);
+    }
+    const auto vertices = odd.triangles ();
+    REQUIRE (vertices[0] == odd.left);
+    REQUIRE (vertices[1] == odd.top);
+    REQUIRE (vertices[3] == odd.bottom);
+    REQUIRE (vertices[4] == odd.right);
+    const auto absent = directImageQuadUV (1, 1, 0, 0, false, false, false, false);
+    REQUIRE (absent.left == 0);
+    REQUIRE (absent.right == 1);
+}
+
+TEST_CASE ("Image effect presentation has a separate native padding rule", "[render][image-quad-uv]") {
+    using namespace WallpaperEngine::Render::Objects;
+    const auto directNoPadding = directImageQuadUV (1, 1, 31, 19, false, true, false, false);
+    const auto final = compositeImageQuadUV (31, 19, false, false, false);
+    REQUIRE (directNoPadding.left == 0);
+    REQUIRE (final.left == Catch::Approx (0.15f / 31));
+    REQUIRE (final.bottom == Catch::Approx (0.15f / 19));
+    REQUIRE (final.right == Catch::Approx (30.85f / 31));
+    REQUIRE (final.top == Catch::Approx (18.85f / 19));
+    // Presentation samples the whole retained FBO even if source content was
+    // cropped within a larger allocation; it does not repeat the base crop.
+    const auto allocated = compositeImageQuadUV (64, 32, false, false, false);
+    REQUIRE (allocated.right == Catch::Approx (63.85f / 64));
+    REQUIRE (allocated.top == Catch::Approx (31.85f / 32));
+    for (int flag = 0; flag < 3; ++flag) {
+        const auto excluded = compositeImageQuadUV (31, 19, flag == 0, flag == 1, flag == 2);
+        REQUIRE (excluded.left == 0);
+        REQUIRE (excluded.bottom == 0);
+        REQUIRE (excluded.right == 1);
+        REQUIRE (excluded.top == 1);
+    }
 }
 
 TEST_CASE ("Uniform array upload reaches second bone matrix and blend row", "[render][uniform-array]") {
