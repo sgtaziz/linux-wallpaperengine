@@ -2,11 +2,19 @@
 
 using namespace WallpaperEngine::WebBrowser::CEF;
 
-RenderHandler::RenderHandler (WallpaperEngine::Render::Wallpapers::CWeb* webdata) : m_webdata (webdata) { }
+RenderHandler::RenderHandler (WallpaperEngine::Render::Wallpapers::CWeb* webdata) : m_webdata (webdata) {
+    if (m_webdata) m_viewRect = CefRect (0, 0, m_webdata->getWidth (), m_webdata->getHeight ());
+}
+
+void RenderHandler::detach () {
+    if (m_webdata) m_viewRect = CefRect (0, 0, m_webdata->getWidth (), m_webdata->getHeight ());
+    m_webdata = nullptr;
+}
 
 // Required by CEF
 void RenderHandler::GetViewRect (CefRefPtr<CefBrowser> browser, CefRect& rect) {
-    rect = CefRect (0, 0, this->m_webdata->getWidth (), this->m_webdata->getHeight ());
+    if (m_webdata) m_viewRect = CefRect (0, 0, m_webdata->getWidth (), m_webdata->getHeight ());
+    rect = m_viewRect;
 }
 
 // Will be executed in CEF message loop
@@ -14,6 +22,7 @@ void RenderHandler::OnPaint (
     CefRefPtr<CefBrowser> browser, PaintElementType type, const RectList& dirtyRects, const void* buffer,
     const int width, const int height
 ) {
+    if (!m_webdata) return;
     glActiveTexture (GL_TEXTURE0);
     glBindTexture (GL_TEXTURE_2D, this->texture ());
     glTexImage2D (GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_BGRA_EXT, GL_UNSIGNED_BYTE, buffer);

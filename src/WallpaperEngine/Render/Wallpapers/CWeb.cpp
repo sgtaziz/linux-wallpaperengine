@@ -136,8 +136,8 @@ void CWeb::updateMouse (const glm::ivec4& viewport) {
 }
 
 CWeb::~CWeb () {
-    CefDoMessageLoopWork ();
+    // Closing can leave queued CEF callbacks while the browser releases its
+    // client. Keep the ref-counted handler alive, without a destroyed owner.
+    this->m_renderHandler->detach ();
     this->m_browser->GetHost ()->CloseBrowser (true);
-
-    delete this->m_renderHandler;
 }
