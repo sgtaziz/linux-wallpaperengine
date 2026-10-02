@@ -120,7 +120,7 @@ public:
 	    int maximumFPS;
 	    /** Hardware decoder passed to libmpv */
 	    std::string hwdec;
-	    /** Opt-in native high-precision postprocessing path. */
+	    /** Native postprocessing quality; ultra is the default. */
 	    POSTPROCESSING_QUALITY postprocessing;
 	    /** Indicates if pausing should happen when something goes fullscreen */
 	    bool pauseOnFullscreen;
@@ -213,7 +213,7 @@ public:
             .mode = NORMAL_WINDOW,
             .maximumFPS = 30,
             .hwdec = "auto",
-            .postprocessing = POSTPROCESSING_NORMAL,
+            .postprocessing = POSTPROCESSING_ULTRA,
             .pauseOnFullscreen = true,
             .pauseOnFullscreenOnlyWhenActive = false,
             .fullscreenPauseIgnoreAppIds = {},
