@@ -538,7 +538,7 @@ public:
 
 class CollisionOperator : public ParticleOperatorBase {
 public:
-    enum class Kind { Plane, Sphere, Box, Bounds, Quad };
+    enum class Kind { Plane, Sphere, Box, Bounds, Quad, Model };
     enum class Behavior { Bounce, Slide, Stop, Delete };
     Kind kind {Kind::Plane};
     Behavior behavior {Behavior::Bounce};
@@ -551,6 +551,7 @@ public:
     glm::vec2 size {1};
     float distance {0};
     float radius {1};
+    uint32_t dependencyIndex {0}; // Compiled dependency-vector ordinal, not operator index.
 };
 
 class AngularMovementOperator : public ParticleOperatorBase {

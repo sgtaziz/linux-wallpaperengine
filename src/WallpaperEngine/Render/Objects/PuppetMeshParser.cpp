@@ -76,7 +76,11 @@ PuppetMeshData parseMesh (Cursor& cursor, int version, uint32_t headerFlags, uin
     const uint32_t meshFlags = cursor.u32 ();
     result.meshFlags = meshFlags;
     if (meshFlags & 2) result.blendRowCount = cursor.u32 ();
-    if (version >= 17) cursor.take (6 * sizeof (float));
+    if (version >= 17) {
+        const auto bounds = cursor.take (6 * sizeof (float));
+        result.authoredBounds.emplace ();
+        for (size_t lane = 0; lane < 6; ++lane) (*result.authoredBounds)[lane] = readFloat (bounds, lane * 4);
+    }
     result.vertexMask = version >= 15 ? cursor.u32 () : headerFlags;
     // Native's attribute table orders these six semantics:
     // position12, optional normal12/tangent16, optional indices16/weights16,

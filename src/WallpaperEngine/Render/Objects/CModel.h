@@ -3,6 +3,7 @@
 #include "WallpaperEngine/Data/Model/Object.h"
 #include "WallpaperEngine/Render/CObject.h"
 #include "WallpaperEngine/Scripting/ScriptableObject.h"
+#include "ParticleModelCollision.h"
 
 #include <glm/glm.hpp>
 #include <memory>
@@ -20,10 +21,13 @@ public:
     void render () override;
     /** Refresh material structure before rebuilding the secondary draw list. */
     [[nodiscard]] bool requiresSceneReflection ();
+    [[nodiscard]] std::vector<ParticleCore::CollisionCapsule> collisionCapsules (
+        const glm::mat4& inverseInvocation) const;
 
 private:
     void rebuildDynamic ();
     void updateDynamic ();
+    [[nodiscard]] glm::mat4 authoredWorld () const;
     struct MeshDraw;
     const Data::Model::SceneModel& m_model;
     std::vector<Data::Model::MaterialUniquePtr> m_materials;
@@ -35,6 +39,9 @@ private:
     glm::mat4 m_mvp {1.0f};
     glm::mat4 m_mvpInverse {1.0f};
     glm::mat3 m_normalModel {1.0f};
+    std::optional<PuppetSkeletonData> m_skeleton;
+    std::vector<glm::mat4> m_currentGlobals;
+    std::optional<PuppetSkeletonData::EmissionBound> m_collisionFallbackBound;
 };
 
 } // namespace WallpaperEngine::Render::Objects

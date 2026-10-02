@@ -10,6 +10,8 @@
 #include "ParticleBoids.h"
 #include "ParticleImageEmitterReadback.h"
 #include "CImage.h"
+#include "CModel.h"
+#include "ParticleModelCollision.h"
 
 #include "WallpaperEngine/Audio/AudioContext.h"
 #include "WallpaperEngine/Audio/ParticleAudioResponse.h"
@@ -1717,6 +1719,7 @@ void CParticle::setupEmitters () {
     // Native is initialized only on allocation; partial resets
     // recreate scheduling state without resetting the source matrix history.
     m_imageEmitterHistory.resize (m_particle.emitters.size ());
+    size_t imageDependencyIndex = 0;
     for (const auto& emitter : m_particle.emitters) {
 	EmitterFunc func;
 
@@ -1725,7 +1728,7 @@ void CParticle::setupEmitters () {
 	} else if (emitter.name == "sphererandom") {
 	    func = createSphereEmitter (emitter, m_emitters.size ());
 	} else if (emitter.name == "layerimage") {
-	    func = createImageEmitter (emitter, m_emitters.size ());
+	    func = createImageEmitter (emitter, m_emitters.size (), imageDependencyIndex++);
 	} else {
 	    sLog.out ("Unknown emitter type: ", emitter.name);
 	    continue;
@@ -1995,11 +1998,11 @@ EmitterFunc CParticle::createSphereEmitter (const ParticleEmitter& emitter, size
     };
 }
 
-EmitterFunc CParticle::createImageEmitter (const ParticleEmitter& emitter, size_t index) {
+EmitterFunc CParticle::createImageEmitter (const ParticleEmitter& emitter, size_t index, size_t dependencyIndex) {
     int sourceId = -1;
     std::string maskPath;
     for (const auto& dependency : m_particle.typedDependencies) {
-        if (dependency.type == "emitterimage" && dependency.index == static_cast<int> (index)) {
+        if (dependency.type == "emitterimage" && dependency.index == static_cast<int> (dependencyIndex)) {
             sourceId = dependency.id;
             maskPath = dependency.mask;
             break;
@@ -2007,7 +2010,7 @@ EmitterFunc CParticle::createImageEmitter (const ParticleEmitter& emitter, size_
     }
     if (sourceId < 0) {
         sLog.error ("Layer-image emitter has no emitterimage dependency: ", m_particle.name,
-                    " emitter index ", index);
+                    " compiled dependency index ", dependencyIndex);
         return {};
     }
     const auto schedule = ParticleCore::scheduleConfig (emitter, emitter.rate);
@@ -2900,6 +2903,50 @@ OperatorFunc CParticle::createCollisionOperator (const CollisionOperator& op) {
     // Original opcode17 is a recognized record-advance no-op, including its
     // authored response, CP and angular-clear fields.
     if (op.kind == Kind::Box) return [] (auto&, uint32_t, auto&, float, MovementTime) {};
+    if (op.kind == Kind::Model) {
+        int sourceId = -1;
+        for (const auto& dependency : m_particle.typedDependencies)
+            if (dependency.type == "collisionmodel" && dependency.index == static_cast<int> (op.dependencyIndex)) {
+                sourceId = dependency.id;
+                break;
+            }
+        if (sourceId < 0) throw std::invalid_argument ("Collision model has no matching compiled dependency ordinal");
+        return [this, sourceId, response = static_cast<CollisionResponse> (op.behavior), bounce = op.bounceFactor,
+                cachedFrame = UINT32_MAX, cachedCapsules = std::vector<CollisionCapsule> {}, warned = false]
+               (std::vector<ParticleInstance>& particles, uint32_t count,
+                std::vector<ControlPointData>&, float, MovementTime) mutable {
+            const bool world = (m_particle.flags & 1u) != 0;
+            const bool ortho = getScene ().getCamera ().isOrthogonal ();
+            const glm::vec2 canvas (getScene ().getWidth (), getScene ().getHeight ());
+            const uint32_t frame = static_cast<uint32_t> (getScene ().getContext ().getDriver ().getFrameCounter ());
+            if (!world || cachedFrame != frame) {
+                const auto* source = getScene ().getObject (sourceId);
+                const auto inverse = imageEmitterInvocationMatrix (m_simulationModelMatrix, ortho, canvas, false, world);
+                if (const auto* image = dynamic_cast<const CImage*> (source)) cachedCapsules = image->collisionCapsules (inverse);
+                else if (const auto* model = dynamic_cast<const CModel*> (source)) cachedCapsules = model->collisionCapsules (inverse);
+                else cachedCapsules.clear ();
+                cachedFrame = frame;
+            }
+            if (cachedCapsules.empty ()) {
+                if (!warned) sLog.error ("Collision model source has no supported pose bounds: ", sourceId);
+                warned = true;
+                return;
+            }
+            for (uint32_t index = 0; index < count; ++index) {
+                if (!modelCollisionSlotScheduled (index, m_slotStreams ? m_slotStreams->highWater () : count, frame)) continue;
+                auto& particle = particles[index];
+                if (!m_slotStreams && !particle.alive) continue;
+                glm::vec3 position = particle.position;
+                if (world && ortho) position += glm::vec3 (canvas.x * .5f, -canvas.y * .5f, 0);
+                CollisionState state {toAuthoredVector (position), toAuthoredVector (particle.velocity),
+                    particle.angularVelocity, particle.age, particle.lifetime};
+                if (!collideModel (state, cachedCapsules, response, bounce)) continue;
+                particle.position = imageEmitterSimulationPosition (state.position, world, ortho, canvas);
+                particle.velocity = toSimulationVector (state.velocity);
+                particle.age = state.age;
+            }
+        };
+    }
     const CollisionResponse response = static_cast<CollisionResponse> (op.behavior);
     const glm::vec3 plane = collisionUnit (op.plane);
     const CollisionQuad quad = collisionQuad (op.origin, op.plane, op.forward, op.size);
@@ -2950,6 +2997,7 @@ OperatorFunc CParticle::createCollisionOperator (const CollisionOperator& op) {
                     currentQuad, response, bounce, (flags & 2u) != 0); break;
                 case Kind::Bounds: contacted = collideBounds (state, bounds, response, bounce); break;
                 case Kind::Box: break;
+                case Kind::Model: break; // Handled by typed-source capsule interpreter above.
             }
             if (!contacted) continue;
             particle.position = imageEmitterSimulationPosition (state.position, world, ortho, canvas);

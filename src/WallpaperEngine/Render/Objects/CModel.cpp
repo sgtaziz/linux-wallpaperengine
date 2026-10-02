@@ -4,9 +4,11 @@
 #include "ModelNormalMatrix.h"
 #include "PuppetMeshParser.h"
 #include "StaticModelTail.h"
+#include "PuppetSkinning.h"
 #include "WallpaperEngine/Data/Parsers/MaterialParser.h"
 #include "WallpaperEngine/Render/Objects/Effects/CPass.h"
 #include "WallpaperEngine/Render/Wallpapers/SceneTransform.h"
+#include "WallpaperEngine/Scripting/ScriptPropertyBindings.h"
 
 #include <algorithm>
 #include <cmath>
@@ -72,7 +74,7 @@ struct PresentationFrontFace {
 struct CModel::MeshDraw final : CRenderable {
     MeshDraw (Wallpapers::CScene& scene, const SceneModel& object, const Material& material,
               const PuppetMeshData& mesh, const std::vector<uint32_t>* wideIndices = nullptr,
-              size_t shapeIndex = 0) :
+              size_t shapeIndex = 0, const std::vector<glm::mat4>& palette = {}) :
         CObject (scene, object), CRenderable (scene, object, material) {
         m_shapeIndex = shapeIndex;
         try {
@@ -84,6 +86,40 @@ struct CModel::MeshDraw final : CRenderable {
         if (mesh.vertexMask & 4) m_tangent = uploadBuffer (GL_ARRAY_BUFFER, mesh.tangents);
         if (mesh.vertexMask & 8) m_texcoord = uploadBuffer (GL_ARRAY_BUFFER, mesh.texcoords);
         if (mesh.vertexMask & 0x20) m_texcoordFull = uploadBuffer (GL_ARRAY_BUFFER, mesh.texcoordsFull);
+        if (!palette.empty () && (mesh.vertexMask & 0x01000000) != 0) {
+            std::vector<std::array<float, 3>> positions, normals;
+            std::vector<std::array<float, 4>> tangents;
+            for (size_t vertex = 0; vertex < mesh.positions.size (); ++vertex) {
+                const auto position = puppetSkinnedPosition (mesh, vertex, palette);
+                positions.push_back ({position.x, position.y, position.z});
+                const auto direction = [&] (glm::vec3 value) {
+                    glm::vec3 result (0);
+                    for (size_t lane = 0; lane < 4; ++lane) {
+                        const auto weight = mesh.blendWeights.at (vertex)[lane];
+                        if (weight != 0) result += glm::mat3 (palette.at (mesh.blendIndices.at (vertex)[lane]))
+                            * value * weight;
+                    }
+                    return result;
+                };
+                if (mesh.vertexMask & 2) {
+                    const auto normal = direction (glm::make_vec3 (mesh.normals.at (vertex).data ()));
+                    normals.push_back ({normal.x, normal.y, normal.z});
+                }
+                if (mesh.vertexMask & 4) {
+                    const auto& raw = mesh.tangents.at (vertex);
+                    const auto tangent = direction (glm::make_vec3 (raw.data ()));
+                    tangents.push_back ({tangent.x, tangent.y, tangent.z, raw[3]});
+                }
+            }
+            m_skinnedPosition = uploadBuffer (GL_ARRAY_BUFFER, positions);
+            m_skinnedNormal = uploadBuffer (GL_ARRAY_BUFFER, normals);
+            m_skinnedTangent = uploadBuffer (GL_ARRAY_BUFFER, tangents);
+            m_blendIndices = uploadBuffer (GL_ARRAY_BUFFER, mesh.blendIndices);
+            m_blendWeights = uploadBuffer (GL_ARRAY_BUFFER, mesh.blendWeights);
+            for (const auto& bone : palette)
+                for (size_t column = 0; column < 4; ++column)
+                    for (size_t row = 0; row < 3; ++row) m_bones.push_back (bone[column][row]);
+        }
         if (wideIndices) {
             m_index = uploadBuffer (GL_ELEMENT_ARRAY_BUFFER, *wideIndices);
             m_indexType = GL_UNSIGNED_INT;
@@ -103,9 +139,19 @@ struct CModel::MeshDraw final : CRenderable {
             pass->setGeometryCallback (
                 [this, passPointer] () {
                     const GLuint program = passPointer->getProgramID ();
-                    bindFloatAttribute (program, "a_Position", m_position, 3);
-                    bindFloatAttribute (program, "a_Normal", m_normal, 3);
-                    bindFloatAttribute (program, "a_Tangent4", m_tangent, 4);
+                    const GLint bones = glGetUniformLocation (program, "g_Bones[0]");
+                    const bool shaderSkinning = bones >= 0 && !m_bones.empty ();
+                    if (shaderSkinning) glUniformMatrix4x3fv (bones, GLsizei (m_bones.size () / 12), GL_FALSE, m_bones.data ());
+                    bindFloatAttribute (program, "a_Position", shaderSkinning || !m_skinnedPosition ? m_position : m_skinnedPosition, 3);
+                    bindFloatAttribute (program, "a_Normal", shaderSkinning || !m_skinnedNormal ? m_normal : m_skinnedNormal, 3);
+                    bindFloatAttribute (program, "a_Tangent4", shaderSkinning || !m_skinnedTangent ? m_tangent : m_skinnedTangent, 4);
+                    bindFloatAttribute (program, "a_BlendWeights", m_blendWeights, 4);
+                    const GLint indices = glGetAttribLocation (program, "a_BlendIndices");
+                    if (indices >= 0 && m_blendIndices) {
+                        glEnableVertexAttribArray (GLuint (indices));
+                        glBindBuffer (GL_ARRAY_BUFFER, m_blendIndices);
+                        glVertexAttribIPointer (GLuint (indices), 4, GL_UNSIGNED_INT, 0, nullptr);
+                    }
                     bindFloatAttribute (program, "a_TexCoord", m_texcoord, 2);
                     bindFloatAttribute (program, "a_TexCoordVec4", m_texcoordFull, 4);
                 },
@@ -120,11 +166,14 @@ struct CModel::MeshDraw final : CRenderable {
                     disableAttribute (program, "a_Tangent4", m_tangent);
                     disableAttribute (program, "a_TexCoord", m_texcoord);
                     disableAttribute (program, "a_TexCoordVec4", m_texcoordFull);
+                    disableAttribute (program, "a_BlendWeights", m_blendWeights);
+                    disableAttribute (program, "a_BlendIndices", m_blendIndices);
                 });
             m_passes.push_back (std::move (pass));
         }
         } catch (...) {
-            for (GLuint buffer : {m_position, m_normal, m_tangent, m_texcoord, m_texcoordFull, m_index})
+            for (GLuint buffer : {m_position, m_normal, m_tangent, m_texcoord, m_texcoordFull, m_index,
+                                 m_skinnedPosition, m_skinnedNormal, m_skinnedTangent, m_blendIndices, m_blendWeights})
                 if (buffer != GL_NONE) glDeleteBuffers (1, &buffer);
             throw;
         }
@@ -132,7 +181,8 @@ struct CModel::MeshDraw final : CRenderable {
 
     ~MeshDraw () override {
         m_passes.clear ();
-        for (GLuint buffer : {m_position, m_normal, m_tangent, m_texcoord, m_texcoordFull, m_index})
+        for (GLuint buffer : {m_position, m_normal, m_tangent, m_texcoord, m_texcoordFull, m_index,
+                             m_skinnedPosition, m_skinnedNormal, m_skinnedTangent, m_blendIndices, m_blendWeights})
             if (buffer != GL_NONE) glDeleteBuffers (1, &buffer);
     }
 
@@ -188,6 +238,9 @@ struct CModel::MeshDraw final : CRenderable {
     GLuint m_texcoord = GL_NONE;
     GLuint m_texcoordFull = GL_NONE;
     GLuint m_index = GL_NONE;
+    GLuint m_skinnedPosition = GL_NONE, m_skinnedNormal = GL_NONE, m_skinnedTangent = GL_NONE;
+    GLuint m_blendIndices = GL_NONE, m_blendWeights = GL_NONE;
+    std::vector<float> m_bones;
     GLsizei m_indexCount = 0;
     GLenum m_indexType = GL_UNSIGNED_SHORT;
     size_t m_shapeIndex = 0;
@@ -195,7 +248,10 @@ struct CModel::MeshDraw final : CRenderable {
 };
 
 CModel::CModel (Wallpapers::CScene& scene, const SceneModel& model) :
-    CObject (scene, model), Scripting::ScriptableObject (scene, model), m_model (model) { }
+    CObject (scene, model), Scripting::ScriptableObject (scene, model), m_model (model) {
+    for (const auto& binding : Scripting::scriptPropertyBindings (model))
+        registerProperty (binding.name, binding.value);
+}
 
 CModel::~CModel () = default;
 
@@ -208,21 +264,36 @@ void CModel::setup () {
     const auto stream = getAssetLocator ().read (m_model.path);
     std::vector<char> data {std::istreambuf_iterator<char> (*stream), std::istreambuf_iterator<char> ()};
     const auto meshes = parsePuppetMeshes ({reinterpret_cast<const uint8_t*> (data.data ()), data.size ()});
-    if (!staticModelHasOnlyPadding (
-            {reinterpret_cast<const uint8_t*> (data.data ()), data.size ()}, meshes.sectionEndOffset))
-        throw std::runtime_error ("Static MDLV has unsupported skeletal or tail sections");
+    m_collisionFallbackBound = ParticleCore::modelCollisionFallbackBound (meshes.meshes);
+    std::vector<glm::mat4> palette;
+    const std::span<const uint8_t> bytes {reinterpret_cast<const uint8_t*> (data.data ()), data.size ()};
+    if (!staticModelHasOnlyPadding (bytes, meshes.sectionEndOffset)) {
+        auto skeleton = parsePuppetSkeleton (bytes, meshes);
+        // The shared parser validates subsequent MDAT/MDLA records. A MODEL
+        // without animation layers uses the native unanimated local pose.
+        if (!staticModelHasOnlyPadding (bytes, skeleton.sectionEndOffset)) {
+            const auto animation = parsePuppetFirstAnimationHeader (bytes, skeleton);
+            if (!staticModelHasOnlyPadding (bytes, animation.sectionEndOffset))
+                throw std::runtime_error ("Model has unsupported trailing records");
+        }
+        const auto local = puppetUnanimatedLocalMatrices (skeleton);
+        m_currentGlobals = puppetGlobalMatrices (skeleton, local);
+        palette = puppetSkinPalette (skeleton, local);
+        m_skeleton = std::move (skeleton);
+    }
     m_materials.reserve (meshes.meshes.size ());
     m_meshes.reserve (meshes.meshes.size ());
     for (const auto& mesh : meshes.meshes) {
-        if ((mesh.vertexMask & 0x01800000) != 0)
-            throw std::runtime_error ("Static MDLV skin/channel attributes require a separate runtime path");
+        if ((mesh.vertexMask & 0x01800000) != 0 &&
+            (!m_skeleton || (mesh.vertexMask & 0x01800000) != 0x01800000))
+            throw std::runtime_error ("Model channel attributes require a separate runtime path");
         if (mesh.materials.empty ()) throw std::runtime_error ("Static MDLV mesh has no materials");
         const auto selected = std::min<size_t> (size_t (m_model.skin), mesh.materials.size () - 1);
         m_materials.push_back (Data::Parsers::MaterialParser::load (
             getScene ().getScene ().project, mesh.materials[selected]));
         if (m_materials.back ()->passes.empty ()) throw std::runtime_error ("Static MDLV material has no passes");
         m_meshes.push_back (std::make_unique<MeshDraw> (
-            getScene (), m_model, *m_materials.back (), mesh));
+            getScene (), m_model, *m_materials.back (), mesh, nullptr, 0, palette));
     }
     // Native groups normal/alpha-to-coverage material categories
     // before translucent/additive. Linux keeps source order within a group;
@@ -277,6 +348,25 @@ bool CModel::requiresSceneReflection () {
     if (m_model.dynamic && m_dynamicStructureRevision != m_model.dynamic->structureRevision)
         rebuildDynamic ();
     return std::ranges::any_of (m_meshes, [] (const auto& mesh) { return mesh->requiresSceneReflection (); });
+}
+
+glm::mat4 CModel::authoredWorld () const {
+    return Wallpapers::resolveSceneTransform (m_model,
+        [this] (int id) -> const Object* {
+            const auto* parent = getScene ().getObject (id);
+            return parent ? &parent->getObject () : nullptr;
+        }, [this] (const Object& parent, const std::string& name) {
+            return getScene ().getPuppetAttachmentTransform (parent.id, name);
+        }).authoredMatrix;
+}
+
+std::vector<ParticleCore::CollisionCapsule> CModel::collisionCapsules (const glm::mat4& inverseInvocation) const {
+    if ((!m_skeleton || m_skeleton->emissionBounds.empty ()) && m_collisionFallbackBound)
+        return ParticleCore::modelCollisionCapsules (std::span (&*m_collisionFallbackBound, 1), {},
+            authoredWorld (), inverseInvocation);
+    if (!m_skeleton) return {};
+    return ParticleCore::modelCollisionCapsules (
+        m_skeleton->emissionBounds, m_currentGlobals, authoredWorld (), inverseInvocation);
 }
 
 void CModel::render () {

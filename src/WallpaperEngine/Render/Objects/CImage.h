@@ -6,6 +6,7 @@
 #include "WallpaperEngine/Render/Objects/PuppetSkinning.h"
 #include "WallpaperEngine/Render/Objects/ImageCompositeSteps.h"
 #include "WallpaperEngine/Render/Objects/ImageAlignment.h"
+#include "WallpaperEngine/Render/Objects/ParticleModelCollision.h"
 #include "WallpaperEngine/Render/Wallpapers/CScene.h"
 #include "WallpaperEngine/Render/Wallpapers/SceneTransform.h"
 #include "WallpaperEngine/Render/TextureAnimation.h"
@@ -48,6 +49,8 @@ public:
     [[nodiscard]] const std::string& getAlignment () const { return m_alignment; }
     void setAlignment (std::string alignment);
     [[nodiscard]] glm::mat4 emissionSourceWorld () const;
+    [[nodiscard]] std::vector<ParticleCore::CollisionCapsule> collisionCapsules (
+        const glm::mat4& inverseInvocation) const;
     [[nodiscard]] std::optional<glm::mat4> puppetAttachmentTransform (const std::string& name) const;
     [[nodiscard]] std::optional<glm::mat4> puppetEmissionBoneTransform (uint8_t boneIndex) const;
     [[nodiscard]] std::optional<glm::mat4> puppetPreviousEmissionBoneTransform (uint8_t boneIndex) const;
@@ -165,6 +168,7 @@ private:
     std::optional<PuppetSkeletonData> m_puppetSkeleton;
     std::optional<PuppetAnimationHeader> m_puppetAnimation;
     std::vector<glm::mat4> m_puppetCurrentGlobals;
+    std::optional<PuppetSkeletonData::EmissionBound> m_collisionFallbackBound;
     std::vector<glm::mat4> m_puppetEmissionBindGlobals;
     std::vector<glm::mat4> m_puppetEmissionInverseBind;
     PuppetEmissionWorldHistory m_puppetEmissionWorldHistory;

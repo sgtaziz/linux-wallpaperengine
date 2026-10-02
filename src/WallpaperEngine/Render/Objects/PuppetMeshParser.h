@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <span>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -22,6 +23,7 @@ struct PuppetMeshData {
     uint32_t vertexMask = 0;
     uint32_t meshFlags = 0; // Native per-mesh flags; bit 1 supplies an extra field.
     uint32_t blendRowCount = 0; // Present when meshFlags bit 1 is set.
+    std::optional<std::array<float, 6>> authoredBounds; // MDLV17+: minXYZ, maxXYZ.
     std::string material;
     std::vector<std::string> materials; // Native reads this list for each mesh.
     std::vector<std::array<float, 3>> positions;

@@ -225,7 +225,7 @@ ObjectUniquePtr ObjectParser::parse (const JSON& it, const Project& project) {
     basedata.initialConfiguration = initialConfiguration.dump ();
 
     for (const auto& dependency : basedata.typedDependencies) {
-	if (dependency.type == "emitterimage") continue;
+	if (dependency.type == "emitterimage" || dependency.type == "collisionmodel") continue;
 	sLog.error ("Typed scene dependency is not bound at runtime: object_id=", basedata.id,
 	            " target_id=", dependency.id, " index=", dependency.index,
 	            " type=", dependency.type);
@@ -681,12 +681,16 @@ ParticleUniquePtr ObjectParser::parseParticle (const JSON& it, const Project& pr
 
 	// Parse operators (note: field is named "operator" not "operators")
 	std::vector<ParticleOperatorUniquePtr> operators;
+    uint32_t compiledDependency = static_cast<uint32_t> (std::count_if (
+        emitters.begin (), emitters.end (), [] (const auto& emitter) { return emitter.name == "layerimage"; }));
 	const auto operatorsIt = particleJson.find ("operator");
 	if (operatorsIt != particleJson.end () && operatorsIt->is_array ()) {
 	    for (size_t index = 0; index < operatorsIt->size (); ++index) {
 	const auto& op = (*operatorsIt)[index];
 		auto oper = parseParticleOperator (op, project.properties, false, project.sceneOrthogonalProjection);
 		if (oper) {
+            if (oper->is<CollisionOperator> () && oper->as<CollisionOperator> ()->kind == CollisionOperator::Kind::Model)
+                oper->as<CollisionOperator> ()->dependencyIndex = compiledDependency++;
 		    const bool hasBlend = op.find ("blendinstart") != op.end ()
 		        || op.find ("blendinend") != op.end ()
 		        || op.find ("blendoutstart") != op.end ()
@@ -1253,7 +1257,7 @@ ParticleOperatorUniquePtr ObjectParser::parseParticleOperator (
         }
         return result;
     } else if (name == "collisionplane" || name == "collisionsphere" || name == "collisionbox"
-        || name == "collisionbounds" || name == "collisionquad") {
+        || name == "collisionbounds" || name == "collisionquad" || name == "collisionmodel") {
         if (birth) return nullptr;
         // These are literal compiled records, not runtime user settings.
         if (it.contains ("bouncefactor") && !it.at ("bouncefactor").is_number ()) return nullptr;
@@ -1270,7 +1274,8 @@ ParticleOperatorUniquePtr ObjectParser::parseParticleOperator (
         auto result = std::make_unique<CollisionOperator> ();
         using Kind = CollisionOperator::Kind;
         result->kind = name == "collisionplane" ? Kind::Plane : name == "collisionsphere" ? Kind::Sphere
-            : name == "collisionbox" ? Kind::Box : name == "collisionbounds" ? Kind::Bounds : Kind::Quad;
+            : name == "collisionbox" ? Kind::Box : name == "collisionbounds" ? Kind::Bounds
+            : name == "collisionmodel" ? Kind::Model : Kind::Quad;
         const auto behavior = it.optional<std::string> ("collisionbehavior", "bounce");
         result->behavior = behavior == "slide" ? CollisionOperator::Behavior::Slide
             : behavior == "stop" ? CollisionOperator::Behavior::Stop

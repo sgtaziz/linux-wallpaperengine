@@ -252,6 +252,18 @@ TEST_CASE ("Versioned MDLV first mesh follows fields instead of embedded markers
     REQUIRE (parse (makeFixture (17, 0, 0x0180000f, 1, 0, 0).bytes).material.empty ());
 }
 
+TEST_CASE ("MDLV v17 authored bounds retain header values independently of triangle positions", "[puppet][mesh][collision-model]") {
+    for (const int version : {16, 17, 23}) {
+        const auto mesh = parse (makeFixture (version).bytes);
+        if (version < 17) REQUIRE_FALSE (mesh.authoredBounds);
+        else {
+            REQUIRE (mesh.authoredBounds);
+            REQUIRE (*mesh.authoredBounds == std::array<float, 6> {0, 1, 2, 3, 4, 5});
+            REQUIRE (mesh.positions.front () != std::array<float, 3> {0, 1, 2});
+        }
+    }
+}
+
 TEST_CASE ("MDLV mesh list retains each material and independent channel layout", "[puppet][mesh]") {
     const auto first = makeFixture (17, 0, 0x0180000f, 2);
     auto second = makeFixture (17, 0, 0x00800021);
