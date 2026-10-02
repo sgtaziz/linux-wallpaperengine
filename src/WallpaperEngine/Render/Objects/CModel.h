@@ -35,6 +35,7 @@ private:
     uint64_t m_dynamicRevision = 0;
     uint64_t m_dynamicStructureRevision = 0;
     glm::mat4 m_world {1.0f};
+    glm::vec3 m_eyePosition {0.0f};
     glm::mat4 m_viewProjection {1.0f};
     glm::mat4 m_mvp {1.0f};
     glm::mat4 m_mvpInverse {1.0f};
