@@ -580,19 +580,21 @@ void WallpaperApplication::takeScreenshot (const std::filesystem::path& filename
 	}
 
 	const auto& wallpaper = wallpaperIt->second;
-	const int vpWidth = viewport->viewport.z - viewport->viewport.x;
-	const int vpHeight = viewport->viewport.w - viewport->viewport.y;
+	const auto source = wallpaper->getWallpaperCaptureSource (
+            viewport->viewport, vflip, viewport->globalPosition, viewport->logicalSize);
+	const int vpWidth = viewport->viewport.z;
+	const int vpHeight = viewport->viewport.w;
 
 	// bind the wallpaper's FBO to read from it directly
 	// this is more reliable than the default framebuffer on some drivers (NVIDIA/Wayland)
-	glBindFramebuffer (GL_FRAMEBUFFER, wallpaper->getWallpaperFramebuffer ());
+	glBindFramebuffer (GL_FRAMEBUFFER, source.framebuffer);
 
 	// ensure rendering is complete before reading
 	glFinish ();
 
 	// make room for storing the pixel of this viewport
-	const int readWidth = wallpaper->getWidth ();
-	const int readHeight = wallpaper->getHeight ();
+	const int readWidth = source.extent.x;
+	const int readHeight = source.extent.y;
 	const auto bufferSize = readWidth * readHeight * 3;
 	auto* buffer = new uint8_t[bufferSize];
 
@@ -614,7 +616,8 @@ void WallpaperApplication::takeScreenshot (const std::filesystem::path& filename
 	}
 
 	// Get the UV coordinates which define the visible portion based on scaling mode
-	const auto [ustart, uend, vstart, vend] = wallpaper->getState ().getTextureUVs ();
+	const float ustart = source.uv.x, uend = source.uv.y;
+	const float vstart = source.uv.z, vend = source.uv.w;
 
 	captures.push_back (
 	    { buffer, readWidth, readHeight, vpWidth, vpHeight, currentXOffset, ustart, uend, vstart, vend }
@@ -629,27 +632,21 @@ void WallpaperApplication::takeScreenshot (const std::filesystem::path& filename
     const std::string extStr = extension.string ();
 
     // Offload pixel processing and saving to a background thread to avoid hitches
-    std::thread ([captures, width, height, vflip, extStr, filename] () {
+    std::thread ([captures, width, height, extStr, filename] () {
 	auto* bitmap = new uint8_t[width * height * 3] { 0 };
 
 	for (const auto& capture : captures) {
 	    // copy pixels to bitmap, sampling from the UV-defined region
 	    for (int y = 0; y < capture.vpHeight; y++) {
 		for (int x = 0; x < capture.vpWidth; x++) {
-		    // interpolate within the UV range to get source coordinates
-		    const float u
-			= capture.ustart + (static_cast<float> (x) / capture.vpWidth) * (capture.uend - capture.ustart);
-		    const float v = capture.vstart
-			+ (static_cast<float> (y) / capture.vpHeight) * (capture.vend - capture.vstart);
-
-		    // convert UV to pixel coordinates in the source buffer
-		    const int srcX = std::clamp (static_cast<int> (u * capture.readWidth), 0, capture.readWidth - 1);
-		    const int srcY = std::clamp (static_cast<int> (v * capture.readHeight), 0, capture.readHeight - 1);
-		    const int srcIdx = (srcY * capture.readWidth + srcX) * 3;
+		    const auto pixel = Render::framebufferCapturePixel (
+                        {capture.readWidth, capture.readHeight},
+                        {capture.ustart, capture.uend, capture.vstart, capture.vend},
+                        {x, y}, {capture.vpWidth, capture.vpHeight});
+		    const int srcIdx = (pixel.y * capture.readWidth + pixel.x) * 3;
 
 		    const int xfinal = x + capture.xoffset;
-		    // FBO content is not flipped like default framebuffer, so invert vflip logic
-		    const int yfinal = vflip ? y : (capture.vpHeight - y - 1);
+		    const int yfinal = y;
 
 		    if (yfinal >= 0 && yfinal < height && xfinal >= 0 && xfinal < width) {
 			bitmap[yfinal * width * 3 + xfinal * 3] = capture.buffer[srcIdx];
