@@ -27,6 +27,48 @@ struct EmitterBirthTransform {
     glm::mat3 basis { 1.0f };
 };
 
+// All three native emitter opcodes after writing position and
+// velocity. Raw physical streams start with lifetime 1 and size .5; authored
+// initializers subsequently apply the instance multipliers. Reused slots must
+// also receive the new previous position and sequence seed before execution.
+template <typename Particle>
+inline void initializeEmitterBirth (
+    Particle& particle, const glm::vec3& rgbGain, float alphaGain,
+    float ordinarySize, float ordinaryLifetime, float birthRandom,
+    bool physicalStreams, bool randomFrame) {
+    particle.acceleration = glm::vec3 (0.0f);
+    particle.rotation = glm::vec3 (0.0f);
+    particle.angularVelocity = glm::vec3 (0.0f);
+    particle.angularAcceleration = glm::vec3 (0.0f);
+    particle.color = rgbGain;
+    particle.alpha = alphaGain;
+    particle.size = physicalStreams ? 0.5f : ordinarySize;
+    particle.lifetime = physicalStreams ? 1.0f : ordinaryLifetime;
+    particle.age = 0.0f;
+    particle.oscillatorRandom = birthRandom;
+    particle.alive = true;
+    particle.previousPosition = particle.position;
+    particle.sequenceFraction = randomFrame ? birthRandom : 0.0f;
+    particle.frame = -1.0f;
+    particle.initial.color = particle.color;
+    particle.initial.alpha = particle.alpha;
+    particle.initial.size = particle.size;
+    particle.initial.lifetime = particle.lifetime;
+}
+
+// Initializers update baseline size/RGB/alpha. Separate current streams keep
+// the raw birth defaults until the operator interpreter restores baselines.
+// IMAGE flag 0x10000 supplies a temporary selected-pixel RGB gain here, not
+// the runtime gain restored by opcode 3 after the initializer call.
+template <typename Particle>
+inline void restorePhysicalBirthCurrentDefaults (
+    Particle& particle, const glm::vec3& rgbGain, float alphaGain,
+    bool separateRgb, bool separateAlpha) {
+    particle.size = 0.5f;
+    if (separateRgb) particle.color = rgbGain;
+    if (separateAlpha) particle.alpha = alphaGain;
+}
+
 // captures the selected CP translation/basis once per emitter
 // invocation. Birth initializers may write that CP, but subsequent births in
 // this batch still use the capture; the next emitter invocation sees writes.

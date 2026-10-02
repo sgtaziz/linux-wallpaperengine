@@ -226,7 +226,8 @@ protected:
     void updateMatrices ();
     void emitNewParticles (float dt);
     ParticleInstance& emittedParticleTarget (std::vector<ParticleInstance>& particles, uint32_t count);
-    void finishEmittedParticle (ParticleInstance& particle, uint32_t& count);
+    void finishEmittedParticle (ParticleInstance& particle, uint32_t& count,
+                                const glm::vec3* rawBirthColor = nullptr);
     [[nodiscard]] uint32_t emissionCapacity (const std::vector<ParticleInstance>& particles, uint32_t count) const;
     void refreshNativeLiveView ();
     void resetPeriodicChildren ();

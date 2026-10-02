@@ -48,8 +48,14 @@ inline std::optional<std::string> nativeSlotScopeError (
         return owner + " animated textures are unsupported";
     for (const auto& renderer : particle.renderers)
         if (renderer.name != "sprite") return owner + " requires sprite renderers";
+    // The ordinary static IMAGE + MODEL route shares the native birth entry
+    // and first-zero allocation with box/sphere. IMAGE with boids or CP output
+    // still needs its own physical-stream validation. Source texture/puppet
+    // eligibility is checked when the IMAGE dependency is ready at runtime.
+    const bool modelImage = modelCollision && !boids && !controlPointOutput;
     for (const auto& emitter : particle.emitters)
-        if (emitter.name != "boxrandom" && emitter.name != "sphererandom")
+        if (emitter.name != "boxrandom" && emitter.name != "sphererandom"
+            && !(modelImage && emitter.name == "layerimage"))
             return owner + " emitter is unsupported: " + emitter.name;
     for (const auto& op : particle.operators) {
         if (!op) continue;

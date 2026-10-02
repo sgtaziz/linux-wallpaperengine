@@ -8,6 +8,7 @@
 #include "WallpaperEngine/Render/Objects/ParticleRemapOperators.h"
 #include "WallpaperEngine/Render/Objects/ParticleSlotStreams.h"
 #include "WallpaperEngine/Render/Objects/ParticleNativeSlotScope.h"
+#include "WallpaperEngine/Render/Objects/ParticleDependencyBindings.h"
 #include "WallpaperEngine/Render/Shaders/ParticleRopeShader.h"
 #include "WallpaperEngine/Render/Utils/NoiseUtils.h"
 #include "WallpaperEngine/Render/Utils/NativeParticleGradientNoise.h"
@@ -35,6 +36,84 @@
 #include <glm/gtc/matrix_transform.hpp>
 
 using namespace WallpaperEngine::Render::Objects::ParticleCore;
+
+TEST_CASE ("Emitter birth defaults match the original machine entry on reused physical slots",
+           "[particle][physical-birth]") {
+    using WallpaperEngine::Render::Objects::ParticleInstance;
+    // Independently replayed native entry: stream flags
+    // 31, sequence modes 0/1, slots 0/2, raw MT state word123, stale streams99.
+    // Optional current RGB/alpha/angular/previous-position streams are present.
+    constexpr float originalBirthRandom = 0.040101409f;
+    for (uint32_t slot : {0u, 2u}) for (bool randomFrame : {false, true}) {
+        CAPTURE (slot, randomFrame);
+        ParticleInstance particle;
+        particle.poolSlot = slot;
+        particle.birthId = 45;
+        particle.position = {3, 4, 5};
+        particle.velocity = particle.previousPosition = particle.acceleration = glm::vec3 (99);
+        particle.rotation = particle.angularVelocity = particle.angularAcceleration = glm::vec3 (99);
+        particle.color = particle.initial.color = glm::vec3 (99);
+        particle.alpha = particle.initial.alpha = particle.size = particle.initial.size = 99;
+        particle.lifetime = particle.initial.lifetime = particle.age = particle.sequenceFraction = 99;
+        initializeEmitterBirth (particle, {.2f, .3f, .4f}, .6f, 160, 8,
+                                originalBirthRandom, true, randomFrame);
+        REQUIRE (particle.age == 0);
+        REQUIRE (particle.lifetime == 1);
+        REQUIRE (particle.initial.lifetime == 1);
+        REQUIRE (particle.size == .5f);
+        REQUIRE (particle.initial.size == .5f);
+        REQUIRE (particle.color == glm::vec3 (.2f, .3f, .4f));
+        REQUIRE (particle.initial.color == particle.color);
+        REQUIRE (particle.alpha == .6f);
+        REQUIRE (particle.initial.alpha == .6f);
+        REQUIRE (particle.previousPosition == glm::vec3 (3, 4, 5));
+        REQUIRE (particle.velocity == glm::vec3 (99)); // emitter writes this before native birth
+        REQUIRE (particle.rotation == glm::vec3 (0));
+        REQUIRE (particle.angularVelocity == glm::vec3 (0));
+        REQUIRE (particle.angularAcceleration == glm::vec3 (0));
+        REQUIRE (particle.oscillatorRandom == originalBirthRandom);
+        REQUIRE (particle.sequenceFraction == (randomFrame ? originalBirthRandom : 0));
+        REQUIRE (particle.poolSlot == slot);
+        REQUIRE (particle.birthId == 45);
+    }
+    ParticleInstance ordinary;
+    initializeEmitterBirth (ordinary, {1, 1, 1}, 1, 160, 8, .25f, false, false);
+    REQUIRE (ordinary.size == 160);
+    REQUIRE (ordinary.initial.size == 160);
+    REQUIRE (ordinary.lifetime == 8);
+    REQUIRE (ordinary.initial.lifetime == 8);
+}
+
+TEST_CASE ("Physical IMAGE births retain selected-pixel gain independently of initialized baselines",
+           "[particle][physical-birth]") {
+    using WallpaperEngine::Render::Objects::ParticleInstance;
+    ParticleInstance particle;
+    // Original with flags31, slot2 and literal color/size/alpha/life
+    // initializer records produces currentRGB(.2,.3,.4), baselineRGB(.1,.075,.3),
+    // currentAlpha.6/baselineAlpha.3, currentSize.5/baselineSize4/lifetime4.
+    // Opcode3 restores the runtime gain afterward; this birth retains its own
+    // selected-pixel gain in current streams until operator baseline restore.
+    const glm::vec3 selectedGain (.2f, .3f, .4f);
+    initializeEmitterBirth (particle, selectedGain, .6f, 160, 8, .25f, true, false);
+    particle.color = particle.initial.color = selectedGain * glm::vec3 (.5f, .25f, .75f);
+    particle.alpha = particle.initial.alpha = .3f;
+    particle.size = particle.initial.size = 4;
+    particle.lifetime = particle.initial.lifetime = 4;
+    restorePhysicalBirthCurrentDefaults (particle, selectedGain, .6f, true, true);
+    REQUIRE (particle.color == selectedGain);
+    REQUIRE (particle.initial.color == selectedGain * glm::vec3 (.5f, .25f, .75f));
+    REQUIRE (particle.alpha == .6f);
+    REQUIRE (particle.initial.alpha == .3f);
+    REQUIRE (particle.size == .5f);
+    REQUIRE (particle.initial.size == 4);
+    REQUIRE (particle.lifetime == 4);
+    REQUIRE (particle.initial.lifetime == 4);
+    particle.color = particle.initial.color;
+    particle.alpha = particle.initial.alpha;
+    restorePhysicalBirthCurrentDefaults (particle, selectedGain, .6f, false, false);
+    REQUIRE (particle.color == particle.initial.color);
+    REQUIRE (particle.alpha == particle.initial.alpha);
+}
 
 TEST_CASE ("Primitive collision responses retain original machine kernel arithmetic",
            "[particle][collision]") {
@@ -350,12 +429,21 @@ TEST_CASE ("Native physical streams retain holes and padded tail across restore 
         REQUIRE (index == 4);
         REQUIRE (p.position.x == 108.0f); // Reuse occurs before birth overwrite.
         p.position.x = 204.0f;
-        p.lifetime = 2.0f;
-        p.age = 0.0f;
-        p.alive = true;
+        initializeEmitterBirth (p, {.2f, .3f, .4f}, .6f, 160, 8,
+                                .040101409f, true, true);
+        p.lifetime = p.initial.lifetime = 2.0f;
     }) == 4);
     REQUIRE (slots.highWater () == 6);
     REQUIRE (slots.nativeCount () == 6);
+    // The native first-zero lane retains stale stream storage, but the shared
+    // original birth entry overwrites its previous position and raw defaults.
+    const auto& reused = slots.streams ()[4];
+    REQUIRE (reused.previousPosition == reused.position);
+    REQUIRE (reused.previousPosition.x == 204.0f);
+    REQUIRE (reused.size == .5f);
+    REQUIRE (reused.initial.size == .5f);
+    REQUIRE (reused.color == glm::vec3 (.2f, .3f, .4f));
+    REQUIRE (reused.sequenceFraction == .040101409f);
     REQUIRE_FALSE (slots.birth ([] (auto&, uint32_t) {}));
     slots.stop ();
     REQUIRE (slots.highWater () == 0);
@@ -4442,11 +4530,12 @@ TEST_CASE ("MODEL compiled dependency ordinals preserve image records and duplic
     using WallpaperEngine::Data::Parsers::ObjectParser;
     using WallpaperEngine::Data::JSON::JSON;
     Project project {};
-    const auto parsed=ObjectParser::parse (JSON::parse (R"({"id":1,"dependencies":[
-        {"type":"emitterimage","index":0,"id":10},{"type":"collisionmodel","index":1,"id":20},
-        {"type":"collisionmodel","index":2,"id":21}],"particle":{"emitter":[{"name":"boxrandom"},{"name":"layerimage"}],
+    const auto authored=JSON::parse (R"({"id":1,"dependencies":[
+        {"type":"emitterimage","index":0,"id":10},{"type":"collisionmodel","index":0,"id":20},
+        {"type":"collisionmodel","index":1,"id":21}],"particle":{"emitter":[{"name":"boxrandom"},{"name":"layerimage"}],
         "operator":[{"name":"collisionmodel","flags":2},{"name":"movement"},
-        {"name":"collisionmodel","collisionbehavior":"delete"}]}})"),project);
+        {"name":"collisionmodel","collisionbehavior":"delete"}]}})");
+    const auto parsed=ObjectParser::parse (authored,project);
     auto& particle=*parsed->as<Particle> ();
     REQUIRE (particle.operators.size ()==3);
     const auto& first=*particle.operators[0]->as<CollisionOperator> ();
@@ -4454,6 +4543,23 @@ TEST_CASE ("MODEL compiled dependency ordinals preserve image records and duplic
     REQUIRE (first.kind==CollisionOperator::Kind::Model);
     REQUIRE (first.dependencyIndex==1);
     REQUIRE (second.dependencyIndex==2);
+    REQUIRE (first.dependencyBindingIndex==0);
+    REQUIRE (second.dependencyBindingIndex==1);
+    REQUIRE (modelCollisionDependency (particle.typedDependencies, first.dependencyBindingIndex)->id == 20);
+    REQUIRE (modelCollisionDependency (particle.typedDependencies, second.dependencyBindingIndex)->id == 21);
+    // Native-positive v4 used authored MODEL index1 after IMAGE0. The native
+    // type counter leaves the first MODEL unbound, and its opcode is a no-op;
+    // the old global-ordinal lookup incorrectly bound it and caused a bounce.
+    auto unbound=authored;
+    unbound["dependencies"][1]["index"]=1;
+    const auto missing=ObjectParser::parse (unbound,project);
+    const auto& missingParticle=*missing->as<Particle> ();
+    REQUIRE_FALSE (modelCollisionDependency (missingParticle.typedDependencies,
+        missingParticle.operators[0]->as<CollisionOperator> ()->dependencyBindingIndex));
+    // The native binding loop walks all matching links; a later duplicate
+    // replaces the cache pointer instead of falling back to the first source.
+    REQUIRE (modelCollisionDependency (missingParticle.typedDependencies,
+        missingParticle.operators[2]->as<CollisionOperator> ()->dependencyBindingIndex)->id == 21);
     REQUIRE (first.flags==2);
     REQUIRE (first.bounceFactor==.5f);
     REQUIRE (second.behavior==CollisionOperator::Behavior::Delete);
@@ -4466,7 +4572,31 @@ TEST_CASE ("MODEL compiled dependency ordinals preserve image records and duplic
         REQUIRE (visits==1);
     }
     REQUIRE (needsNativeSlotStreams(particle));
-    REQUIRE (nativeSlotScopeError(particle)); // IMAGE readback needs separate physical-stream validation.
+    // Native-positive ordinary IMAGE births now use the same physical pool;
+    // the primitive preceding it does not consume an image dependency ordinal.
+    REQUIRE_FALSE (nativeSlotScopeError(particle));
+    REQUIRE (nativeSlotScopeError (particle, true));
+    REQUIRE (nativeSlotScopeError (particle, false, true));
+    particle.children.emplace_back ();
+    REQUIRE (nativeSlotScopeError (particle));
+    particle.children.clear ();
+    particle.renderers.emplace_back ().name = "rope";
+    REQUIRE (nativeSlotScopeError (particle));
+    particle.renderers.pop_back ();
+    // Admitting IMAGE to MODEL's native pool must not silently admit the
+    // unvalidated boids/CP-output combinations or runtime parent/rope/events.
+    for (const auto& extra : {
+        JSON::parse (R"({"name":"boids"})"),
+        JSON::parse (R"({"name":"remapvalue","input":"position","output":"controlpoint",
+                        "outputcontrolpoint0":2,"operation":"remap"})")}) {
+        auto mixed=authored;
+        mixed["particle"]["operator"].push_back (extra);
+        const auto unsupported=ObjectParser::parse (mixed,project);
+        REQUIRE_FALSE (unsupported->as<Particle> ()->hasUnsupportedComponents);
+        const auto error=nativeSlotScopeError (*unsupported->as<Particle> ());
+        REQUIRE (error);
+        REQUIRE (error->find ("emitter is unsupported: layerimage") != std::string::npos);
+    }
     particle.emitters.pop_back ();
     REQUIRE_FALSE (nativeSlotScopeError(particle));
 }
