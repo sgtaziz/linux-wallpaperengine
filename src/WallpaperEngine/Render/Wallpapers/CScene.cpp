@@ -518,6 +518,11 @@ void CScene::renderFrame (const glm::ivec4& viewport) {
         if (object->is<Objects::CImage> ())
             object->as<Objects::CImage> ()->advanceTextureAnimation (
                 getDeltaTime (), getContext ().getDriver ().getFrameCounter ());
+    // Particle outer updates publish geometry before script callbacks. API
+    // emissions and inner-only warmup after this point retain that publication.
+    for (const auto& object : m_objectsByRenderOrder)
+        if (object->is<Objects::CParticle> ())
+            object->as<Objects::CParticle> ()->advanceFrame ();
     // Native cursor dispatch (140189e10) precedes SceneScript update (140171440).
     dispatchCursorEvents ();
     // run a tick in the javascript logic

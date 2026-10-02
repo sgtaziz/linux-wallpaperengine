@@ -747,7 +747,7 @@ void CParticle::warmup () {
     // Native warm-up calls the inner tick directly, bypassing the outer
     // node-time accumulator; keep m_time at startup until ordinary render.
     for (uint32_t i = 0; i < plan.steps; ++i) {
-	update (ParticleCore::warmupClock (plan.step, fps));
+	advanceNode (ParticleCore::warmupClock (plan.step, fps), ParticleCore::NodeAdvanceMode::Warmup);
     }
     if (m_hasRopeTrailHistory) {
 	for (uint32_t i = 0; i < m_particleCount; ++i)
@@ -756,7 +756,10 @@ void CParticle::warmup () {
     }
 }
 
-void CParticle::render () {
+void CParticle::advanceFrame () {
+    const auto frame = getScene ().getContext ().getDriver ().getFrameCounter ();
+    if (m_lastAdvancedFrame && *m_lastAdvancedFrame == frame) return;
+    m_lastAdvancedFrame = frame;
     // Native outer-root flush precedes visibility, enabled and clock guards.
     // Inner warm-up/update and explicit emitParticles do not flush writes.
     if (m_initialized && m_instancePatchWrites && m_instancePatchWrites->consume ())
@@ -768,20 +771,15 @@ void CParticle::render () {
     // The application supplies the first frame's scene delta too. Skipping
     // it would leave warmed-up particles frozen for one live frame.
     float sceneDt = getScene ().getDeltaTime ();
-    bool paused = false;
-    for (const CParticle* ancestor = this; ancestor; ancestor = ancestor->m_parentParticleRuntime)
-        paused |= ancestor->m_paused;
     if (const auto fixedStep = getScene ().getContext ().getApp ().getContext ()
                                    .settings.render.debug.particleStep) {
         sceneDt = *fixedStep;
-        if (!paused && !m_preTickedByParent) m_time += *fixedStep;
-    } else if (!paused) {
+        m_time += *fixedStep;
+    } else {
         m_time = g_Time;
     }
 
-    if (m_preTickedByParent) {
-	m_preTickedByParent = false;
-    } else if (!paused && std::isfinite (sceneDt) && sceneDt > 0.0f) {
+    if (std::isfinite (sceneDt) && sceneDt >= 0.0f) {
 	// Linux's render clock has no native host slowdown factor. Bound long
 	// stalls to the native main-loop ceiling before deriving the node clock.
 	sceneDt = std::min (sceneDt, 0.25f);
@@ -790,10 +788,66 @@ void CParticle::render () {
 	// (+0x854) after clamping that authored value to at least 0.01.
 	const float authoredRate = m_particle.instanceOverride.rate->value->getFloat ();
 	const float rate = ParticleCore::nodeRate (authoredRate);
-	update (ParticleCore::tickClock (
+	advanceNode (ParticleCore::tickClock (
 	    sceneDt, sceneDt * rate, configuredFps > 0 ? static_cast<uint32_t> (configuredFps) : 0));
     }
 
+}
+
+void CParticle::advanceNode (ParticleCore::TickClock clock, ParticleCore::NodeAdvanceMode mode) {
+    if (mode == ParticleCore::NodeAdvanceMode::Outer
+        && m_instancePatchWrites && m_instancePatchWrites->consume ()) patchInstanceSequenceSteps ();
+    ParticleCore::advanceNodeStages (mode, m_birthEventsEnabled,
+        [&] { update (clock); }, [&] { publishGeometry (); }, [&] { advanceChildren (clock); });
+}
+
+void CParticle::render () {
+    if (!m_initialized || !resolveTransform ().visible) return;
+    if (m_particleCount > 0 && m_particle.material) {
+        const auto& streams = m_publishedGeometry.streams ();
+        for (size_t renderer = 0; renderer < m_rendererPassRanges.size (); ++renderer) {
+            configureRenderer (renderer);
+            const bool rope = m_particle.renderers.empty () ? m_useRopeRenderer
+                : m_particle.renderers[renderer].name == "rope"
+                    || m_particle.renderers[renderer].name == "ropetrail";
+            if (rope && !m_useTrailRenderer && m_particleCount < 2) continue;
+            if (renderer >= streams.size () || streams[renderer].empty ()) {
+                // Native binds the material with positive CPU live count even
+                // before the first GPU stream write. Texture sampling starts
+                // on a late API birth; its zero-index draw fetches no vertices.
+                drawPublishedGeometry ({renderer, rope});
+            } else {
+                for (const auto& packet : streams[renderer]) drawPublishedGeometry (packet);
+            }
+        }
+    }
+    if (m_mixedSpriteRopeRenderer) m_useTrailRenderer = false;
+    renderChildren ();
+}
+
+void CParticle::configureRenderer (size_t renderer) {
+    m_activeRendererIndex = renderer;
+    if (renderer >= m_particle.renderers.size ()) return;
+    const auto& record = m_particle.renderers[renderer];
+    m_useTrailRenderer = record.name == "ropetrail";
+    if (record.name == "rope" || m_useTrailRenderer) {
+        m_ropeSubdivision = m_ropeRendererSubdivisions[renderer];
+        m_ropeUVScrolling = m_useTrailRenderer ? m_ropeTrailUVScrolling : m_ordinaryRopeUVScrolling;
+        m_ropeUVSmoothing = m_ordinaryRopeUVSmoothing;
+        m_ropeTrailFadeAlpha = record.fadeAlpha;
+        m_ropeTrailFadeSize = record.fadeSize;
+    } else if (record.name == "spritetrail") {
+        m_trailLength = record.length;
+        m_trailMaxLength = record.maxLength;
+        m_trailMinLength = record.minLength;
+    }
+}
+
+void CParticle::publishGeometry () {
+    // Native outer 1402308a0 publishes this node before traversing children.
+    // Inner warmup and scripted emitParticles never replace these streams.
+    // Renderer stream replacement follows native family-specific write gates.
+    // Zero-live retirement and one-point ordinary rope keep their publication.
     // Render particles
     if (m_particleCount > 0 && m_particle.material) {
 	if (m_mixedSpriteRopeRenderer) {
@@ -808,26 +862,25 @@ void CParticle::render () {
 	            m_ropeUVSmoothing = m_ordinaryRopeUVSmoothing;
 	            m_ropeTrailFadeAlpha = record.fadeAlpha;
 	            m_ropeTrailFadeSize = record.fadeSize;
-	            if (m_useTrailRenderer) renderRopeTrail ();
-	            else renderRope ();
+	            if (m_useTrailRenderer) buildRopeTrail ();
+	            else buildRope ();
 	        } else {
 	            m_useTrailRenderer = false;
-	            renderSprites (static_cast<uint32_t> (renderer));
+	            buildSprites (static_cast<uint32_t> (renderer));
 	        }
 	    }
 	    m_useTrailRenderer = false;
 	} else if (m_useRopeRenderer) {
 	    m_activeRendererIndex = 0;
-	    if (m_useTrailRenderer) renderRopeTrail ();
-	    else renderRope ();
+	    if (m_useTrailRenderer) buildRopeTrail ();
+	    else buildRope ();
 	} else {
 	    for (uint32_t renderer = 0; renderer < m_spriteRendererCount; ++renderer) {
 	        m_activeRendererIndex = renderer;
-		renderSprites (renderer);
+		buildSprites (renderer);
 	    }
 	}
     }
-    renderChildren ();
 }
 
 void CParticle::emitNewParticles (float dt) {
@@ -836,7 +889,10 @@ void CParticle::emitNewParticles (float dt) {
 	if (m_slotStreams) {
 	    m_slotStreams->beginEmissionPass ();
 	}
-	if (m_emissionEnabled || m_forcedEmitCount != 0) for (auto& emitter : m_emitters) {
+	// Node pause suppresses automatic emission, not aging/operator execution.
+        // Native propagates its paused bit through the active child tree.
+        if (ParticleCore::automaticEmissionAllowed (m_emissionEnabled, isEmissionPaused (), m_forcedEmitCount))
+        for (auto& emitter : m_emitters) {
 	    const uint32_t oldCount = m_particleCount;
 	    uint32_t emissionCount = m_slotStreams ? m_slotStreams->nativeCount () : m_particleCount;
 	    emitter (m_particles, emissionCount, dt);
@@ -1060,6 +1116,12 @@ bool CParticle::isPlaying () const {
         m_emitterCanProduce.end (), [] (uint8_t canProduce) { return canProduce != 0; });
 }
 
+bool CParticle::isEmissionPaused () const {
+    for (const CParticle* node = this; node; node = node->m_parentParticleRuntime)
+        if (node->m_paused) return true;
+    return false;
+}
+
 void CParticle::update (ParticleCore::TickClock clock) {
     if (clock.operatorPasses == 0) return;
     // Native retains one previous CP matrix throughout both low-FPS passes.
@@ -1229,8 +1291,9 @@ void CParticle::update (ParticleCore::TickClock clock) {
     for (uint32_t i = 0; i < m_particleCount; i++) {
 	auto& p = m_particles[i];
 
-	const int frameCount = m_spritesheetFrames > 0 ? m_spritesheetFrames
-	    : m_separatePageAnimation ? m_animationFrameCount : 0;
+	// Separate texture pages are selected by the shared material sampler at
+	// draw time. Only a same-page atlas encodes a per-particle sequence here.
+	const int frameCount = m_separatePageAnimation ? 0 : m_spritesheetFrames;
 	if (frameCount > 0 && m_particle.animationMode != "randomframe") {
 	    const double sequenceCycles = particleSequenceCycles (
 		p.age, p.lifetime, m_particle.sequenceMultiplier);
@@ -1271,9 +1334,10 @@ void CParticle::update (ParticleCore::TickClock clock) {
 	}
     }
 
-    // Native 1402308a0 recursively advances event/static children during the
-    // parent node tick, including the parent's warm-up loop. Child rendering
-    // consumes this tick instead of deriving a second clock from scene delta.
+}
+
+void CParticle::advanceChildren (ParticleCore::TickClock clock) {
+    // Native outer traversal follows publication; inner warmup never enters it.
     for (size_t childIndex = 0; childIndex < m_childNodes.size ();) {
 	auto& node = m_childNodes[childIndex];
 	if (!node.detached && node.parentBirthId == 0)
@@ -1295,8 +1359,7 @@ void CParticle::update (ParticleCore::TickClock clock) {
 	}
 	node.runtime->inheritControlPointsFromParent (*this, m_particle.children[node.descriptor]);
 	node.runtime->m_time = m_time;
-	node.runtime->update (clock);
-	node.runtime->m_preTickedByParent = true;
+	node.runtime->advanceNode (clock);
 	if (traceParticleChildren (*this))
 	    sLog.out ("CHILD_TRACE tick object=", m_particle.id,
 		      " child=", node.model->id, " descriptor=", node.descriptor,
@@ -1416,7 +1479,6 @@ void CParticle::spawnChild (size_t descriptor, const ParticleInstance* parent, b
             // reconstructing CPs, compiled initializers, slot high-water or
             // static descendants. Reenable the retained static emitter tree.
             node.runtime->resetStaticEmitterTree ();
-            node.runtime->m_preTickedByParent = false;
             node.runtime->warmup ();
         } else {
             node.runtime->setup ();
@@ -1480,7 +1542,7 @@ void CParticle::processChildEvents (const std::vector<ParticleInstance>& expired
     // birth IDs from the full emitter stage. This keeps authored ordering.
     for (size_t descriptor = 0; descriptor < m_particle.children.size (); ++descriptor) {
         const auto& type = m_particle.children[descriptor].type;
-        if (type != "eventfollow" && type != "eventspawn") continue;
+        if (!m_birthEventsEnabled || (type != "eventfollow" && type != "eventspawn")) continue;
         for (const auto& particle : born) dispatch (particle, descriptor);
     }
 }
@@ -1678,7 +1740,7 @@ EmitterFunc CParticle::createBoxEmitter (const ParticleEmitter& emitter, size_t 
 	        ? ParticleCore::advanceEmitterForced (activeSchedule, state, m_forcedEmitCount,
 	            capacity, [this] (float min, float max) {
 	                return WallpaperEngine::Maths::randomFloat (m_rng, min, max);
-	            }, &periodRestarted)
+	            }, &periodRestarted, isEmissionPaused ())
 	        : ParticleCore::advanceEmitter (activeSchedule, state, dt, capacity,
 	            [this] (float min, float max) { return WallpaperEngine::Maths::randomFloat (m_rng, min, max); },
 	            &periodRestarted);
@@ -1804,7 +1866,7 @@ EmitterFunc CParticle::createSphereEmitter (const ParticleEmitter& emitter, size
 	    ? ParticleCore::advanceEmitterForced (activeSchedule, state, m_forcedEmitCount,
 	        capacity, [this] (float min, float max) {
 	            return WallpaperEngine::Maths::randomFloat (m_rng, min, max);
-	        }, &periodRestarted)
+	        }, &periodRestarted, isEmissionPaused ())
 	    : ParticleCore::advanceEmitter (activeSchedule, state, dt, capacity,
 	        [this] (float min, float max) { return WallpaperEngine::Maths::randomFloat (m_rng, min, max); },
 	        &periodRestarted);
@@ -1949,7 +2011,7 @@ EmitterFunc CParticle::createImageEmitter (const ParticleEmitter& emitter, size_
             ? ParticleCore::advanceEmitterForced (activeSchedule, state, m_forcedEmitCount,
                 capacity, [this] (float min, float max) {
                     return WallpaperEngine::Maths::randomFloat (m_rng, min, max);
-                }, &periodRestarted)
+                }, &periodRestarted, isEmissionPaused ())
             : ParticleCore::advanceEmitter (activeSchedule, state, dt, capacity,
                 [this] (float min, float max) {
                     return WallpaperEngine::Maths::randomFloat (m_rng, min, max);
@@ -3783,10 +3845,9 @@ void CParticle::updateParticleRenderVars () {
     }
 }
 
-void CParticle::renderSprites (uint32_t rendererIndex) {
-    if (m_particleCount == 0 || m_passes.empty ()) {
-	return;
-    }
+void CParticle::buildSprites (uint32_t rendererIndex) {
+    if (!m_publishedGeometry.beginStream (rendererIndex, m_particleCount, false)
+        || m_passes.empty ()) return;
 
     // Count alive particles
     uint32_t aliveCount = 0;
@@ -3805,8 +3866,6 @@ void CParticle::renderSprites (uint32_t rendererIndex) {
     //   + a_TexCoordVec4C1(vel.x, vel.y, vel.z, lifetime)(4) + a_TexCoordC2(rotX, rotY)(2) = 17 floats
     uint32_t vertexIndex = 0;
     uint32_t indexOffset = 0;
-    std::vector<uint32_t> drawnParticleIndices;
-    if (m_separatePageAnimation) drawnParticleIndices.reserve (m_particleCount);
 
     for (uint32_t i = 0; i < m_particleCount; i++) {
 	const auto& p = m_particles[i];
@@ -3819,7 +3878,6 @@ void CParticle::renderSprites (uint32_t rendererIndex) {
 	    || !std::isfinite (p.size) || p.size <= 0.0f || p.size > 10000.0f) {
 	    continue;
 	}
-	if (m_separatePageAnimation) drawnParticleIndices.push_back (i);
 
 	// Compute the lifetime value for the WP shader's ComputeSpriteFrame.
 	// The shader computes: floor(frac(lifetime) * numFrames) to get current frame,
@@ -3888,83 +3946,32 @@ void CParticle::renderSprites (uint32_t rendererIndex) {
 	return;
     }
 
-#if !NDEBUG
-    std::string str = "Particles ";
-    str += this->getParticle ().name + " (" + std::to_string (this->getId ()) + ", " + this->getParticle ().particleFile
-	+ ")";
-    glPushDebugGroup (GL_DEBUG_SOURCE_APPLICATION, 0, -1, str.c_str ());
-#endif
+    m_publishedGeometry.append ({rendererIndex, false,
+        {m_vertices.begin (), m_vertices.begin () + vertexIndex * SPRITE_FLOATS_PER_VERTEX},
+        {m_indices.begin (), m_indices.begin () + indexOffset}});
+}
 
-    // Upload vertex and index data
-    glBindBuffer (GL_ARRAY_BUFFER, m_vbo);
-    glBufferData (
-	GL_ARRAY_BUFFER, static_cast<GLsizeiptr> (vertexIndex * SPRITE_FLOATS_PER_VERTEX * sizeof (float)),
-	m_vertices.data (), GL_DYNAMIC_DRAW
-    );
-
-    glBindBuffer (GL_ELEMENT_ARRAY_BUFFER, m_ebo);
-    glBufferData (
-	GL_ELEMENT_ARRAY_BUFFER, static_cast<GLsizeiptr> (indexOffset * sizeof (uint32_t)), m_indices.data (),
-	GL_DYNAMIC_DRAW
-    );
-
-    // Update matrices and uniform data
-    if (rendererIndex < m_particle.renderers.size ()
-        && m_particle.renderers[rendererIndex].name == "spritetrail") {
-        const auto& trail = m_particle.renderers[rendererIndex];
-        m_trailLength = trail.length;
-        m_trailMaxLength = trail.maxLength;
-        m_trailMinLength = trail.minLength;
-    }
+void CParticle::drawPublishedGeometry (const ParticleCore::GeometryPacket& packet) {
+    m_activeIndexCount = static_cast<GLsizei> (packet.indices.size ());
+    m_activeIndexOffset = 0;
     updateMatrices ();
-    applyRendererOrientation (rendererIndex);
-    if (m_separatePageAnimation) {
-        const auto& frames = getTexture ()->getFrames ();
-        const auto range = m_rendererPassRanges.at (m_activeRendererIndex);
-        const auto resetPageDraw = [&] {
-            for (size_t pass = 0; pass < range.count; ++pass)
-                m_passes[range.first + pass]->setTextureFrameOverride (std::nullopt);
-            m_activeIndexOffset = 0;
-            m_activeIndexCount = static_cast<GLsizei> (indexOffset);
-        };
-        try {
-	    for (size_t drawn = 0; drawn < drawnParticleIndices.size (); ++drawn) {
-		const auto& particle = m_particles[drawnParticleIndices[drawn]];
-		const float coordinate = m_particle.animationMode == "randomframe"
-		    ? particle.oscillatorRandom * static_cast<float> (frames.size ())
-		    : particle.frame;
-		const uint32_t ordinal = m_particle.animationMode == "randomframe"
-		    ? (std::isfinite (coordinate) && coordinate > 0.0f
-		        ? static_cast<uint32_t> (std::min<double> (
-		            coordinate, static_cast<double> (frames.size () - 1))) : 0u)
-		    : std::min<uint32_t> (particle.frameOrdinal, frames.size () - 1);
-		m_activeIndexOffset = drawn * 6;
-		m_activeIndexCount = 6;
-		for (size_t pass = 0; pass < range.count; ++pass)
-		    m_passes[range.first + pass]->setTextureFrameOverride (ordinal);
-		if (traceParticleChildren (*this))
-		    sLog.out ("Particle page draw: particle=", getId (),
-		              " renderer=", m_activeRendererIndex,
-		              " birth=", particle.birthId,
-		              " ordinal=", ordinal,
-		              " page=", frames[ordinal]->frameNumber,
-		              " position=", particle.position.x, ",", particle.position.y,
-		              " color=", particle.color.r, ",", particle.color.g, ",", particle.color.b,
-		              " age=", particle.age);
-		drawMaterialPasses ();
-	    }
-        } catch (...) {
-            resetPageDraw ();
-            throw;
-        }
-        resetPageDraw ();
-    } else {
-        drawMaterialPasses ();
+    applyRendererOrientation (packet.renderer);
+    std::vector<float> ropeVertices;
+    if (packet.rope) {
+        const auto eyeModel = glm::vec3 (m_modelMatrixInverse * glm::vec4 (m_eyePosition, 1.0f));
+        const auto fixedEye = glm::mat3 (m_modelMatrixInverse) * m_orientationForward;
+        const bool screen = packet.renderer >= m_particle.renderers.size ()
+            || m_particle.renderers[packet.renderer].orientation == "screen";
+        ropeVertices = ParticleCore::ropeDrawVertices (packet, eyeModel, fixedEye, screen);
     }
-
-#if !NDEBUG
-    glPopDebugGroup ();
-#endif
+    const auto& vertices = packet.rope ? ropeVertices : packet.vertices;
+    glBindBuffer (GL_ARRAY_BUFFER, m_vbo);
+    glBufferData (GL_ARRAY_BUFFER, static_cast<GLsizeiptr> (vertices.size () * sizeof (float)),
+                  vertices.data (), GL_DYNAMIC_DRAW);
+    glBindBuffer (GL_ELEMENT_ARRAY_BUFFER, m_ebo);
+    glBufferData (GL_ELEMENT_ARRAY_BUFFER, static_cast<GLsizeiptr> (packet.indices.size () * sizeof (uint32_t)),
+                  packet.indices.data (), GL_DYNAMIC_DRAW);
+    drawMaterialPasses ();
 }
 
 void CParticle::applyRendererOrientation (size_t rendererIndex) {
@@ -4031,7 +4038,8 @@ void CParticle::applyRendererOrientation (size_t rendererIndex) {
 
 }
 
-void CParticle::renderRope () {
+void CParticle::buildRope () {
+    if (!m_publishedGeometry.beginStream (m_activeRendererIndex, m_particleCount, true)) return;
     std::vector<ParticleInstance> orderedPoints;
     orderedPoints.reserve (m_ropeBirthSlots.size ());
     // Native 1402308a0 indexes an insertion-order slot list. Expiry removes
@@ -4057,11 +4065,12 @@ void CParticle::renderRope () {
                   " renderer=", m_activeRendererIndex, " scene=", getScene ().getParticleSceneTime (),
                   " alive=", m_particleCount, " ordered=", ordered.str ());
     }
-    renderRopePoints (orderedPoints, static_cast<uint32_t> (orderedPoints.size ()));
+    buildRopePoints (orderedPoints, static_cast<uint32_t> (orderedPoints.size ()));
 }
 
-void CParticle::renderRopeTrail () {
-    if (m_passes.empty ()) return;
+void CParticle::buildRopeTrail () {
+    if (!m_publishedGeometry.beginStream (m_activeRendererIndex, m_particleCount, false)
+        || m_passes.empty ()) return;
     if (traceParticleChildren (*this)) {
         const float phase = m_ropeTrailInterval > 0.0f
             ? 1.0f - std::max (m_ropeTrailCountdown, 0.0f) / m_ropeTrailInterval : 0.0f;
@@ -4107,11 +4116,11 @@ void CParticle::renderRopeTrail () {
 	// the renderer's reciprocal UV scale for in_ParticleTrailLength.
 	const float trailLength = ParticleCore::ropeTrailUVLength (
 	    m_ropeTrailHistory.counts[particle], m_ropeUVScale);
-	renderRopePoints (points, static_cast<uint32_t> (points.size ()), trailLength);
+	buildRopePoints (points, static_cast<uint32_t> (points.size ()), trailLength);
     }
 }
 
-void CParticle::renderRopePoints (const std::vector<ParticleInstance>& points,
+void CParticle::buildRopePoints (const std::vector<ParticleInstance>& points,
                                   uint32_t aliveCount, float nativeTrailLength) {
     if (aliveCount < 2 || m_passes.empty ()) {
 	return;
@@ -4154,6 +4163,8 @@ void CParticle::renderRopePoints (const std::vector<ParticleInstance>& points,
     std::vector<glm::vec4> splineColors (totalPoints); // rgba
     struct SegmentRights { glm::vec3 start; glm::vec3 end; glm::vec3 eyeDirection; };
     std::vector<SegmentRights> segmentRights (numSegments);
+    std::vector<ParticleCore::RopeDrawSegment> drawSegments;
+    drawSegments.reserve (numSegments);
     const glm::vec3 eyeModel = glm::vec3 (m_modelMatrixInverse
         * glm::vec4 (m_eyePosition, 1.0f));
     const glm::vec3 fixedEyeDirection = glm::mat3 (m_modelMatrixInverse) * m_orientationForward;
@@ -4186,6 +4197,7 @@ void CParticle::renderRopePoints (const std::vector<ParticleInstance>& points,
 	const float eyeSquared = glm::dot (eyeVector, eyeVector);
 	const glm::vec3 eyeDirection = screenOrientation && std::isfinite (eyeSquared)
 	    && eyeSquared > 0.0f ? eyeVector / std::sqrt (eyeSquared) : eyeVector;
+        drawSegments.push_back ({p0.position, p1.position, p2.position, p3.position, sizeStart, sizeEnd});
 	segmentRights[i] = {
 	    ParticleCore::ropeReflectedSizedRight (eyeDirection, p2.position - p0.position, sizeStart),
 	    ParticleCore::ropeReflectedSizedRight (eyeDirection, p3.position - p1.position, sizeEnd),
@@ -4421,31 +4433,10 @@ void CParticle::renderRopePoints (const std::vector<ParticleInstance>& points,
                   m_vertices[last + 36]);
     }
 
-#if !NDEBUG
-    std::string str = "Rope particles ";
-    str += this->getParticle ().name + " (" + std::to_string (this->getId ()) + ", " + this->getParticle ().particleFile
-	+ ")";
-    glPushDebugGroup (GL_DEBUG_SOURCE_APPLICATION, 0, -1, str.c_str ());
-#endif
-
-    // Upload vertex and index data
-    glBindBuffer (GL_ARRAY_BUFFER, m_vbo);
-    glBufferData (
-	GL_ARRAY_BUFFER, static_cast<GLsizeiptr> (vertexIndex * ROPE_FLOATS_PER_VERTEX * sizeof (float)),
-	m_vertices.data (), GL_DYNAMIC_DRAW
-    );
-
-    glBindBuffer (GL_ELEMENT_ARRAY_BUFFER, m_ebo);
-    glBufferData (
-	GL_ELEMENT_ARRAY_BUFFER, static_cast<GLsizeiptr> (indexOffset * sizeof (uint32_t)), m_indices.data (),
-	GL_DYNAMIC_DRAW
-    );
-
-    drawMaterialPasses ();
-
-#if !NDEBUG
-    glPopDebugGroup ();
-#endif
+    m_publishedGeometry.append ({m_activeRendererIndex, true,
+        {m_vertices.begin (), m_vertices.begin () + vertexIndex * ROPE_FLOATS_PER_VERTEX},
+        {m_indices.begin (), m_indices.begin () + indexOffset},
+        std::move (drawSegments), static_cast<uint32_t> (subdivision)});
 }
 
 void CParticle::drawMaterialPasses () {

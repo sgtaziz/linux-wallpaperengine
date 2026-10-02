@@ -5,6 +5,7 @@
 #include "ParticleEventInheritance.h"
 #include "ParticleInstancePatch.h"
 #include "ParticleChildPool.h"
+#include "ParticleGeometry.h"
 #include "ParticleSlotStreams.h"
 #include "WallpaperEngine/Data/Model/Object.h"
 #include "WallpaperEngine/Render/Objects/Effects/CPass.h"
@@ -119,7 +120,7 @@ public:
 
     void setup () override;
     void render () override;
-    void update (ParticleCore::TickClock clock);
+    void advanceFrame ();
     void emitParticles (int32_t count);
     void play ();
     void pause ();
@@ -195,11 +196,19 @@ protected:
     OperatorFunc createOscillatePositionOperator (const OscillatePositionOperator& op);
 
     // Rendering
-    void renderSprites (uint32_t rendererIndex);
+    [[nodiscard]] bool isEmissionPaused () const;
+    void update (ParticleCore::TickClock clock);
+    void advanceNode (ParticleCore::TickClock clock,
+                      ParticleCore::NodeAdvanceMode mode = ParticleCore::NodeAdvanceMode::Outer);
+    void advanceChildren (ParticleCore::TickClock clock);
+    void publishGeometry ();
+    void configureRenderer (size_t renderer);
+    void drawPublishedGeometry (const ParticleCore::GeometryPacket& packet);
+    void buildSprites (uint32_t rendererIndex);
     void applyRendererOrientation (size_t rendererIndex);
-    void renderRope ();
-    void renderRopeTrail ();
-    void renderRopePoints (const std::vector<ParticleInstance>& points, uint32_t count,
+    void buildRope ();
+    void buildRopeTrail ();
+    void buildRopePoints (const std::vector<ParticleInstance>& points, uint32_t count,
                            float nativeTrailLength = 0.0f);
     void spawnChild (size_t descriptor, const ParticleInstance* parent, bool follow);
     void processChildEvents (const std::vector<ParticleInstance>& expired,
@@ -265,7 +274,9 @@ private:
     bool m_paused { false };
     uint32_t m_forcedEmitCount { 0 };
     uint32_t m_pendingEmitCount { 0 };
-    bool m_preTickedByParent { false };
+    bool m_birthEventsEnabled { true };
+    std::optional<uint64_t> m_lastAdvancedFrame;
+    ParticleCore::GeometryPublication m_publishedGeometry;
     bool m_hasChildParentMatrix { false };
     // Native child node +3a0 and the scene matrix-stack entry below it are
     // distinct. Event children may replace the latter; static children do not.

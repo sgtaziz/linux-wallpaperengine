@@ -863,6 +863,10 @@ void WallpaperApplication::setup () {
     bool initialized = false;
     int frame = 0;
 #endif /* DEMOMODE */
+
+    // Native 140110c89 rebases the host timer after scene loading. Discard
+    // setup time without skipping the next live frame or resetting warmup.
+    resumeRenderFrameClock (m_videoDriver->getRenderTime (), g_Time, g_TimeLast);
 }
 
 void WallpaperApplication::render () {

@@ -1621,10 +1621,14 @@ template <typename RandomFloat>
 uint32_t advanceEmitterForced (const EmitterScheduleConfig& config,
                                EmitterScheduleState& state, uint32_t forced,
                                uint32_t available, RandomFloat&& randomFloat,
-                               bool* periodRestarted = nullptr) {
+                               bool* periodRestarted = nullptr, bool paused = false) {
     if (periodRestarted) *periodRestarted = false;
-    if (forced == 0 || available == 0 || state.expired || state.delayRemaining > 0.0f)
-        return 0;
+    if (forced == 0 || available == 0) return 0;
+    // Original 1402379d6 assigns the requested count before the disabled,
+    // paused and delay tests. Those jump directly to birth dispatch; only
+    // the automatic scheduling branch consumes instantaneous/rate credit.
+    if (paused || state.expired || state.delayRemaining > 0.0f)
+        return std::min (forced, available);
     if (config.periodic && state.periodTimer == 0.0f) {
         state.periodTimer = randomFloat (config.minActiveDuration,
                                          config.maxActiveDuration);
