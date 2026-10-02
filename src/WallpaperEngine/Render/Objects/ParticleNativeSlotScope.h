@@ -12,8 +12,8 @@ namespace WallpaperEngine::Render::Objects::ParticleCore {
 inline bool needsNativeSlotStreams (const Data::Model::Particle& particle) {
     using namespace Data::Model;
     return std::any_of (particle.operators.begin (), particle.operators.end (), [] (const auto& op) {
-        return op && op->template is<VectorRemapValueOperator> ()
-            && op->template as<VectorRemapValueOperator> ()->output == VectorRemapValueOperator::Output::ControlPoint;
+        return op && (op->template is<BoidsOperator> () || (op->template is<VectorRemapValueOperator> ()
+            && op->template as<VectorRemapValueOperator> ()->output == VectorRemapValueOperator::Output::ControlPoint));
     });
 }
 
@@ -24,20 +24,33 @@ inline std::optional<std::string> nativeSlotScopeError (
     bool animatedTexture = false) {
     using namespace Data::Model;
     if (!needsNativeSlotStreams (particle)) return std::nullopt;
+    const bool controlPointOutput = std::any_of (particle.operators.begin (), particle.operators.end (), [] (const auto& op) {
+        return op && op->template is<VectorRemapValueOperator> ()
+            && op->template as<VectorRemapValueOperator> ()->output == VectorRemapValueOperator::Output::ControlPoint;
+    });
+    const bool boids = std::any_of (particle.operators.begin (), particle.operators.end (), [] (const auto& op) {
+        return op && op->template is<BoidsOperator> ();
+    });
+    const std::string owner = boids ? "Native boids physical streams" : "Runtime control-point output";
     if (particleRuntimeParent || !particle.children.empty ())
-        return "Runtime control-point output requires a root particle node without event children";
+        return owner + " requires a root particle node without event children";
     if (particle.hasUnsupportedComponents)
-        return "Runtime control-point output contains an unsupported authored component";
+        return owner + " contains an unsupported authored component";
     if (animatedTexture)
-        return "Runtime control-point output animated textures are unsupported";
+        return owner + " animated textures are unsupported";
     for (const auto& renderer : particle.renderers)
-        if (renderer.name != "sprite") return "Runtime control-point output requires sprite renderers";
+        if (renderer.name != "sprite") return owner + " requires sprite renderers";
     for (const auto& emitter : particle.emitters)
         if (emitter.name != "boxrandom" && emitter.name != "sphererandom")
-            return "Runtime control-point output emitter is unsupported: " + emitter.name;
+            return owner + " emitter is unsupported: " + emitter.name;
     for (const auto& op : particle.operators) {
         if (!op) continue;
-        if (op->is<MovementOperator> () || op->is<CapVelocityOperator> ()) continue;
+        if (op->is<BoidsOperator> () && op->blendEnvelope)
+            return owner + " boids blend envelope requires separate per-lane clock validation";
+        if (op->is<MovementOperator> () || op->is<CapVelocityOperator> () || op->is<BoidsOperator> ()) continue;
+        if (boids && !controlPointOutput && (op->is<AngularMovementOperator> () || op->is<CollisionOperator> ()
+            || op->is<AlphaFadeOperator> () || op->is<SizeChangeOperator> ()
+            || op->is<AlphaChangeOperator> () || op->is<ColorChangeOperator> ())) continue;
         if (op->is<ScalarRemapValueOperator> ()) {
             const auto& remap = *op->as<ScalarRemapValueOperator> ();
             if (remap.transform == ScalarRemapValueOperator::Transform::Identity
@@ -47,23 +60,25 @@ inline std::optional<std::string> nativeSlotScopeError (
         }
         if (op->is<VectorRemapValueOperator> ()
             && op->as<VectorRemapValueOperator> ()->transform == VectorRemapValueOperator::Transform::Identity) continue;
-        return "Runtime control-point output supports movement, capvelocity and identity remaps";
+        return boids && !controlPointOutput
+            ? owner + " operator lacks physical-slot validation (supported: boids, movement, angularmovement, capvelocity, primitive collisions, fades/size/color, identity remaps)"
+            : owner + " supports boids, movement, capvelocity and identity remaps";
     }
     for (const auto& initializer : particle.initializers) {
         if (!initializer) continue;
         if (initializer->is<InheritInitialValueFromEventInitializer> ())
-            return "Runtime control-point output event inheritance is unsupported";
+            return owner + " event inheritance is unsupported";
         if (!initializer->is<RemapInitialValueInitializer> ()) continue;
         const auto& remap = initializer->as<RemapInitialValueInitializer> ()->remap;
         if (!remap || !remap->is<ScalarRemapValueOperator> ()) continue;
         const auto& scalar = *remap->as<ScalarRemapValueOperator> ();
-        if (scalar.output == ScalarRemapValueOperator::Output::MaxLifetime
+        if (controlPointOutput && scalar.output == ScalarRemapValueOperator::Output::MaxLifetime
             && (scalar.operation != ScalarRemapValueOperator::Operation::Set
                 || scalar.transform != ScalarRemapValueOperator::Transform::Identity
                 || (scalar.flags & 1) == 0 || !std::isfinite (scalar.outputMin)
                 || !std::isfinite (scalar.outputMax) || scalar.outputMin <= 0.0f
                 || scalar.outputMax <= 0.0f))
-            return "Runtime control-point output birth lifetime remap is not proven positive";
+            return owner + " birth lifetime remap is not proven positive";
     }
     return std::nullopt;
 }

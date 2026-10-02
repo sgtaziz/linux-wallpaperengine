@@ -1207,7 +1207,45 @@ ParticleOperatorUniquePtr ObjectParser::parseParticleOperator (
     const JSON& it, const Properties& properties, bool birth, bool orthogonalScene) {
     std::string name = it.optional<std::string> ("name", "");
 
-    if (name == "collisionplane" || name == "collisionsphere" || name == "collisionbox"
+    if (name == "boids") {
+        if (birth) return nullptr;
+        const auto convertible = [] (const JSON& value) {
+            return value.is_number () || value.is_boolean () || value.is_null ();
+        };
+        for (const auto* key : {"separationthreshold", "neighborthreshold", "maxspeed",
+                               "separationfactor", "alignmentfactor", "cohesionfactor", "flags"})
+            if (it.contains (key) && !convertible (it.at (key))) return nullptr;
+        // Original literal JSON converters086220/085f70 accept numbers,
+        // boolean and null; strings/settings do not compile into this record.
+        const auto scalar = [&it] (const char* key, float fallback) {
+            if (!it.contains (key)) return fallback;
+            const auto& value = it.at (key);
+            if (value.is_null ()) return 0.0f;
+            if (value.is_boolean ()) return value.get<bool> () ? 1.0f : 0.0f;
+            return value.get<float> ();
+        };
+        auto result = std::make_unique<BoidsOperator> ();
+        result->separationThreshold = scalar ("separationthreshold", orthogonalScene ? 20.0f : 0.02f);
+        result->neighborThreshold = scalar ("neighborthreshold", orthogonalScene ? 50.0f : 0.2f);
+        result->maxSpeed = scalar ("maxspeed", orthogonalScene ? 500.0f : 1.0f);
+        result->separationFactor = scalar ("separationfactor", 15.0f);
+        result->alignmentFactor = scalar ("alignmentfactor", 1.0f);
+        result->cohesionFactor = scalar ("cohesionfactor", 2.0f);
+        if (it.contains ("flags")) {
+            const auto& value = it.at ("flags");
+            if (value.is_null ()) result->flags = 0;
+            else if (value.is_boolean ()) result->flags = value.get<bool> () ? 1 : 0;
+            else if (value.is_number_integer ()) result->flags = value.get<uint32_t> ();
+            else {
+                const double number = value.get<double> ();
+                // Native CVTTSD2SI64 followed by low DWORD; its indefinite
+                // integer has low zero for NaN/out-of-range conversion.
+                result->flags = number >= -9223372036854775808.0 && number < 9223372036854775808.0
+                    ? static_cast<uint32_t> (static_cast<int64_t> (number)) : 0u;
+            }
+        }
+        return result;
+    } else if (name == "collisionplane" || name == "collisionsphere" || name == "collisionbox"
         || name == "collisionbounds" || name == "collisionquad") {
         if (birth) return nullptr;
         // These are literal compiled records, not runtime user settings.

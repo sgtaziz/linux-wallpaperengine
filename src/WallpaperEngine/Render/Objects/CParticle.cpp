@@ -7,6 +7,7 @@
 #include "ParticleControlPointConstraints.h"
 #include "ParticleChildControlPoints.h"
 #include "ParticleCollision.h"
+#include "ParticleBoids.h"
 #include "ParticleImageEmitterReadback.h"
 #include "CImage.h"
 
@@ -973,7 +974,11 @@ void CParticle::finishEmittedParticle (ParticleInstance& particle, uint32_t& cou
         ++count;
         return;
     }
-    if (!std::isfinite (particle.lifetime) || particle.lifetime <= 0.0f)
+    const bool controlPointOutput = std::any_of (m_particle.operators.begin (), m_particle.operators.end (), [] (const auto& op) {
+        return op && op->template is<VectorRemapValueOperator> ()
+            && op->template as<VectorRemapValueOperator> ()->output == VectorRemapValueOperator::Output::ControlPoint;
+    });
+    if (controlPointOutput && (!std::isfinite (particle.lifetime) || particle.lifetime <= 0.0f))
         throw std::invalid_argument ("Runtime control-point output requires a finite positive birth lifetime");
     // Birth remaps consume the baseline proxy during ordered initialization.
     // Native current streams remain at raw defaults until interpreter restore;
@@ -2716,6 +2721,8 @@ void CParticle::setupOperators () {
 	    func = createAngularMovementOperator (*op->as<AngularMovementOperator> ());
 	} else if (op->is<CapVelocityOperator> ()) {
 	    func = createCapVelocityOperator (*op->as<CapVelocityOperator> ());
+	} else if (op->is<BoidsOperator> ()) {
+            func = createBoidsOperator (*op->as<BoidsOperator> ());
 	} else if (op->is<CollisionOperator> ()) {
             func = createCollisionOperator (*op->as<CollisionOperator> ());
 	} else if (op->is<ScalarRemapValueOperator> ()) {
@@ -2873,6 +2880,17 @@ OperatorFunc CParticle::createMovementOperator (const MovementOperator& op) {
 		                             packedGravity[axis], drag, time);
 	    }
 	}
+    };
+}
+
+OperatorFunc CParticle::createBoidsOperator (const BoidsOperator& op) {
+    const ParticleCore::BoidsParameters parameters {op.separationThreshold, op.neighborThreshold,
+        op.maxSpeed, op.separationFactor, op.alignmentFactor, op.cohesionFactor, op.flags};
+    return [this, parameters] (std::vector<ParticleInstance>& particles, uint32_t,
+            std::vector<ControlPointData>&, float, ParticleCore::MovementTime time) {
+        ParticleCore::applyNativeBoids (particles, m_slotStreams->highWater (),
+            static_cast<uint32_t> (getScene ().getContext ().getDriver ().getFrameCounter ()),
+            time, parameters);
     };
 }
 

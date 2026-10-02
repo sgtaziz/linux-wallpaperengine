@@ -1,5 +1,6 @@
 #include "WallpaperEngine/Render/Objects/ParticleCore.h"
 #include "WallpaperEngine/Render/Objects/ParticleCollision.h"
+#include "WallpaperEngine/Render/Objects/ParticleBoids.h"
 #include "WallpaperEngine/Render/Objects/ParticlePuppetEmission.h"
 #include "WallpaperEngine/Render/Objects/ImageAlignment.h"
 #include "WallpaperEngine/Render/Objects/CParticle.h"
@@ -463,7 +464,7 @@ TEST_CASE ("Parsed sparse control-point output uses the production capability bo
         const auto parsed = check (data);
         REQUIRE (nativeSlotScopeError (*parsed->as<Particle> ()));
     }
-    for (const char* name : {"turbulence", "angularmovement", "alphafade", "boids"}) {
+    for (const char* name : {"turbulence", "angularmovement", "alphafade"}) {
         auto data = authored;
         data["particle"]["operator"].push_back ({{"name", name}});
         const auto parsed = check (data);
@@ -4129,4 +4130,193 @@ TEST_CASE ("Puppet emission retains scene-frame world poses independently of bir
     history.advance (world, std::span<const glm::mat4> {});
     REQUIRE (history.previous.empty ());
     REQUIRE_FALSE (puppetEmissionBoneMatrix (pose, inverseBind, 0xff));
+}
+
+TEST_CASE ("Boids arithmetic matches the unmodified original four-lane interpreter",
+           "[particle][boids]") {
+    if (!nativeRuntimeArithmeticAvailable) return;
+    using WallpaperEngine::Render::Objects::ParticleInstance;
+    // Actual 2.8.42 opcode11 outputs, PE40e2ce02; original interpreter executes
+    // untouched bytes at14023fbc0. Includes conditional cap, not a hard cap.
+    const std::array<std::array<float, 12>, 10> native {{
+        {-3.73125792f, -1.0117383f, 0.0f, 2.33374023f, 2.50921559f, 0.0f, 8.66625977f, -0.409215569f, 0.0f, 14.7312584f, 3.1117382f, 0.0f},
+        {-3.73125792f, -1.0117383f, 0.0f, 2.33374023f, 2.50921559f, 0.0f, 8.66625977f, -0.409215569f, 0.0f, 9.78247643f, 2.06638861f, 0.0f},
+        {1.19998574f, 0.0466638133f, 0.0f, 4.06665468f, 0.715553164f, 0.0f, 6.93332338f, 1.38444257f, 0.0f, 9.79999161f, 2.05333185f, 0.0f},
+        {1.19998574f, 0.0466638133f, 0.0f, 4.06665468f, 0.715553164f, 0.0f, 6.93332338f, 1.38444257f, 0.0f, 9.79999161f, 2.05333185f, 0.0f},
+        {1.66662598f, 0.0888834596f, 0.0f, 4.22218847f, 0.611108422f, 0.0f, 6.77775049f, 1.4888835f, 0.0f, 9.33331299f, 2.0111084f, 0.0f},
+        {1.66662598f, 0.0888834596f, 0.0f, 4.22218847f, 0.611108422f, 0.0f, 6.77775049f, 1.4888835f, 0.0f, 9.33331299f, 2.0111084f, 0.0f},
+        {-2.86464596f, -0.87619102f, 0.0f, 2.62258315f, 2.43587708f, 0.0f, 8.37733364f, -0.335889459f, 0.0f, 13.864563f, 2.97617865f, 0.0f},
+        {-2.86464596f, -0.87619102f, 0.0f, 2.62258315f, 2.43587708f, 0.0f, 8.37733364f, -0.335889459f, 0.0f, 9.77602291f, 2.09852934f, 0.0f},
+        {20.0f, 0.0f, 0.0f, 20.0f, 0.699999988f, 0.0f, 20.0f, 1.39999998f, 0.0f, 20.0f, 2.0999999f, 0.0f},
+        {20.0f, 0.0f, 0.0f, 20.0f, 0.699999988f, 0.0f, 20.0f, 1.39999998f, 0.0f, 20.0f, 2.0999999f, 0.0f},
+    }};
+    for (int mode = 0; mode < 5; ++mode) for (uint32_t flags : {0u, 1u}) {
+        CAPTURE (mode, flags);
+        std::vector<ParticleInstance> particles (4);
+        for (int lane = 0; lane < 4; ++lane) {
+            particles[lane].position = {lane * 5.0f, (lane & 1) * 2.0f, 0};
+            particles[lane].velocity = {lane * 3.0f + 1, lane * .7f, 0};
+            particles[lane].lifetime = 8;
+            if (mode == 4) {particles[lane].position.x = lane * 100.0f; particles[lane].velocity.x = 20;}
+        }
+        const BoidsParameters parameters {20, 50, 10,
+            mode == 0 || mode == 3 ? 15.0f : 0.0f,
+            mode == 1 || mode == 3 ? 1.0f : 0.0f,
+            mode == 2 || mode == 3 ? 2.0f : 0.0f, flags};
+        applyNativeBoids (particles, 4, 0, {0, .033333333f}, parameters);
+        for (size_t lane = 0; lane < 4; ++lane) for (int axis = 0; axis < 3; ++axis)
+            REQUIRE (particles[lane].velocity[axis] == native[mode * 2 + flags][lane * 3 + axis]);
+    }
+}
+
+TEST_CASE ("Boids retain native frame phases dead neighbors and in-place block ordering",
+           "[particle][boids]") {
+    if (!nativeRuntimeArithmeticAvailable) return;
+    using WallpaperEngine::Render::Objects::ParticleInstance;
+    struct Oracle {uint32_t count, frame; bool holes; std::array<float, 32> xy;};
+    // Original interpreter outputs for8/204physicalslots, bothframephases;
+    // holes retain physical position and are NOTcompact-count scheduling.
+    const std::array<Oracle, 8> original {{
+        {8, 0, false, {1.39989424f, 0.093310535f, 4.28561211f, 0.766644716f, 7.1713295f, 1.43997884f, 10.0570478f, 2.11331296f, 12.9471159f, 2.78766227f, 15.8328342f, 3.46099639f, 18.7185516f, 4.13433027f, 21.604269f, 4.80766487f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f}},
+        {8, 1, false, {1.39989424f, 0.093310535f, 4.28561211f, 0.766644716f, 7.1713295f, 1.43997884f, 10.0570478f, 2.11331296f, 12.9471159f, 2.78766227f, 15.8328342f, 3.46099639f, 18.7185516f, 4.13433027f, 21.604269f, 4.80766487f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f}},
+        {204, 0, false, {21.3792629f, 4.75516176f, 24.1648312f, 5.40512705f, 26.9503975f, 6.05509329f, 29.7359657f, 6.70505857f, 13.0f, 2.79999995f, 16.0f, 3.5f, 19.0f, 4.19999981f, 22.0f, 4.9000001f, 43.7189407f, 9.96775341f, 46.504509f, 10.6177177f, 49.2900772f, 11.2676849f, 52.0756416f, 11.9176502f, 37.0f, 8.39999962f, 40.0f, 9.09999943f, 43.0f, 9.80000019f, 46.0f, 10.5f}},
+        {204, 1, false, {1.0f, 0.0f, 4.0f, 0.699999988f, 7.0f, 1.39999998f, 10.0f, 2.0999999f, 32.520752f, 7.35484314f, 35.3057022f, 8.00466537f, 38.0906448f, 8.6544857f, 40.8755951f, 9.30430698f, 25.0f, 5.5999999f, 28.0f, 6.29999971f, 31.0f, 7.0f, 34.0f, 7.69999981f, 55.0737801f, 12.6172161f, 57.8610153f, 13.2675705f, 60.6482468f, 13.9179268f, 63.4354858f, 14.5682812f}},
+        {8, 0, true, {1.54985762f, 0.128301993f, 4.28561211f, 0.766644716f, 7.1713295f, 1.43997884f, 9.79999161f, 2.05333185f, 13.1999617f, 2.84665799f, 15.832324f, 3.46087742f, 18.7180424f, 4.13421154f, 21.4566765f, 4.77322674f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f}},
+        {8, 1, true, {1.54985762f, 0.128301993f, 4.28561211f, 0.766644716f, 7.1713295f, 1.43997884f, 9.79999161f, 2.05333185f, 13.1999617f, 2.84665799f, 15.832324f, 3.46087742f, 18.7180424f, 4.13421154f, 21.4566765f, 4.77322674f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f}},
+        {204, 0, true, {21.7682667f, 4.8459301f, 24.1987495f, 5.41304207f, 27.0592117f, 6.08048391f, 28.9537754f, 6.52254915f, 13.0f, 2.79999995f, 16.0f, 3.5f, 19.0f, 4.19999981f, 22.0f, 4.9000001f, 44.4414062f, 10.1363297f, 46.4002991f, 10.5934029f, 49.2607574f, 11.2608452f, 51.6919327f, 11.8281193f, 37.0f, 8.39999962f, 40.0f, 9.09999943f, 43.0f, 9.80000019f, 46.0f, 10.5f}},
+        {204, 1, true, {1.0f, 0.0f, 4.0f, 0.699999988f, 7.0f, 1.39999998f, 10.0f, 2.0999999f, 32.2750015f, 7.29750156f, 35.2237053f, 7.98553276f, 38.1724091f, 8.673563f, 41.1211128f, 9.36159515f, 25.0f, 5.5999999f, 28.0f, 6.29999971f, 31.0f, 7.0f, 34.0f, 7.69999981f, 54.7188034f, 12.5343885f, 57.6681595f, 13.2225714f, 60.6175156f, 13.9107552f, 64.0691071f, 14.7161274f}},
+    }};
+    for (const auto& oracle : original) {
+        CAPTURE (oracle.count, oracle.frame, oracle.holes);
+        std::vector<ParticleInstance> particles ((oracle.count + 3u) & ~3u);
+        for (uint32_t lane = 0; lane < oracle.count; ++lane) {
+            particles[lane].position = {(lane % 32) * 5.0f, (lane & 1) * 2.0f, 0};
+            particles[lane].velocity = {lane * 3.0f + 1, lane * .7f, 0};
+            particles[lane].lifetime = oracle.holes && lane % 7 == 0 ? 0 : 8;
+        }
+        applyNativeBoids (particles, oracle.count, oracle.frame, {0, .033333333f}, {20, 1000, 40, 0, 1, 0, 0});
+        for (uint32_t lane = 0; lane < std::min (oracle.count, 16u); ++lane) {
+            REQUIRE (particles[lane].velocity.x == oracle.xy[lane * 2]);
+            REQUIRE (particles[lane].velocity.y == oracle.xy[lane * 2 + 1]);
+        }
+    }
+    // Zero and NaN distances fail strict approximate-length comparisons.
+    std::vector<ParticleInstance> coincident (4);
+    for (auto& p : coincident) {p.position = {1, 2, 3}; p.velocity = {20, 0, 0}; p.lifetime = 8;}
+    applyNativeBoids (coincident, 4, 0, {.04f, .03f}, {20, 50, 10, 15, 1, 2, 1});
+    for (const auto& p : coincident) REQUIRE (p.velocity == glm::vec3 (20, 0, 0));
+    coincident[3].position.x = std::numeric_limits<float>::quiet_NaN ();
+    applyNativeBoids (coincident, 4, 0, {.04f, .03f}, {20, 50, 10, 15, 1, 2, 1});
+    // Actual original NaN oracle: comparison excludes the neighbor count,
+    // but masked separation weight0 still multiplies NaNdelta for everylane.
+    for (const auto& p : coincident) {
+        REQUIRE (std::isnan (p.velocity.x));
+        REQUIRE (p.velocity.y == 0);
+        REQUIRE (p.velocity.z == 0);
+    }
+}
+
+TEST_CASE ("Parsed ordinary boids stacks admit initializers movement collision death and authored duplicates",
+           "[particle][boids]") {
+    using namespace WallpaperEngine::Data::Model;
+    using WallpaperEngine::Data::Parsers::ObjectParser;
+    using WallpaperEngine::Data::JSON::JSON;
+    Project project {};
+    project.sceneOrthogonalProjection = true;
+    const auto authored = JSON::parse (R"({"id":1,"particle":{"maxcount":204,
+        "emitter":[{"name":"boxrandom","rate":0}],"renderer":[{"name":"sprite"}],
+        "initializer":[{"name":"lifetimerandom","min":0.1,"max":2},
+            {"name":"velocityrandom","min":"8 0 0","max":"8 0 0"},{"name":"sizerandom","min":12,"max":12}],
+        "operator":[{"name":"movement","gravity":"0 -8 0"},{"name":"boids"},
+            {"name":"collisionplane","collisionbehavior":"delete"},
+            {"name":"angularmovement"},{"name":"alphafade"},{"name":"boids","flags":0,"separationfactor":-2}]}})");
+    const auto parsed = ObjectParser::parse (authored, project);
+    const auto& model = *parsed->as<Particle> ();
+    REQUIRE_FALSE (model.hasUnsupportedComponents);
+    REQUIRE (needsNativeSlotStreams (model));
+    REQUIRE_FALSE (nativeSlotScopeError (model));
+    REQUIRE (model.operators.size () == 6);
+    REQUIRE (model.operators[0]->is<MovementOperator> ());
+    REQUIRE (model.operators[2]->as<CollisionOperator> ()->behavior == CollisionOperator::Behavior::Delete);
+    const auto& first = *model.operators[1]->as<BoidsOperator> ();
+    REQUIRE (first.separationThreshold == 20);
+    REQUIRE (first.neighborThreshold == 50);
+    REQUIRE (first.maxSpeed == 500);
+    REQUIRE (first.flags == 1);
+    REQUIRE (model.operators.back ()->as<BoidsOperator> ()->separationFactor == -2);
+    REQUIRE (model.operators.back ()->as<BoidsOperator> ()->flags == 0);
+    auto literals = authored;
+    literals["particle"]["operator"][1]["separationfactor"] = true;
+    literals["particle"]["operator"][1]["alignmentfactor"] = nullptr;
+    literals["particle"]["operator"][1]["flags"] = -2.75;
+    const auto converted = ObjectParser::parse (literals, project);
+    const auto& literal = *converted->as<Particle> ()->operators[1]->as<BoidsOperator> ();
+    REQUIRE (literal.separationFactor == 1);
+    REQUIRE (literal.alignmentFactor == 0);
+    REQUIRE (literal.flags == 0xfffffffeu);
+    project.sceneOrthogonalProjection = false;
+    const auto spatial = ObjectParser::parse (authored, project);
+    const auto& other = *spatial->as<Particle> ()->operators[1]->as<BoidsOperator> ();
+    REQUIRE (other.separationThreshold == .02f);
+    REQUIRE (other.neighborThreshold == .2f);
+    REQUIRE (other.maxSpeed == 1);
+    for (const auto* field : {"separationfactor", "separationthreshold", "maxspeed", "flags"}) {
+        auto invalid = authored; invalid["particle"]["operator"][1][field] = "invalid";
+        const auto bad = ObjectParser::parse (invalid, project);
+        REQUIRE (bad->as<Particle> ()->hasUnsupportedComponents);
+    }
+    REQUIRE (nativeSlotScopeError (model, true));
+    REQUIRE (nativeSlotScopeError (model, false, true));
+    // A death frees its marker without changing highwater or moving survivors;
+    // movement and boids continue writing persistent dead target streams.
+    using WallpaperEngine::Render::Objects::ParticleInstance;
+    ParticleInstance zero; zero.lifetime = 0;
+    NativeSlotStreams<ParticleInstance> slots (204, zero);
+    slots.beginEmissionPass ();
+    for (uint32_t index = 0; index < 204; ++index) slots.birth ([&] (auto& p, uint32_t lane) {
+        p.lifetime = lane == 0 ? .1f : 8; p.age = 0; p.alive = true;
+        p.position = {static_cast<float> (lane), 0, 0}; p.velocity = {1, 0, 0};
+    });
+    slots.ageAndExpire (.2f, [] (auto&, uint32_t) {});
+    REQUIRE (slots.highWater () == 204);
+    REQUIRE (slots.nativeCount () == 203);
+    REQUIRE (slots.streams ()[0].lifetime == 0);
+    for (auto& p : slots.streams ()) integrateAxis (p.position.x, p.velocity.x, 0, 0, {.1f, .1f});
+    applyNativeBoids (slots.streams (), slots.highWater (), 0, {.2f, .1f}, {20, 1000, 40, 0, 1, 0, 0});
+    REQUIRE (slots.streams ()[0].position.x == .1f);
+    REQUIRE (slots.streams ()[4].velocity == glm::vec3 (1, 0, 0)); // inactiveblockphase
+    slots.beginEmissionPass ();
+    REQUIRE (slots.birth ([] (auto& p, uint32_t lane) {REQUIRE (lane == 0); p.lifetime = 8; p.age = 0;}) == 0);
+    REQUIRE (slots.highWater () == 204);
+}
+
+TEST_CASE ("Boids production clock API consumes damping independently of movement integration",
+           "[particle][boids]") {
+    if (!nativeRuntimeArithmeticAvailable) return;
+    using WallpaperEngine::Render::Objects::ParticleInstance;
+    std::vector<ParticleInstance> initial (4);
+    for (int lane = 0; lane < 4; ++lane) {
+        initial[lane].position = {lane * 5.0f, (lane & 1) * 2.0f, 0};
+        initial[lane].velocity = {lane * 3.0f + 1, lane * .7f, 0};
+        initial[lane].lifetime = 8;
+    }
+    const BoidsParameters parameters {20, 50, 10, 15, 1, 2, 0};
+    auto noMovement = initial, differentMovement = initial, wrongClock = initial;
+    // Actual original oracle calls23fbc0(node,param2=0,param3=1/30):
+    // these mixed-force values persist when the integration argument differs.
+    applyNativeBoids (noMovement, 4, 0, {0, .033333333f}, parameters);
+    applyNativeBoids (differentMovement, 4, 0, {.2f, .033333333f}, parameters);
+    REQUIRE (noMovement[0].velocity == glm::vec3 (-2.86464596f, -.87619102f, 0));
+    for (size_t lane = 0; lane < 4; ++lane)
+        REQUIRE (differentMovement[lane].velocity == noMovement[lane].velocity);
+    // Actual tick at30Hz supplies q=(.025/dt)^.7*dt, not dt. The rejected
+    // factory90a used integration and therefore exaggerated separation.
+    const auto clock = tickClock (.033333333f, .033333333f, 30);
+    REQUIRE (clock.operatorTime.damping < clock.operatorTime.integration);
+    auto correctClock = initial;
+    applyNativeBoids (correctClock, 4, 0, clock.operatorTime, parameters);
+    applyNativeBoids (wrongClock, 4, 0, {0, clock.operatorTime.integration}, parameters);
+    REQUIRE (correctClock[0].velocity != wrongClock[0].velocity);
+    REQUIRE (std::abs (correctClock[0].velocity.x - initial[0].velocity.x)
+        < std::abs (wrongClock[0].velocity.x - initial[0].velocity.x));
 }
