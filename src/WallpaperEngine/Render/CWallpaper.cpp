@@ -72,6 +72,28 @@ GLuint CWallpaper::getWallpaperFramebuffer () const {
     return (m_hdrOutput ? m_hdrOutput : m_sceneFBO)->getFramebuffer ();
 }
 
+FramebufferCaptureSource CWallpaper::getWallpaperCaptureSource (
+    const glm::ivec4& viewport, bool vflip, const glm::ivec2& globalPosition,
+    const glm::ivec2& logicalSize) const {
+    const auto& target = m_hdrOutput ? m_hdrOutput : m_sceneFBO;
+    auto presentation = m_state;
+    presentation.updateState (m_spanInfo ? m_spanInfo->totalBounds : viewport,
+                              vflip, getWidth (), getHeight ());
+    const auto uv = presentation.getTextureUVs ();
+    auto source = framebufferCaptureSource (*target, {uv.ustart, uv.uend, uv.vstart, uv.vend},
+                                            rendersAtOutputSize (), vflip);
+    if (m_spanInfo) {
+        const auto& bounds = m_spanInfo->totalBounds;
+        const float width = bounds.z, height = bounds.w;
+        source.uv = framebufferCaptureSlice (source.uv, {
+            (static_cast<float> (globalPosition.x) - bounds.x) / width,
+            (static_cast<float> (globalPosition.x + logicalSize.x) - bounds.x) / width,
+            (static_cast<float> (globalPosition.y) - bounds.y) / height,
+            (static_cast<float> (globalPosition.y + logicalSize.y) - bounds.y) / height});
+    }
+    return source;
+}
+
 GLuint CWallpaper::getWallpaperTexture () const {
     return (m_hdrOutput ? m_hdrOutput : m_sceneFBO)->getTextureID (0);
 }
@@ -568,68 +590,10 @@ void CWallpaper::render (
     glPushDebugGroup (GL_DEBUG_SOURCE_APPLICATION, 0, -1, "Rendering scene to output");
 #endif /* !NDEBUG */
 
-    float ustart, uend, vstart, vend;
-
-    if (this->m_spanInfo.has_value ()) {
-	// Span mode: treat bounding box as virtual viewport, scale wallpaper using
-	// the normal scaling rules (fill/fit/stretch/default), then slice per monitor.
-	const auto& span = this->m_spanInfo.value ();
-	const float spanW = static_cast<float> (span.totalBounds.z);
-	const float spanH = static_cast<float> (span.totalBounds.w);
-	const float spanX = static_cast<float> (span.totalBounds.x);
-	const float spanY = static_cast<float> (span.totalBounds.y);
-
-	// Compute base UVs for the wallpaper scaled to the bounding box
-	this->updateUVs (span.totalBounds, vflip);
-	auto [baseUstart, baseUend, baseVstart, baseVend] = this->m_state.getTextureUVs ();
-	if (rendersAtOutputSize ()) {
-	    baseUstart = 0.0f;
-	    baseUend = 1.0f;
-	    baseVstart = vflip ? 0.0f : 1.0f;
-	    baseVend = vflip ? 1.0f : 0.0f;
-	}
-
-	// This viewport's relative position within the bounding box [0..1]
-	// Use logicalSize (same coordinate space as globalPosition and totalBounds)
-	const float relLeft = (static_cast<float> (globalPosition.x) - spanX) / spanW;
-	const float relRight = (static_cast<float> (globalPosition.x + logicalSize.x) - spanX) / spanW;
-	const float relTop = (static_cast<float> (globalPosition.y) - spanY) / spanH;
-	const float relBottom = (static_cast<float> (globalPosition.y + logicalSize.y) - spanY) / spanH;
-
-	// Interpolate within the base UVs to get this viewport's slice
-	const float baseURange = baseUend - baseUstart;
-	const float baseVRange = baseVend - baseVstart;
-
-	ustart = baseUstart + relLeft * baseURange;
-	uend = baseUstart + relRight * baseURange;
-	vstart = baseVstart + relTop * baseVRange;
-	vend = baseVstart + relBottom * baseVRange;
-
-	// Log span debug info only on first few frames
-	if (this->m_lastRenderedFrame < 5) {
-	    sLog.debug (
-		"SPAN DEBUG: viewport=", viewport.z, "x", viewport.w, " globalPos=(", globalPosition.x, ",",
-		globalPosition.y, ")", " span=(", span.totalBounds.x, ",", span.totalBounds.y, ",", span.totalBounds.z,
-		",", span.totalBounds.w, ")", " rel=[", relLeft, ",", relRight, "]x[", relTop, ",", relBottom, "]",
-		" baseUV=[", baseUstart, ",", baseUend, "]x[", baseVstart, ",", baseVend, "]", " finalUV=[", ustart,
-		",", uend, "]x[", vstart, ",", vend, "]"
-	    );
-	}
-    } else {
-	// Normal mode: compute UVs based on viewport dimensions and wallpaper resolution
-	updateUVs (viewport, vflip);
-	auto uvs = this->m_state.getTextureUVs ();
-	ustart = uvs.ustart;
-	uend = uvs.uend;
-	vstart = uvs.vstart;
-	vend = uvs.vend;
-        if (rendersAtOutputSize ()) {
-            ustart = 0.0f;
-            uend = 1.0f;
-            vstart = vflip ? 0.0f : 1.0f;
-            vend = vflip ? 1.0f : 0.0f;
-        }
-    }
+    updateUVs (m_spanInfo ? m_spanInfo->totalBounds : viewport, vflip);
+    const auto source = getWallpaperCaptureSource (viewport, vflip, globalPosition, logicalSize);
+    const float ustart = source.uv.x, uend = source.uv.y;
+    const float vstart = source.uv.z, vend = source.uv.w;
 
     const GLfloat texCoords[] = {
 	ustart, vstart, uend, vstart, ustart, vend, ustart, vend, uend, vstart, uend, vend,

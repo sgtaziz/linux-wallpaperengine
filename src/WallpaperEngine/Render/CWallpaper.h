@@ -14,6 +14,7 @@
 #include "WallpaperEngine/Media/MediaSource.h"
 
 #include "FBOProvider.h"
+#include "FramebufferCapture.h"
 #include "WallpaperState.h"
 
 namespace WallpaperEngine::Application {
@@ -78,6 +79,10 @@ public:
      * @return The scene's framebuffer
      */
     [[nodiscard]] virtual GLuint getWallpaperFramebuffer () const;
+    /** Physical readback extent and the UVs used to present that framebuffer. */
+    [[nodiscard]] FramebufferCaptureSource getWallpaperCaptureSource (
+        const glm::ivec4& viewport, bool vflip, const glm::ivec2& globalPosition = {0, 0},
+        const glm::ivec2& logicalSize = {0, 0}) const;
     /**
      * @return The scene's texture
      */
