@@ -6,6 +6,7 @@
 #include "ParticleInitialColor.h"
 #include "ParticleControlPointConstraints.h"
 #include "ParticleChildControlPoints.h"
+#include "ParticleCollision.h"
 #include "ParticleImageEmitterReadback.h"
 #include "CImage.h"
 
@@ -2715,6 +2716,8 @@ void CParticle::setupOperators () {
 	    func = createAngularMovementOperator (*op->as<AngularMovementOperator> ());
 	} else if (op->is<CapVelocityOperator> ()) {
 	    func = createCapVelocityOperator (*op->as<CapVelocityOperator> ());
+	} else if (op->is<CollisionOperator> ()) {
+            func = createCollisionOperator (*op->as<CollisionOperator> ());
 	} else if (op->is<ScalarRemapValueOperator> ()) {
 	    const auto& remap = *op->as<ScalarRemapValueOperator> ();
 	    if (remap.output == ScalarRemapValueOperator::Output::Opacity)
@@ -2840,8 +2843,11 @@ OperatorFunc CParticle::createMovementOperator (const MovementOperator& op) {
     DynamicValue* dragValue = op.drag->value.get ();
     DynamicValue* gravityValue = op.gravity->value.get ();
     DynamicValue* speedOverride = speedOverrideValue ();
+    const bool capturePrevious = std::any_of (m_particle.operators.begin (), m_particle.operators.end (),
+        [] (const auto& record) { return record && record->template is<CollisionOperator> ()
+            && record->template as<CollisionOperator> ()->kind == CollisionOperator::Kind::Quad; });
 
-    return [dragValue, gravityValue, speedOverride, nativeSlots = m_slotStreams.has_value ()] (
+    return [dragValue, gravityValue, speedOverride, capturePrevious, nativeSlots = m_slotStreams.has_value ()] (
 	       std::vector<ParticleInstance>& particles, uint32_t count, const std::vector<ControlPointData>&, float,
 	       ParticleCore::MovementTime time
 	   ) {
@@ -2858,11 +2864,81 @@ OperatorFunc CParticle::createMovementOperator (const MovementOperator& op) {
 		continue;
 	    }
 
+            // Native opcode1 copies previous XYZ immediately before EACH
+            // movement record when a quad collision record requested history.
+            if (capturePrevious) p.previousPosition = p.position;
+
 	    for (int axis = 0; axis < 3; ++axis) {
 		ParticleCore::integrateAxis (p.position[axis], p.velocity[axis],
 		                             packedGravity[axis], drag, time);
 	    }
 	}
+    };
+}
+
+OperatorFunc CParticle::createCollisionOperator (const CollisionOperator& op) {
+    using Kind = CollisionOperator::Kind;
+    using namespace ParticleCore;
+    // Original opcode17 is a recognized record-advance no-op, including its
+    // authored response, CP and angular-clear fields.
+    if (op.kind == Kind::Box) return [] (auto&, uint32_t, auto&, float, MovementTime) {};
+    const CollisionResponse response = static_cast<CollisionResponse> (op.behavior);
+    const glm::vec3 plane = collisionUnit (op.plane);
+    const CollisionQuad quad = collisionQuad (op.origin, op.plane, op.forward, op.size);
+    return [this, kind = op.kind, response, bounce = op.bounceFactor, flags = op.flags,
+            cpIndex = op.controlPoint, plane, quad, origin = op.origin,
+            distance = op.distance, radius = op.radius, nativeSlots = m_slotStreams.has_value ()]
+           (std::vector<ParticleInstance>& particles, uint32_t count,
+            std::vector<ControlPointData>& cps, float, MovementTime) {
+        const bool world = (m_particle.flags & 1u) != 0;
+        const bool ortho = getScene ().getCamera ().isOrthogonal ();
+        const glm::vec2 canvas (getScene ().getWidth (), getScene ().getHeight ());
+        const auto toNative = [=] (glm::vec3 position) {
+            if (world && ortho) position += glm::vec3 (canvas.x * 0.5f, -canvas.y * 0.5f, 0);
+            return toAuthoredVector (position);
+        };
+        glm::vec3 normal = plane;
+        float planeDistance = distance;
+        glm::vec3 sphereOrigin = origin;
+        CollisionQuad currentQuad = quad;
+        if ((flags & 1u) != 0 && cpIndex < cps.size ()) {
+            const auto& cp = cps[cpIndex];
+            const glm::mat3 flip (glm::scale (glm::mat4 (1), glm::vec3 (1, -1, 1)));
+            const glm::mat3 basis = flip * cp.basis * flip;
+            sphereOrigin = toNative (cp.position);
+            normal = basis * plane;
+            planeDistance = (normal.y * sphereOrigin.y + normal.z * sphereOrigin.z)
+                + normal.x * sphereOrigin.x;
+            currentQuad.origin = sphereOrigin;
+            currentQuad.normal = basis * quad.normal;
+            currentQuad.forward = basis * quad.forward;
+            currentQuad.right = basis * quad.right;
+        }
+        CollisionBounds bounds;
+        if (kind == Kind::Bounds) bounds = collisionBounds (canvas,
+            imageEmitterInvocationMatrix (m_simulationModelMatrix, ortho, canvas, false, world));
+        for (uint32_t i = 0; i < count; ++i) {
+            auto& particle = particles[i];
+            if (!nativeSlots && !particle.alive) continue;
+            CollisionState state {toNative (particle.position), toAuthoredVector (particle.velocity),
+                                  particle.angularVelocity, particle.age, particle.lifetime};
+            bool contacted = false;
+            switch (kind) {
+                case Kind::Plane: contacted = collidePlane (state, normal, planeDistance,
+                    response, bounce, (flags & 2u) != 0); break;
+                case Kind::Sphere: contacted = collideSphere (state, sphereOrigin, radius,
+                    response, bounce, (flags & 2u) != 0); break;
+                case Kind::Quad: contacted = collideQuad (state, toNative (particle.previousPosition),
+                    currentQuad, response, bounce, (flags & 2u) != 0); break;
+                case Kind::Bounds: contacted = collideBounds (state, bounds, response, bounce); break;
+                case Kind::Box: break;
+            }
+            if (!contacted) continue;
+            particle.position = imageEmitterSimulationPosition (state.position, world, ortho, canvas);
+            particle.velocity = toSimulationVector (state.velocity);
+            particle.angularVelocity = state.angularVelocity;
+            particle.age = state.age;
+        }
     };
 }
 
