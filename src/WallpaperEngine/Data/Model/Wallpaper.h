@@ -37,6 +37,19 @@ public:
     ~Web () override = default;
 };
 
+struct CameraPathSample {
+    float timestamp = 0;
+    glm::vec3 eye {0};
+    glm::vec3 center {0};
+    glm::vec3 up {0};
+    float zoom = 1;
+};
+
+struct CameraPath {
+    std::vector<CameraPathSample> samples;
+    float duration = 0;
+};
+
 struct SceneData {
     /** Serialized native point-light shader slots; object count may differ. */
     int pointLightSlots = 0;
@@ -105,6 +118,7 @@ struct SceneData {
 	    glm::vec3 eye;
 	    glm::vec3 up;
             bool hasPaths = false;
+            std::vector<CameraPath> paths;
 	} configuration;
 
 	/**

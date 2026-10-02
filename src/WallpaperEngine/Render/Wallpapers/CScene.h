@@ -106,6 +106,7 @@ private:
     [[nodiscard]] bool rendersAtOutputSize () const override { return true; }
     void resizeSceneTargets (int width, int height);
     void refreshAutomaticProjection ();
+    std::vector<const SceneCamera*> m_sceneCameraObjects;
     Render::CObject* createObject (const Object& object);
     [[nodiscard]] const Object* findObjectData (int id) const;
     void flushDestroyedScriptLayers ();
