@@ -209,7 +209,14 @@ public:
 	this->PropertyTextInput::update (value, UpdateSource::Initialization);
     }
 
-    void update (const std::string& value, UpdateSource source) override { this->DynamicValue::update (value, source); }
+    void update (const std::string& value, UpdateSource source) override {
+        // PropertyParser initializes text inputs from serialized authoring
+        // JSON. User and script updates supply literal text, including quotes.
+        m_serializedInitialization = source == UpdateSource::Initialization;
+        this->DynamicValue::update (value, source);
+    }
+
+    [[nodiscard]] bool hasSerializedInitialText () const { return m_serializedInitialization; }
 
     [[nodiscard]] std::string dump () const override {
 	std::stringstream ss;
@@ -223,5 +230,6 @@ public:
 
 private:
     std::string m_value;
+    bool m_serializedInitialization = false;
 };
 }

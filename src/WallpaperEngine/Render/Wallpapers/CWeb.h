@@ -9,6 +9,7 @@
 #include <string>
 #include <utility>
 #include <vector>
+#include <chrono>
 
 #include "WallpaperEngine/Audio/AudioStream.h"
 #include "WallpaperEngine/Render/CWallpaper.h"
@@ -57,5 +58,6 @@ private:
 
     glm::vec2 m_mousePosition = {};
     glm::vec2 m_mousePositionLast = {};
+    std::chrono::steady_clock::time_point m_nextAudioFrame {};
 };
 }
