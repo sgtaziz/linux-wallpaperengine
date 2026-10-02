@@ -158,11 +158,11 @@ struct CModel::MeshDraw final : CRenderable {
     }
 
     void draw (CModel& model) {
-        // The perspective scene projection reverses clip-space winding only
-        // at the root target. An orthographic child scope retains its winding.
+        // Root presentation reverses clip-space winding. Orthographic child
+        // composition also carries a local Y reflection in its projection.
         PresentationFrontFace frontFace (
-            !model.getScene ().getCamera ().isOrthogonal () &&
-            !model.getScene ().isChildCompositionScope ());
+            Wallpapers::modelPresentationReversesWinding (
+                model.getScene ().getCamera ().isOrthogonal (), model.getScene ().isChildCompositionScope ()));
         for (const auto& pass : m_passes) {
             pass->setDestination (model.getScene ().getActiveRenderTarget ());
             pass->setInput (m_texture);
@@ -285,7 +285,9 @@ void CModel::render () {
         });
     if (!transform.visible) return;
     m_world = transform.authoredMatrix;
-    m_viewProjection = getScene ().getActiveRenderProjection ();
+    m_viewProjection = getScene ().getActiveRenderProjection ()
+        * Wallpapers::sceneAuthoredToCamera (
+            getScene ().getWidth (), getScene ().getHeight (), getScene ().getCamera ().isOrthogonal ());
     m_mvp = m_viewProjection * m_world;
     const auto normal = modelNormalMatrix (m_world);
     if (!normal) return;

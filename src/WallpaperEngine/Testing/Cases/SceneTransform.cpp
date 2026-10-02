@@ -713,3 +713,77 @@ TEST_CASE ("Perspective particle presentation preserves culling facing and autho
     REQUIRE_FALSE (particlePresentationReversesWinding (false, true, true, true));
     REQUIRE_FALSE (particlePresentationReversesWinding (true, false, true, true));
 }
+
+TEST_CASE ("Model canvas projection preserves native MVP screen positions", "[scene][model-canvas]") {
+    using WallpaperEngine::Render::Wallpapers::sceneAuthoredToCamera;
+    const glm::mat4 authoredWorld = glm::translate (glm::mat4 (1), glm::vec3 (384, 100, 0))
+        * glm::scale (glm::mat4 (1), glm::vec3 (.2f));
+    const auto projection = glm::ortho (-384.f, 384.f, -216.f, 216.f, -2000.f, 2000.f);
+    const auto mvp = projection * sceneAuthoredToCamera (768, 432, true) * authoredWorld;
+    // Original MODEL draw116/120 captured matrix rows. Native D3D maps clip
+    // Y down; the Linux wallpaper's final presentation maps GL clip Y up.
+    const glm::vec4 nativeRows[2] = {
+        {.0005208333604969084f, 0, 0, 0},
+        {0, .0009259259677492082f, 0, -.5370370149612427f},
+    };
+    for (const auto point : {glm::vec3 (0), glm::vec3 (-24, -24, 0), glm::vec3 (24, 24, 0)}) {
+        const auto p = glm::vec4 (point, 1);
+        const auto clip = mvp * p;
+        const glm::vec2 nativePixel ((1 + glm::dot (nativeRows[0], p)) * 640,
+                                    (1 - glm::dot (nativeRows[1], p)) * 360);
+        REQUIRE ((1 + clip.x) * 640 == Catch::Approx (nativePixel.x).margin (.0001));
+        REQUIRE ((1 + clip.y) * 360 == Catch::Approx (nativePixel.y).margin (.0001));
+    }
+    REQUIRE (authoredWorld[3] == glm::vec4 (384, 100, 0, 1));
+    // Perspective shaders already use native world coordinates.
+    REQUIRE (sceneAuthoredToCamera (768, 432, false) == glm::mat4 (1));
+}
+
+TEST_CASE ("Model canvas bridge composes with child scope projection and parent shear", "[scene][model-canvas]") {
+    using WallpaperEngine::Render::Wallpapers::sceneAuthoredToCamera;
+    const auto bridge = sceneAuthoredToCamera (768, 432, true);
+    const auto parent = glm::translate (glm::mat4 (1), glm::vec3 (400, 150, 0))
+        * glm::rotate (glm::mat4 (1), .35f, glm::vec3 (0, 0, 1))
+        * glm::scale (glm::mat4 (1), glm::vec3 (1.4f, .7f, 1));
+    const auto local = glm::translate (glm::mat4 (1), glm::vec3 (20, 15, 0))
+        * glm::rotate (glm::mat4 (1), -.4f, glm::vec3 (0, 0, 1));
+    const auto authored = parent * local;
+    const auto localFlip = glm::scale (glm::mat4 (1), glm::vec3 (1, -1, 1));
+    const auto childScope = glm::ortho (-80.f, 80.f, -40.f, 40.f, -1000.f, 1000.f)
+        * localFlip * glm::inverse (bridge * parent);
+    const auto modelVP = childScope * bridge;
+    const auto expectedLocal = glm::ortho (-80.f, 80.f, -40.f, 40.f, -1000.f, 1000.f)
+        * localFlip * local;
+    for (const auto point : {glm::vec4 (0, 0, 0, 1), glm::vec4 (12, -8, 0, 1)}) {
+        const auto actual = modelVP * authored * point;
+        const auto expected = expectedLocal * point;
+        for (int axis = 0; axis < 4; ++axis)
+            REQUIRE (actual[axis] == Catch::Approx (expected[axis]).margin (.00001));
+    }
+}
+
+TEST_CASE ("Model presentation culling retains authored mirrored facing", "[scene][model-canvas]") {
+    using WallpaperEngine::Render::Wallpapers::modelPresentationReversesWinding;
+    using WallpaperEngine::Render::Wallpapers::sceneAuthoredToCamera;
+    const glm::vec4 triangle[] = {{0, 0, 0, 1}, {1, 0, 0, 1}, {0, 1, 0, 1}};
+    const auto area = [&] (const glm::mat4& m) {
+        const auto a = glm::vec2 (m * triangle[1] - m * triangle[0]);
+        const auto b = glm::vec2 (m * triangle[2] - m * triangle[0]);
+        return a.x * b.y - a.y * b.x;
+    };
+    for (bool childScope : {false, true}) {
+        for (float mirror : {-1.f, 1.f}) {
+            const auto world = glm::scale (glm::mat4 (1), glm::vec3 (mirror, .7f, 1));
+            const auto projection = childScope
+                ? glm::scale (glm::mat4 (1), glm::vec3 (1, -1, 1))
+                : sceneAuthoredToCamera (768, 432, true);
+            const bool reverse = modelPresentationReversesWinding (true, childScope);
+            const float authoredFacing = area (world);
+            const float presentedFacing = area (projection * world) * (reverse ? -1 : 1);
+            REQUIRE (authoredFacing * presentedFacing > 0);
+        }
+    }
+    // Perspective child composition has no authored canvas/local Y reflection.
+    REQUIRE_FALSE (modelPresentationReversesWinding (false, true));
+    REQUIRE (modelPresentationReversesWinding (false, false));
+}
