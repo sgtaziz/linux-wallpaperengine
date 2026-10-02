@@ -193,6 +193,10 @@ struct CModel::MeshDraw final : CRenderable {
     [[nodiscard]] const glm::vec4& getColor4 () const override { return m_white4; }
     [[nodiscard]] const glm::vec3& getCompositeColor () const override { return m_white; }
 
+    void bindEyePosition (const glm::vec3* eye) {
+        for (const auto& pass : m_passes) pass->addUniform ("g_EyePosition", eye);
+    }
+
     [[nodiscard]] bool requiresSceneReflection () const {
         return std::ranges::any_of (m_passes, [] (const auto& pass) { return pass->requiresSceneReflection (); });
     }
@@ -295,6 +299,7 @@ void CModel::setup () {
         m_meshes.push_back (std::make_unique<MeshDraw> (
             getScene (), m_model, *m_materials.back (), mesh, nullptr, 0, palette));
     }
+    for (const auto& mesh : m_meshes) mesh->bindEyePosition (&m_eyePosition);
     // Native groups normal/alpha-to-coverage material categories
     // before translucent/additive. Linux keeps source order within a group;
     // native equal-category ordering has not been established.
@@ -332,6 +337,7 @@ void CModel::rebuildDynamic () {
     }
     m_meshes = std::move (draws);
     m_materials = std::move (materials);
+    for (const auto& mesh : m_meshes) mesh->bindEyePosition (&m_eyePosition);
     m_dynamicRevision = m_model.dynamic->revision;
     m_dynamicStructureRevision = m_model.dynamic->structureRevision;
     std::stable_sort (m_meshes.begin (), m_meshes.end (),
@@ -385,6 +391,14 @@ void CModel::render () {
         });
     if (!transform.visible) return;
     m_world = transform.authoredMatrix;
+    // Native publishes the scene eye to lit materials; orthographic
+    // scenes add the canvas center and use a fixed eye distance of 2000.
+    const auto& camera = getScene ().getCamera ();
+    m_eyePosition = camera.getEye ();
+    if (camera.isOrthogonal ()) {
+        m_eyePosition += glm::vec3 (getScene ().getWidth () * 0.5f, getScene ().getHeight () * 0.5f, 0);
+        m_eyePosition.z = 2000.0f;
+    }
     m_viewProjection = getScene ().getActiveRenderProjection ()
         * Wallpapers::sceneAuthoredToCamera (
             getScene ().getWidth (), getScene ().getHeight (), getScene ().getCamera ().isOrthogonal ());
