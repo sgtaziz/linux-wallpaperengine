@@ -690,6 +690,23 @@ AudioContext& CWallpaper::getAudioContext () const { return this->m_audioContext
 const WallpaperState& CWallpaper::getState () const { return this->m_state; }
 
 std::shared_ptr<const CFBO> CWallpaper::findFBO (const std::string& name) const {
+    if (name == "_rt_Reflection" || name == "_alias_NullShaderResource") {
+        auto& target = name == "_rt_Reflection" ? m_reflectionSceneFBO : m_nullShaderResourceFBO;
+        if (!target) {
+            GLint draw = 0, read = 0, texture = 0;
+            glGetIntegerv (GL_DRAW_FRAMEBUFFER_BINDING, &draw);
+            glGetIntegerv (GL_READ_FRAMEBUFFER_BINDING, &read);
+            glGetIntegerv (GL_TEXTURE_BINDING_2D, &texture);
+            const auto width = name == "_rt_Reflection" ? m_sceneFBO->getTextureWidth (0) : 1u;
+            const auto height = name == "_rt_Reflection" ? m_sceneFBO->getTextureHeight (0) : 1u;
+            target = std::make_shared<CFBO> (name, TextureFormat_ARGB8888, TextureFlags_ClampUVs,
+                                           1.0f, width, height, width, height);
+            glBindFramebuffer (GL_DRAW_FRAMEBUFFER, draw);
+            glBindFramebuffer (GL_READ_FRAMEBUFFER, read);
+            glBindTexture (GL_TEXTURE_2D, texture);
+        }
+        return target;
+    }
     if (name == "_rt_MipMappedFrameBuffer") {
         if (!m_mipMappedSceneFBO) {
             // Native allocates RGB storage independently of the scene RT.

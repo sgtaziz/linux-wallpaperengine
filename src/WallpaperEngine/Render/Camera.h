@@ -38,7 +38,8 @@ public:
     [[nodiscard]] static Transforms updatedTransforms (
         Transforms current, const glm::vec3* eye, const glm::vec3* center,
         const glm::vec3* up, const float* zoom);
-    [[nodiscard]] static glm::mat4 renderLookAtForTransforms (const Pose& pose, bool orthogonal);
+    [[nodiscard]] static glm::mat4 renderLookAtForTransforms (
+        const Pose& pose, bool orthogonal, float width, float height);
     [[nodiscard]] static glm::mat4 makeScriptOrthogonalProjection (
         float width, float height, float zoom);
     [[nodiscard]] static glm::mat4 makeProjectionForTransforms (

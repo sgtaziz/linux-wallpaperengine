@@ -28,6 +28,8 @@ public:
     [[nodiscard]] GLuint getDepthbuffer () const;
     /** Attach D16 storage only where the scene target contract requires it. */
     void attachDepth16 ();
+    /** Native secondary target may share the primary target depth attachment. */
+    void attachSharedDepth (std::shared_ptr<const CFBO> source);
     void clear (const glm::vec4& color) const;
     void resize (uint32_t realWidth, uint32_t realHeight, uint32_t textureWidth, uint32_t textureHeight);
     /** Keep the render-target sampler choice when resize replaces its GL texture. */
@@ -58,6 +60,7 @@ public:
 private:
     GLuint m_framebuffer = GL_NONE;
     GLuint m_depthbuffer = GL_NONE;
+    std::shared_ptr<const CFBO> m_depthSource;
     GLuint m_texture = GL_NONE;
     glm::vec4 m_resolution = {};
     float m_scale = 0;

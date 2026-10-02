@@ -1408,3 +1408,85 @@ TEST_CASE ("Unique effect targets share the scene cache and retain identity on r
     REQUIRE (released.expired ());
     REQUIRE (glGetError () == GL_NO_ERROR);
 }
+
+TEST_CASE ("Secondary target retains shared depth ownership across resize and destruction",
+           "[render][secondary-reflection]") {
+    SurfacelessGL gl;
+    REQUIRE (gl.ready);
+    auto primary = std::make_shared<CFBO> ("primary", TextureFormat_ARGB8888,
+        TextureFlags_ClampUVs, 1, 32, 19, 32, 19);
+    primary->attachDepth16 ();
+    auto secondary = std::make_shared<CFBO> ("secondary", TextureFormat_ARGB8888,
+        TextureFlags_ClampUVs, 1, 32, 19, 32, 19);
+    std::shared_ptr<const TextureProvider> retained = secondary;
+    secondary->attachSharedDepth (primary);
+    const auto oldDepth = primary->getDepthbuffer ();
+    REQUIRE (secondary->getDepthbuffer () == oldDepth);
+    REQUIRE_THROWS_AS (secondary->attachSharedDepth (secondary), std::invalid_argument);
+    auto depthless = std::make_shared<CFBO> ("depthless", TextureFormat_ARGB8888,
+        TextureFlags_ClampUVs, 1, 32,19,32,19);
+    REQUIRE_THROWS_AS (secondary->attachSharedDepth (depthless), std::invalid_argument);
+    depthless->attachSharedDepth (secondary);
+    REQUIRE_THROWS_AS (secondary->attachSharedDepth (depthless), std::invalid_argument);
+    REQUIRE (secondary->getDepthbuffer () == primary->getDepthbuffer ());
+    depthless.reset ();
+    primary->resize (35, 21, 35, 21);
+    secondary->resize (35, 21, 35, 21);
+    secondary->attachSharedDepth (primary);
+    REQUIRE (retained->getTextureWidth (0) == 35);
+    REQUIRE (secondary->getDepthbuffer () == primary->getDepthbuffer ());
+    REQUIRE (primary->getDepthbuffer () != oldDepth);
+    glBindFramebuffer (GL_FRAMEBUFFER, secondary->getFramebuffer ());
+    GLint attached = 0;
+    glGetFramebufferAttachmentParameteriv (GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
+                                          GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME, &attached);
+    REQUIRE (static_cast<GLuint> (attached) == primary->getDepthbuffer ());
+    const auto sharedDepth = primary->getDepthbuffer ();
+    secondary.reset ();
+    REQUIRE (glIsRenderbuffer (sharedDepth) == GL_TRUE);
+    retained.reset ();
+    REQUIRE (glIsRenderbuffer (sharedDepth) == GL_TRUE);
+    primary.reset ();
+    REQUIRE (glIsRenderbuffer (sharedDepth) == GL_FALSE);
+    REQUIRE (glGetError () == GL_NO_ERROR);
+}
+
+TEST_CASE ("A real transparent feedback resource preserves native null SRV alpha",
+           "[render][secondary-reflection]") {
+    SurfacelessGL gl;
+    REQUIRE (gl.ready);
+    CFBO zeros ("nullShaderResource", TextureFormat_ARGB8888, TextureFlags_ClampUVs, 1, 1, 1, 1, 1);
+    CFBO output ("output", TextureFormat_ARGB8888, TextureFlags_ClampUVs, 1, 1, 1, 1, 1);
+    const auto compile = [] (GLenum stage, const char* source) {
+        const GLuint shader = glCreateShader (stage);
+        glShaderSource (shader, 1, &source, nullptr);
+        glCompileShader (shader);
+        GLint ok = 0;
+        glGetShaderiv (shader, GL_COMPILE_STATUS, &ok);
+        REQUIRE (ok == GL_TRUE);
+        return shader;
+    };
+    const auto vertex = compile (GL_VERTEX_SHADER, R"(#version 330
+    void main(){vec2 p=vec2((gl_VertexID<<1)&2,gl_VertexID&2);gl_Position=vec4(p*2-1,0,1);})");
+    const auto fragment = compile (GL_FRAGMENT_SHADER, R"(#version 330
+    uniform sampler2D sourceTexture;out vec4 color;
+    void main(){color=texture(sourceTexture,vec2(.5));})");
+    const auto program = glCreateProgram ();
+    glAttachShader (program, vertex);glAttachShader (program, fragment);glLinkProgram (program);
+    GLint linked = 0;glGetProgramiv (program, GL_LINK_STATUS, &linked);REQUIRE (linked == GL_TRUE);
+    GLuint vao = 0;glGenVertexArrays (1, &vao);glBindVertexArray (vao);
+    glUseProgram (program);glUniform1i (glGetUniformLocation (program, "sourceTexture"), 0);
+    glBindFramebuffer (GL_FRAMEBUFFER, output.getFramebuffer ());glViewport (0,0,1,1);
+    glDisable (GL_BLEND);glDisable (GL_DEPTH_TEST);glDisable (GL_CULL_FACE);
+    glActiveTexture (GL_TEXTURE0);glBindTexture (GL_TEXTURE_2D, zeros.getTextureID (0));
+    glDrawArrays (GL_TRIANGLES, 0, 3);
+    std::array<uint8_t,4> rgba {};glReadPixels (0,0,1,1,GL_RGBA,GL_UNSIGNED_BYTE,rgba.data ());
+    REQUIRE (rgba == std::array<uint8_t,4> {0,0,0,0});
+    // Binding zero is not equivalent to D3D's null SRV: RGB hides the error.
+    glBindTexture (GL_TEXTURE_2D, 0);glDrawArrays (GL_TRIANGLES, 0, 3);
+    glReadPixels (0,0,1,1,GL_RGBA,GL_UNSIGNED_BYTE,rgba.data ());
+    REQUIRE (rgba == std::array<uint8_t,4> {0,0,0,255});
+    glUseProgram (0);glDeleteVertexArrays (1,&vao);glDeleteProgram (program);
+    glDeleteShader (vertex);glDeleteShader (fragment);
+    REQUIRE (glGetError () == GL_NO_ERROR);
+}
