@@ -155,7 +155,8 @@ SkeletonFixture withSkeleton (int version, bool optionalRestMatrices = false,
 	// Native MDLS continues with group and bone-mapping table counts.
 	f.bytes += std::string (4, '\0');
     }
-    f.bytes += "opaque"; // Remaining MDLS tail is deliberately not interpreted here.
+    if (version >= 14) f.bytes += std::string (2, '\0'); // Bounds and bone-scalar-index tail absent.
+    else f.bytes += "opaque"; // MDLS1 tail remains outside the bounded subset.
     patch32 (f.bytes, f.sectionBound, uint32_t (f.bytes.size ()));
     return f;
 }
@@ -477,7 +478,7 @@ TEST_CASE ("Versioned MDLS bone records have bounded raw matrices", "[puppet][sk
         REQUIRE (data.bones[1].matrix[0] == 1.0f);
         REQUIRE (data.auxiliaryTransformCount == 0);
         REQUIRE (data.scalarTrackCount == 0);
-        REQUIRE (data.boneRecordsEndOffset + (version == 13 ? 6 : 17) == data.sectionEndOffset);
+        REQUIRE (data.boneRecordsEndOffset + (version == 13 ? 6 : 13) == data.sectionEndOffset);
 	if (version >= 14) {
 	    REQUIRE (data.boneMappingKnown);
 	    REQUIRE (data.mappingRecordByBone == std::vector<int32_t> {-1, -1});
@@ -517,7 +518,7 @@ TEST_CASE ("MDLS bounds and unsupported tail branches fail explicitly", "[puppet
 
 TEST_CASE ("MDLS mapping table distinguishes unmapped and mapped flag-2 bones", "[puppet][skeleton]") {
     auto fixture = withSkeleton (17, false, true);
-    const size_t mappingCountOffset = fixture.bytes.size () - std::string ("opaque").size () - 2;
+    const size_t mappingCountOffset = fixture.bytes.size () - 4; // Mapping count then two optional tail flags.
     fixture.bytes[mappingCountOffset] = '\1';
     std::string mapping;
     u32 (mapping, 1); // Bone 1 receives native bone+d4 mapping record zero.
@@ -981,4 +982,45 @@ TEST_CASE ("Puppet channel scalar preserves prior value through ordinary and add
     REQUIRE (afterAdditive == Catch::Approx (0.375f));
     REQUIRE (puppetApplyScalarLayer (afterAdditive, 0.0f, 0.0f, false) == Catch::Approx (afterAdditive));
     REQUIRE_THROWS (puppetScalarAtFrames (ordinary, {1, 2, 0.0f}));
+}
+
+TEST_CASE ("Puppet emission bounds decode complete extent and matrix records", "[puppet][puppet-emission]") {
+    auto fixture = withSkeleton (17);
+    fixture.bytes.resize (fixture.bytes.size () - 2);
+    fixture.bytes.push_back ('\1');
+    for (int bone = 0; bone < 2; ++bone) {
+        for (float extent : {8.0f,16.0f,0.0f}) f32 (fixture.bytes, extent);
+        for (int lane = 0; lane < 16; ++lane)
+            f32 (fixture.bytes, lane == 12 ? float (bone ? 8 : -8) : lane % 5 == 0 ? 1.0f : 0.0f);
+    }
+    fixture.bytes.push_back ('\0');
+    patch32 (fixture.bytes, fixture.sectionBound, uint32_t (fixture.bytes.size ()));
+    const auto parsed = skeleton (fixture.bytes, parse (fixture.bytes));
+    REQUIRE (parsed.emissionBounds.size () == 2);
+    REQUIRE (parsed.emissionBounds[0].extent == std::array<float,3> {8,16,0});
+    REQUIRE (parsed.emissionBounds[0].matrix[12] == -8);
+    REQUIRE (parsed.emissionBounds[1].matrix[12] == 8);
+    fixture.bytes.resize (fixture.bytes.size () - 3);
+    patch32 (fixture.bytes, fixture.sectionBound, uint32_t (fixture.bytes.size ()));
+    REQUIRE_THROWS_AS (skeleton (fixture.bytes, parse (fixture.bytes)), std::runtime_error);
+}
+
+TEST_CASE ("Puppet emission rest inverse is distinct from render skin bind", "[puppet][puppet-emission]") {
+    using namespace WallpaperEngine::Render::Objects;
+    auto fixture = withSkeleton (17, true);
+    const auto parsed = skeleton (fixture.bytes, parse (fixture.bytes));
+    const auto renderBind = puppetInverseBindMatrices (parsed);
+    const auto emissionBind = puppetEmissionBindGlobals (parsed);
+    const auto emissionInverse = puppetEmissionInverseBindMatrices (parsed);
+    REQUIRE (renderBind[1][3].x == 0);
+    REQUIRE (emissionBind[0][3].x == 1);
+    REQUIRE (emissionBind[1][3].x == 3); // Child rest translation composes through its parent.
+    REQUIRE (emissionInverse[1][3].x == -3);
+    REQUIRE ((*puppetEmissionBoneMatrix ({}, emissionInverse, 1))[3].x == -3);
+    REQUIRE ((*puppetEmissionBoneMatrix (emissionBind, emissionInverse, 1))[3].x == 0);
+    REQUIRE (renderBind[1][3].x == 0); // Emission preparation does not alter rendering data.
+    auto singularRest = parsed;
+    singularRest.optionalRestMatrices[0][0] = 0;
+    REQUIRE_THROWS_AS (puppetEmissionInverseBindMatrices (singularRest), std::runtime_error);
+    REQUIRE (puppetInverseBindMatrices (singularRest)[0] == renderBind[0]);
 }

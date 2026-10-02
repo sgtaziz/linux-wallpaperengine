@@ -301,6 +301,24 @@ PuppetSkeletonData parseSkeletonAt (std::span<const uint8_t> bytes, size_t offse
 		    result.mappingRecordByBone[boneIndex] = i;
 		}
 		result.boneMappingKnown = true;
+		// 140261880:1580 reads one extent+matrix record per bone after
+		// the mapping tail. Unknown scalar/group tails remain undecoded.
+		if (section.remaining () != 0 && section.u8 () != 0) {
+		    if (boneCount > section.remaining () / 76)
+		        throw std::runtime_error ("Truncated MDLS emission bounds");
+		    result.emissionBounds.resize (boneCount);
+		    for (auto& bound : result.emissionBounds) {
+		        const auto payload = section.take (76);
+		        for (size_t lane = 0; lane < bound.extent.size (); ++lane)
+		            bound.extent[lane] = readFloat (payload, lane * 4);
+		        for (size_t lane = 0; lane < bound.matrix.size (); ++lane)
+		            bound.matrix[lane] = readFloat (payload, 12 + lane * 4);
+		        for (float value : bound.extent)
+		            if (!std::isfinite (value)) throw std::runtime_error ("Nonfinite MDLS emission extent");
+		        for (float value : bound.matrix)
+		            if (!std::isfinite (value)) throw std::runtime_error ("Nonfinite MDLS emission matrix");
+		    }
+		}
 	    }
 	}
     }

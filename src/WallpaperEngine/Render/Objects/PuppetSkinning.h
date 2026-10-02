@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <cmath>
 #include <optional>
+#include <span>
 #include <stdexcept>
 #include <vector>
 
@@ -328,10 +329,49 @@ inline std::optional<glm::mat4> puppetEmissionBoneMatrix (
     const std::vector<glm::mat4>& inverseBind, uint8_t boneIndex
 ) {
     if (boneIndex == 0xff) return std::nullopt;
-    if (boneIndex >= currentGlobals.size () || boneIndex >= inverseBind.size ())
+    if (boneIndex >= inverseBind.size ())
         return std::nullopt;
-    return currentGlobals[boneIndex] * inverseBind[boneIndex];
+    // Native 1d4360/1d4400 substitute identity when the pose is unavailable.
+    return (boneIndex < currentGlobals.size () ? currentGlobals[boneIndex] : glm::mat4 (1))
+        * inverseBind[boneIndex];
 }
+
+inline std::vector<glm::mat4> puppetEmissionBindGlobals (const PuppetSkeletonData& skeleton) {
+    // 1d6d30 uses optional rest matrices for emission without changing the
+    // bind matrices used by the render skin palette.
+    return puppetGlobalMatrices (skeleton, puppetUnanimatedLocalMatrices (skeleton));
+}
+
+inline std::vector<glm::mat4> puppetEmissionInverseBindMatrices (const PuppetSkeletonData& skeleton) {
+    const auto bind = puppetEmissionBindGlobals (skeleton);
+    std::vector<glm::mat4> inverse;
+    inverse.reserve (bind.size ());
+    for (const auto& matrix : bind) {
+        const float determinant = glm::determinant (matrix);
+        if (!std::isfinite (determinant) || determinant == 0)
+            throw std::runtime_error ("Noninvertible puppet emission bind matrix");
+        inverse.push_back (glm::inverse (matrix));
+    }
+    return inverse;
+}
+
+struct PuppetEmissionWorldHistory {
+    std::vector<glm::mat4> current;
+    std::vector<glm::mat4> previous;
+
+    // 1fdf90 swaps scene-owned world-bone buffers each frame independently
+    // of positive emission attempts. A skeleton resize discards history.
+    void advance (const glm::mat4& world, std::span<const glm::mat4> localGlobals) {
+        if (current.size () != localGlobals.size ()) {
+            current.clear ();
+            previous.clear ();
+        }
+        current.swap (previous);
+        current.resize (localGlobals.size ());
+        for (size_t bone = 0; bone < localGlobals.size (); ++bone)
+            current[bone] = world * localGlobals[bone];
+    }
+};
 
 inline std::vector<glm::mat4> puppetSkinPalette (
     const PuppetSkeletonData& skeleton, const std::vector<glm::mat4>& currentLocal

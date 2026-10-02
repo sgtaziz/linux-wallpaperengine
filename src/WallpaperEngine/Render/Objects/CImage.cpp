@@ -8,6 +8,7 @@
 #include "ImageCompositeSampler.h"
 #include "ModelNormalMatrix.h"
 #include "PuppetMeshParser.h"
+#include "ParticlePuppetEmission.h"
 
 #include <algorithm>
 #include <array>
@@ -97,7 +98,23 @@ std::optional<glm::mat4> CImage::puppetAttachmentTransform (const std::string& n
 std::optional<glm::mat4> CImage::puppetEmissionBoneTransform (uint8_t boneIndex) const {
     if (boneIndex == 0xff || !m_puppetSkeleton) return std::nullopt;
     const_cast<CImage*> (this)->preparePuppetAnimation ();
-    return puppetEmissionBoneMatrix (m_puppetCurrentGlobals, m_puppetInverseBind, boneIndex);
+    return puppetEmissionBoneMatrix (m_puppetCurrentGlobals, m_puppetEmissionInverseBind, boneIndex);
+}
+
+std::optional<glm::mat4> CImage::puppetPreviousEmissionBoneTransform (uint8_t boneIndex) const {
+    if (boneIndex == 0xff || !m_puppetSkeleton) return std::nullopt;
+    const_cast<CImage*> (this)->preparePuppetAnimation ();
+    return puppetEmissionBoneMatrix (m_puppetEmissionWorldHistory.previous, m_puppetEmissionInverseBind, boneIndex);
+}
+
+bool CImage::assignPuppetEmissionBones (std::span<ParticleCore::ImageEmitterSample> samples) const {
+    if (!m_puppetSkeleton || m_puppetSkeleton->emissionBounds.empty ()
+        || m_puppetEmissionBindGlobals.size () != m_puppetSkeleton->emissionBounds.size ()) return false;
+    WallpaperEngine::Render::Objects::assignPuppetEmissionBones (
+        samples, m_puppetSkeleton->emissionBounds, m_puppetEmissionBindGlobals);
+    return std::ranges::all_of (samples, [this] (const auto& sample) {
+        return sample.bone < m_puppetEmissionInverseBind.size ();
+    });
 }
 
 bool CImage::hasPuppetEmissionDeformation () const { return m_hasPuppetMesh; }
@@ -115,6 +132,9 @@ std::shared_ptr<ImageTextureAnimation> CImage::getTextureAnimation () {
 }
 
 void CImage::advanceTextureAnimation (float delta, uint32_t frame) {
+    // Native image update (1891a0 -> 1fdf90) precedes particles and scripts,
+    // including frames on which no emitter consumes this image.
+    preparePuppetAnimation ();
     if (!m_textureAnimation || m_textureAnimationTick == frame) return;
     m_textureAnimationTick = frame;
     m_textureAnimation->advance (delta);
@@ -131,11 +151,12 @@ std::optional<uint32_t> CImage::textureAnimationFrameOverride () const {
 }
 
 void CImage::preparePuppetAnimation () {
-    if (!m_hasPuppetMesh || !m_puppetAnimation || m_image.animationLayers.empty ()) return;
+    if (!m_hasPuppetMesh || !m_puppetSkeleton) return;
     const uint32_t frame = getScene ().getContext ().getDriver ().getFrameCounter ();
     if (m_puppetPoseFrame == frame) return;
     m_puppetPoseFrame = frame;
     updatePuppetAnimation ();
+    m_puppetEmissionWorldHistory.advance (resolveTransform (m_image).authoredMatrix, m_puppetCurrentGlobals);
 }
 
 CImage::CImage (Wallpapers::CScene& scene, const Image& image) :
@@ -508,6 +529,18 @@ bool CImage::loadPuppetMesh (const glm::vec2& size) {
 	    try {
 		auto skeleton = parsePuppetSkeleton (bytes, model);
 		m_puppetInverseBind = puppetInverseBindMatrices (skeleton);
+		if (!skeleton.emissionBounds.empty ()) {
+		    try {
+			m_puppetEmissionBindGlobals = puppetEmissionBindGlobals (skeleton);
+			m_puppetEmissionInverseBind = puppetEmissionInverseBindMatrices (skeleton);
+		    } catch (const std::exception& error) {
+			// Emission metadata cannot disable an otherwise valid render
+			// skeleton or animation. Emitters diagnose missing bounds.
+			m_puppetEmissionBindGlobals.clear ();
+			m_puppetEmissionInverseBind.clear ();
+			sLog.error ("Puppet emission unavailable for ", *m_image.model->puppet, ": ", error.what ());
+		    }
+		}
 		if (!m_image.animationLayers.empty () &&
 		    std::any_of (skeleton.bones.begin (), skeleton.bones.end (),
 		                 [] (const PuppetBoneRecord& bone) { return (bone.rawFlags & 2) != 0; }) &&
@@ -688,6 +721,9 @@ bool CImage::loadPuppetMesh (const glm::vec2& size) {
 	m_puppetSkeleton.reset ();
 	m_puppetAnimation.reset ();
 	m_puppetCurrentGlobals.clear ();
+	m_puppetEmissionBindGlobals.clear ();
+	m_puppetEmissionInverseBind.clear ();
+	m_puppetEmissionWorldHistory = {};
 	m_puppetPoseFrame = UINT32_MAX;
 	m_puppetBlendMap.clear ();
 	return false;

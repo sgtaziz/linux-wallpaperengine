@@ -2049,15 +2049,7 @@ EmitterFunc CParticle::createImageEmitter (const ParticleEmitter& emitter, size_
         const auto* object = getScene ().getObject (sourceId);
         const auto* image = dynamic_cast<const CImage*> (object);
         if (!image) return;
-        if (image->hasPuppetEmissionDeformation ()) {
-            if (!cache->warnedPuppet) {
-                sLog.error ("Layer-image emitter puppet source needs selected-pixel bone association: "
-                            "particle=", getId (), " source=", sourceId,
-                            " emitter index=", index);
-                cache->warnedPuppet = true;
-            }
-            return;
-        }
+        const bool puppet = image->hasPuppetEmissionDeformation ();
         const auto source = image->getTexture ();
         if (!source || !source->isReady ()) return;
         std::shared_ptr<const TextureProvider> mask;
@@ -2108,6 +2100,16 @@ EmitterFunc CParticle::createImageEmitter (const ParticleEmitter& emitter, size_
             cache->ready = true;
         } else if (!cache->ready) {
             cache->pendingActivation = cache->reader.sample (*source, mask.get (), cache->samples);
+            if (cache->pendingActivation && puppet && !image->assignPuppetEmissionBones (cache->samples)) {
+                cache->pendingActivation = false;
+                cache->samples.clear ();
+                if (!cache->warnedPuppet) {
+                    sLog.error ("Layer-image emitter puppet source has unavailable or ambiguous bone bounds: "
+                                "particle=", getId (), " source=", sourceId, " emitter index=", index);
+                    cache->warnedPuppet = true;
+                }
+                return;
+            }
             if (cache->pendingActivation && traceParticleChildren (*this))
                 sLog.out ("Particle image emitter sample list prepared: particle=", getId (),
                     " source=", sourceId, " count=", cache->samples.size (),
@@ -2150,12 +2152,27 @@ EmitterFunc CParticle::createImageEmitter (const ParticleEmitter& emitter, size_
             const glm::vec3 sourcePoint (
                 static_cast<float> (sample.x) + offset.x,
                 -static_cast<float> (sample.y) + offset.y, offset.z);
-            const glm::vec3 birth = ParticleCore::imageEmitterPoint (currentSource, sourcePoint);
+            glm::mat4 currentPointMatrix = currentSource;
+            if (puppet) {
+                const auto bone = image->puppetEmissionBoneTransform (sample.bone);
+                if (!bone) return;
+                currentPointMatrix *= *bone;
+            }
+            const glm::vec3 birth = ParticleCore::imageEmitterPoint (currentPointMatrix, sourcePoint);
             particle.position = ParticleCore::imageEmitterSimulationPosition (
                 birth, world, orthographic, canvas);
             particle.velocity = glm::vec3 (0.0f);
             if ((emitter.flags & 0x40000u) != 0) {
-                const glm::vec3 previous = ParticleCore::imageEmitterPoint (previousSource, sourcePoint);
+                // Previous puppet poses already include the source WORLD
+                // matrix from the preceding scene frame (1d4400). Ordinary
+                // emitters instead retain the preceding positive attempt.
+                glm::mat4 previousPointMatrix = previousSource;
+                if (puppet) {
+                    const auto bone = image->puppetPreviousEmissionBoneTransform (sample.bone);
+                    if (!bone) return;
+                    previousPointMatrix = invocation * *bone;
+                }
+                const glm::vec3 previous = ParticleCore::imageEmitterPoint (previousPointMatrix, sourcePoint);
                 const glm::vec2 speedBounds = ParticleCore::emitterSpeedBounds (
                     emitter.speedMin, emitter.speedMax, speedOverrideValue ()->getFloat (), m_particle.flags);
                 const float speed = WallpaperEngine::Maths::randomFloat (

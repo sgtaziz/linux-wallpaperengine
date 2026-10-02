@@ -1,4 +1,5 @@
 #include "WallpaperEngine/Render/Objects/ParticleCore.h"
+#include "WallpaperEngine/Render/Objects/ParticlePuppetEmission.h"
 #include "WallpaperEngine/Render/Objects/CParticle.h"
 #include "WallpaperEngine/Render/Objects/ParticleRemapOperators.h"
 #include "WallpaperEngine/Render/Objects/ParticleSlotStreams.h"
@@ -3849,4 +3850,63 @@ TEST_CASE ("Production birth noise preserves per-axis and raw output arithmetic"
         if (std::isnan (input)) REQUIRE (std::isnan (particles[0].alpha));
         else REQUIRE (particles[0].alpha == input);
     }
+}
+
+TEST_CASE ("Puppet sampled pixels use projected bounds and unambiguous neighbors", "[particle][puppet-emission]") {
+    using namespace WallpaperEngine::Render::Objects;
+    using ParticleCore::ImageEmitterSample;
+    auto bound = [] (float x, float halfX, float halfY) {
+        PuppetSkeletonData::EmissionBound value;
+        value.extent = {halfX, halfY, 7};
+        const auto matrix = glm::translate (glm::mat4 (1), glm::vec3 (x,0,0));
+        std::copy_n (glm::value_ptr (matrix), 16, value.matrix.begin ());
+        return value;
+    };
+    const std::vector<glm::mat4> bind (2, glm::mat4 (1));
+    const std::vector bounds {bound (-8,8,16), bound (8,8,16)};
+    std::vector<ImageEmitterSample> samples {{11,22,33,0xff,-12,0}, {44,55,66,0xff,0,0},
+                                            {77,88,99,0xff,12,0}, {1,2,3,0xff,30,0}};
+    assignPuppetEmissionBones (samples, bounds, bind);
+    REQUIRE (samples[0].bone == 0);
+    REQUIRE (samples[1].bone == 0); // Equal-distance overlap uses first unambiguous sampled pixel.
+    REQUIRE (samples[2].bone == 1);
+    REQUIRE (samples[3].bone == 1);
+    REQUIRE (samples[1].red == 44);
+    REQUIRE (samples[1].green == 55);
+    REQUIRE (samples[1].blue == 66);
+    REQUIRE (samples[3].x == 30);
+    std::vector<ImageEmitterSample> overlapOnly {{1,2,3,0xff,0,0}};
+    assignPuppetEmissionBones (overlapOnly, bounds, bind);
+    REQUIRE (overlapOnly[0].bone == 0xff); // Native leaf does not write an unassociated bone.
+    const std::vector wideBounds {bound (0,100,1), bound (40,1,1)};
+    std::vector<ImageEmitterSample> outside {{1,2,3,0xff,35,-3}};
+    assignPuppetEmissionBones (outside, wideBounds, bind);
+    REQUIRE (outside[0].bone == 0); // Maximum unnormalized projection violation, not nearest bone center.
+}
+
+TEST_CASE ("Puppet emission retains scene-frame world poses independently of births", "[particle][puppet-emission]") {
+    using namespace WallpaperEngine::Render::Objects;
+    const std::vector<glm::mat4> inverseBind {glm::translate (glm::mat4 (1), glm::vec3 (-4,0,0))};
+    PuppetEmissionWorldHistory history;
+    const auto world = glm::translate (glm::mat4 (1), glm::vec3 (50,0,0));
+    std::vector<glm::mat4> pose {glm::translate (glm::mat4 (1), glm::vec3 (4,0,0))};
+    history.advance (world, pose);
+    REQUIRE (history.previous.empty ());
+    REQUIRE ((*puppetEmissionBoneMatrix (history.previous, inverseBind, 0))[3].x == -4);
+    pose[0][3].x = 5;
+    history.advance (world, pose); // No emitter invocation on this scene frame.
+    pose[0][3].x = 6;
+    history.advance (world, pose);
+    const auto previous = *puppetEmissionBoneMatrix (history.previous, inverseBind, 0);
+    const auto currentLocal = *puppetEmissionBoneMatrix (pose, inverseBind, 0);
+    const auto point = glm::vec3 (3,0,0);
+    const auto current = ParticleCore::imageEmitterPoint (world * currentLocal, point);
+    const auto before = ParticleCore::imageEmitterPoint (previous, point);
+    REQUIRE (current.x == 55);
+    REQUIRE (before.x == 54);
+    REQUIRE (ParticleCore::imageEmitterSourceVelocity (current, before, .25f, 4).x == 16);
+    REQUIRE (ParticleCore::imageEmitterPoint (world * previous, point).x == 104); // A second world multiplication is wrong.
+    history.advance (world, std::span<const glm::mat4> {});
+    REQUIRE (history.previous.empty ());
+    REQUIRE_FALSE (puppetEmissionBoneMatrix (pose, inverseBind, 0xff));
 }
