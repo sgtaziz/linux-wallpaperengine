@@ -21,6 +21,22 @@
 
 namespace WallpaperEngine::Render::Objects::ParticleCore {
 
+struct EmitterBirthTransform {
+    glm::vec3 origin;
+    glm::mat3 basis { 1.0f };
+};
+
+// 1402378a0 captures the selected CP translation/basis once per emitter
+// invocation. Birth initializers may write that CP, but subsequent births in
+// this batch still use the capture; the next emitter invocation sees writes.
+inline EmitterBirthTransform captureEmitterBirthTransform (
+    const glm::vec3& origin, const glm::vec3* cpPosition, const glm::mat3* cpBasis) {
+    EmitterBirthTransform result {origin};
+    if (cpPosition) result.origin += *cpPosition;
+    if (cpBasis) result.basis = *cpBasis;
+    return result;
+}
+
 inline bool instanceTintDiffers (const glm::vec3& tint, const glm::vec3& preset) {
     // 14022bd40/14022f890 compare the shared tint to each node's preset RGB.
     constexpr float tolerance = 0.0035294117f;

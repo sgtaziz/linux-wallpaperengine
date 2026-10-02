@@ -1776,23 +1776,25 @@ EmitterFunc CParticle::createBoxEmitter (const ParticleEmitter& emitter, size_t 
 	            &periodRestarted);
 	    if (periodRestarted) resetPeriodicChildren ();
 	    m_emitterCanProduce[index] = ParticleCore::emitterCanProduceMore (schedule, state);
+	    const bool hasControlPoint = controlPointIndex >= 0
+	        && controlPointIndex < static_cast<int> (m_controlPoints.size ());
+	    const auto birthTransform = ParticleCore::captureEmitterBirthTransform (
+	        transformedEmitterOrigin,
+	        hasControlPoint ? &m_controlPoints[controlPointIndex].position : nullptr,
+	        hasControlPoint ? &m_controlPoints[controlPointIndex].basis : nullptr);
+	    const bool useCPBasis = hasControlPoint
+	        && ((m_particle.flags & 1u) != 0 || controlPointIndex > 0);
 
 	    // Emit particles
 	    for (uint32_t i = 0; i < toEmit && count < particles.size (); i++) {
 		auto& p = emittedParticleTarget (particles, count);
 
-		glm::vec3 spawnOrigin = transformedEmitterOrigin;
-		if (controlPointIndex >= 0 && controlPointIndex < static_cast<int> (m_controlPoints.size ())) {
-		    spawnOrigin += m_controlPoints[controlPointIndex].position;
-		}
+		const glm::vec3& spawnOrigin = birthTransform.origin;
 
 		glm::vec3 randomPos = ParticleCore::nativeBoxDisplacement (
 		    m_rng, flippedDirections, emitter.distanceMin, emitter.distanceMax);
 		// 1402378a0: cVar43 is preset world bit OR nonzero CP index.
-		if (((m_particle.flags & 1u) != 0 || controlPointIndex > 0)
-		    && controlPointIndex >= 0
-		    && controlPointIndex < static_cast<int> (m_controlPoints.size ()))
-		    randomPos = m_controlPoints[controlPointIndex].basis * randomPos;
+		if (useCPBasis) randomPos = birthTransform.basis * randomPos;
 
 		p.position = spawnOrigin + randomPos;
 
@@ -1839,12 +1841,9 @@ EmitterFunc CParticle::createBoxEmitter (const ParticleEmitter& emitter, size_t 
 		p.initial.size = p.size;
 		p.initial.lifetime = p.lifetime;
 
-
 		// Native 1402378a0 passes this emitter's selected CP upper 3x3 to
 		// initializer opcode 9, independently of the spawn-offset branch.
-		m_birthInitializerBasis = controlPointIndex >= 0
-		    && controlPointIndex < static_cast<int> (m_controlPoints.size ())
-		    ? m_controlPoints[controlPointIndex].basis : glm::mat3 (1.0f);
+		m_birthInitializerBasis = birthTransform.basis;
 		// Apply initializers
 		for (auto& init : m_initializers) {
 		    init (p);
@@ -1902,15 +1901,19 @@ EmitterFunc CParticle::createSphereEmitter (const ParticleEmitter& emitter, size
 	        &periodRestarted);
 	if (periodRestarted) resetPeriodicChildren ();
 	m_emitterCanProduce[index] = ParticleCore::emitterCanProduceMore (schedule, state);
+	const bool hasControlPoint = controlPointIndex >= 0
+	    && controlPointIndex < static_cast<int> (m_controlPoints.size ());
+	const auto birthTransform = ParticleCore::captureEmitterBirthTransform (
+	    transformedEmitterOrigin,
+	    hasControlPoint ? &m_controlPoints[controlPointIndex].position : nullptr,
+	    hasControlPoint ? &m_controlPoints[controlPointIndex].basis : nullptr);
+	const bool useCPBasis = hasControlPoint
+	    && ((m_particle.flags & 1u) != 0 || controlPointIndex > 0);
 
 	for (uint32_t i = 0; i < toEmit && count < particles.size (); i++) {
 	    auto& p = emittedParticleTarget (particles, count);
 
-	    // Determine spawn origin (control point or emitter origin)
-	    glm::vec3 spawnOrigin = transformedEmitterOrigin;
-	    if (controlPointIndex >= 0 && controlPointIndex < static_cast<int> (m_controlPoints.size ())) {
-		spawnOrigin += m_controlPoints[controlPointIndex].position;
-	    }
+	    const glm::vec3& spawnOrigin = birthTransform.origin;
 
 	    // Opcode 1 consumes angle, axial cone coordinate and cube-root radius
 	    // in that order on every birth, independently of the scene projection.
@@ -1924,10 +1927,7 @@ EmitterFunc CParticle::createSphereEmitter (const ParticleEmitter& emitter, size
 	    glm::vec3 randomPos (authored.x, -authored.y, authored.z);
 	    // 1402378a0: cVar43 selects the CP basis for preset world bit or a
 	    // nonzero CP index, just as in the box emitter.
-	    const bool useCPBasis = ((m_particle.flags & 1u) != 0 || controlPointIndex > 0)
-		&& controlPointIndex >= 0
-		&& controlPointIndex < static_cast<int> (m_controlPoints.size ());
-	    if (useCPBasis) randomPos = m_controlPoints[controlPointIndex].basis * randomPos;
+	    if (useCPBasis) randomPos = birthTransform.basis * randomPos;
 	    p.position = spawnOrigin + randomPos;
 
 	    glm::vec3 velocityDirection = randomPos;
@@ -1942,7 +1942,7 @@ EmitterFunc CParticle::createSphereEmitter (const ParticleEmitter& emitter, size
 		    -((fallbackY + fallbackY) - 1.0f) * emitter.directions.y,
 		    ((fallbackZ + fallbackZ) - 1.0f) * emitter.directions.z);
 		if (useCPBasis)
-		    velocityDirection = m_controlPoints[controlPointIndex].basis * velocityDirection;
+		    velocityDirection = birthTransform.basis * velocityDirection;
 	    }
 	    // Native draws speed even for identical zero bounds, so its shared RNG
 	    // stream stays aligned with birth random and subsequent initializers.
@@ -1976,10 +1976,7 @@ EmitterFunc CParticle::createSphereEmitter (const ParticleEmitter& emitter, size
 	    p.initial.size = p.size;
 	    p.initial.lifetime = p.lifetime;
 
-
-	    m_birthInitializerBasis = controlPointIndex >= 0
-		&& controlPointIndex < static_cast<int> (m_controlPoints.size ())
-		? m_controlPoints[controlPointIndex].basis : glm::mat3 (1.0f);
+	    m_birthInitializerBasis = birthTransform.basis;
 	    for (auto& init : m_initializers) {
 		init (p);
 	    }

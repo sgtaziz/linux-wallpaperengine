@@ -31,6 +31,51 @@
 
 using namespace WallpaperEngine::Render::Objects::ParticleCore;
 
+TEST_CASE ("Emitter batch captures CP before ordered birth writes and next invocation sees accumulated CP",
+           "[particle][birth-batch]") {
+    using namespace WallpaperEngine::Render::Objects;
+    using namespace WallpaperEngine::Data::Model;
+    using WallpaperEngine::Data::Parsers::ObjectParser;
+    using WallpaperEngine::Data::JSON::JSON;
+    Project project {};
+    const auto parsed = ObjectParser::parse (JSON::parse (R"({"id":1,"particle":{
+        "initializer":[{"name":"remapinitialvalue","input":"maxlifetime",
+            "inputrangemin":0,"inputrangemax":20,"output":"controlpoint",
+            "outputcontrolpoint0":0,"outputcomponent":"x","outputrangemin":"24 0 0",
+            "outputrangemax":"24 0 0","operation":"add","flags":1}]}})"), project);
+    const auto& model = *parsed->as<Particle> ();
+    const auto writer = createVectorRemapOperator (*model.initializers[0]
+        ->as<RemapInitialValueInitializer> ()->remap->as<VectorRemapValueOperator> (),
+        true, false, false, false);
+    std::vector<ControlPointData> cps (1);
+    cps[0].flags = model.controlPoints[0].flags;
+    cps[0].basis = glm::mat3 (2, 0, 0, 0, 3, 0, 0, 0, 4);
+    const glm::vec3 emitterOrigin (3, 5, 7);
+    const auto batch = captureEmitterBirthTransform (emitterOrigin, &cps[0].position, &cps[0].basis);
+    std::vector<ParticleInstance> particle (1);
+    particle[0].alive = true;
+    particle[0].lifetime = particle[0].initial.lifetime = 8;
+    std::array<glm::vec3, 2> births;
+    for (size_t i = 0; i < births.size (); ++i) {
+        births[i] = batch.origin;
+        writer (particle, 1, cps, 0, MovementTime {});
+        REQUIRE (cps[0].position.x == 24 * (i + 1));
+    }
+    REQUIRE (births[0] == emitterOrigin);
+    REQUIRE (births[1] == emitterOrigin);
+    // Capturing again observes both CP writes. Capturing on every birth would
+    // put the second at 24, the independently observed old Linux behavior.
+    const auto next = captureEmitterBirthTransform (emitterOrigin, &cps[0].position, &cps[0].basis);
+    REQUIRE (next.origin == emitterOrigin + glm::vec3 (48, 0, 0));
+    const glm::vec3 displacement (1, 2, 3);
+    cps[0].basis = glm::mat3 (1.0f);
+    REQUIRE (batch.basis * displacement == glm::vec3 (2, 6, 12));
+    REQUIRE (next.basis * displacement == glm::vec3 (2, 6, 12));
+    const auto uncoupled = captureEmitterBirthTransform (emitterOrigin, nullptr, nullptr);
+    REQUIRE (uncoupled.origin == emitterOrigin);
+    REQUIRE (uncoupled.basis * displacement == displacement);
+}
+
 TEST_CASE ("Native physical streams retain holes and padded tail across restore and stop",
            "[particle][sparse][slots]") {
     using WallpaperEngine::Render::Objects::ParticleInstance;
