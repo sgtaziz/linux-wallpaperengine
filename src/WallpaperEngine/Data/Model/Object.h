@@ -525,6 +525,23 @@ public:
     UserSettingUniquePtr gravity;
 };
 
+class CollisionOperator : public ParticleOperatorBase {
+public:
+    enum class Kind { Plane, Sphere, Box, Bounds, Quad };
+    enum class Behavior { Bounce, Slide, Stop, Delete };
+    Kind kind {Kind::Plane};
+    Behavior behavior {Behavior::Bounce};
+    float bounceFactor {0.5f};
+    uint32_t flags {0};
+    uint32_t controlPoint {0};
+    glm::vec3 origin {0};
+    glm::vec3 plane {0, 1, 0};
+    glm::vec3 forward {0, 0, 1};
+    glm::vec2 size {1};
+    float distance {0};
+    float radius {1};
+};
+
 class AngularMovementOperator : public ParticleOperatorBase {
 public:
     AngularMovementOperator (UserSettingUniquePtr drag, UserSettingUniquePtr force) :
