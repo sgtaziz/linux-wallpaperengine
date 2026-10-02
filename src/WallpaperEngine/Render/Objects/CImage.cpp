@@ -518,6 +518,7 @@ bool CImage::loadPuppetMesh (const glm::vec2& size) {
 	const std::span<const uint8_t> bytes {
 	    reinterpret_cast<const uint8_t*> (data.data ()), data.size ()};
 	const auto model = parsePuppetMeshes (bytes);
+	m_collisionFallbackBound = ParticleCore::modelCollisionFallbackBound (model.meshes);
 	if (model.meshes.size () != 1 && model.meshes.size () != 2)
 	    throw std::runtime_error ("Unsupported puppet mesh count");
 	if (model.meshes.size () == 2 &&
@@ -723,6 +724,7 @@ bool CImage::loadPuppetMesh (const glm::vec2& size) {
 	m_puppetSkeleton.reset ();
 	m_puppetAnimation.reset ();
 	m_puppetCurrentGlobals.clear ();
+	m_collisionFallbackBound.reset ();
 	m_puppetEmissionBindGlobals.clear ();
 	m_puppetEmissionInverseBind.clear ();
 	m_puppetEmissionWorldHistory = {};
@@ -2059,6 +2061,15 @@ void CImage::setAlignment (std::string alignment) {
 
 glm::mat4 CImage::emissionSourceWorld () const {
     return m_emissionAlignment.world (resolveTransform (m_image).authoredMatrix);
+}
+
+std::vector<ParticleCore::CollisionCapsule> CImage::collisionCapsules (const glm::mat4& inverseInvocation) const {
+    if ((!m_puppetSkeleton || m_puppetSkeleton->emissionBounds.empty ()) && m_collisionFallbackBound)
+        return ParticleCore::modelCollisionCapsules (std::span (&*m_collisionFallbackBound, 1), {},
+            emissionSourceWorld (), inverseInvocation);
+    if (!m_puppetSkeleton) return {};
+    return ParticleCore::modelCollisionCapsules (
+        m_puppetSkeleton->emissionBounds, m_puppetCurrentGlobals, emissionSourceWorld (), inverseInvocation);
 }
 
 GLuint CImage::getSceneSpacePosition () const { return this->m_sceneSpacePosition; }

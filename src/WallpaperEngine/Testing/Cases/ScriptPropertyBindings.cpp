@@ -50,6 +50,27 @@ std::set<std::string> names (const std::array<WallpaperEngine::Scripting::Script
 }
 } // namespace
 
+TEST_CASE ("MODEL script transforms update the authored world matrix used by collision bounds", "[script][binding][collision-model]") {
+    using WallpaperEngine::Data::Model::SceneModel;
+    using WallpaperEngine::Data::Model::SceneModelData;
+    using WallpaperEngine::Render::Wallpapers::resolveSceneTransform;
+    SceneModel model (baseObject (), SceneModelData {});
+    const auto bindings = scriptPropertyBindings (model);
+    REQUIRE (names (bindings) == std::set<std::string> {"origin", "scale", "angles", "visible"});
+    binding (bindings, "origin")->update (glm::vec3 (100, 200, 3), DynamicValue::Script);
+    binding (bindings, "scale")->update (glm::vec3 (2, 3, 4), DynamicValue::Script);
+    binding (bindings, "angles")->update (glm::vec3 (0, 0, glm::half_pi<float> ()), DynamicValue::Script);
+    binding (bindings, "visible")->update (true, DynamicValue::Script);
+    const auto world = resolveSceneTransform (model, [] (int) -> const WallpaperEngine::Data::Model::Object* {
+        return nullptr;
+    }).authoredMatrix;
+    const glm::vec3 point (world * glm::vec4 (1, 0, 0, 1));
+    REQUIRE (point.x == Catch::Approx (100));
+    REQUIRE (point.y == Catch::Approx (202));
+    REQUIRE (point.z == Catch::Approx (3));
+    REQUIRE (model.groupVisible->value->getBool ());
+}
+
 TEST_CASE ("Image script bindings update the typed values consumed by rendering", "[script][binding]") {
     ImageData data {};
     data.scale = UserSettingBuilder::fromValue (glm::vec3 (1.0f));

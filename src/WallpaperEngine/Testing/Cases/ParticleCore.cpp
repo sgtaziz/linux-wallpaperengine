@@ -1,5 +1,6 @@
 #include "WallpaperEngine/Render/Objects/ParticleCore.h"
 #include "WallpaperEngine/Render/Objects/ParticleCollision.h"
+#include "WallpaperEngine/Render/Objects/ParticleModelCollision.h"
 #include "WallpaperEngine/Render/Objects/ParticleBoids.h"
 #include "WallpaperEngine/Render/Objects/ParticlePuppetEmission.h"
 #include "WallpaperEngine/Render/Objects/ImageAlignment.h"
@@ -4318,4 +4319,176 @@ TEST_CASE ("Boids production clock API consumes damping independently of movemen
     REQUIRE (correctClock[0].velocity != wrongClock[0].velocity);
     REQUIRE (std::abs (correctClock[0].velocity.x - initial[0].velocity.x)
         < std::abs (wrongClock[0].velocity.x - initial[0].velocity.x));
+}
+
+TEST_CASE ("MODEL capsule responses preserve the original 64 executable lanes", "[particle][collision-model]") {
+    if (!nativeRuntimeArithmeticAvailable) return;
+    struct Recorded { int capsules, response, flags, lane; std::array<float, 10> streams; };
+    const Recorded recorded[] = {
+        {1, 0, 0, 0, {0.25f, 1.0f, 2.0f, 3.0f, -8.00024414f, 0.0f, 0.0f, -1.99926758f, 3.0f, 2.0f}},
+        {1, 0, 0, 1, {0.25f, 1.0f, 2.0f, 3.0f, 0.0f, 16.0002441f, 0.0f, 4.0f, -1.49945068f, 2.0f}},
+        {1, 0, 0, 2, {0.25f, 1.0f, 2.0f, 3.0f, 14.0f, 0.0f, 0.0f, 4.0f, 3.0f, 2.0f}},
+        {1, 0, 0, 3, {0.25f, 1.0f, 2.0f, 3.0f, NAN, NAN, NAN, NAN, NAN, NAN}},
+        {1, 0, 2, 0, {0.25f, 1.0f, 2.0f, 3.0f, -8.00024414f, 0.0f, 0.0f, -1.99926758f, 3.0f, 2.0f}},
+        {1, 0, 2, 1, {0.25f, 1.0f, 2.0f, 3.0f, 0.0f, 16.0002441f, 0.0f, 4.0f, -1.49945068f, 2.0f}},
+        {1, 0, 2, 2, {0.25f, 1.0f, 2.0f, 3.0f, 14.0f, 0.0f, 0.0f, 4.0f, 3.0f, 2.0f}},
+        {1, 0, 2, 3, {0.25f, 1.0f, 2.0f, 3.0f, NAN, NAN, NAN, NAN, NAN, NAN}},
+        {1, 1, 0, 0, {0.25f, 1.0f, 2.0f, 3.0f, -8.00024414f, 0.0f, 0.0f, 0.00048828125f, 3.0f, 2.0f}},
+        {1, 1, 0, 1, {0.25f, 1.0f, 2.0f, 3.0f, 0.0f, 16.0002441f, 0.0f, 4.0f, 0.000366210938f, 2.0f}},
+        {1, 1, 0, 2, {0.25f, 1.0f, 2.0f, 3.0f, 14.0f, 0.0f, 0.0f, 4.0f, 3.0f, 2.0f}},
+        {1, 1, 0, 3, {0.25f, 1.0f, 2.0f, 3.0f, NAN, NAN, NAN, NAN, NAN, NAN}},
+        {1, 1, 2, 0, {0.25f, 1.0f, 2.0f, 3.0f, -8.00024414f, 0.0f, 0.0f, 0.00048828125f, 3.0f, 2.0f}},
+        {1, 1, 2, 1, {0.25f, 1.0f, 2.0f, 3.0f, 0.0f, 16.0002441f, 0.0f, 4.0f, 0.000366210938f, 2.0f}},
+        {1, 1, 2, 2, {0.25f, 1.0f, 2.0f, 3.0f, 14.0f, 0.0f, 0.0f, 4.0f, 3.0f, 2.0f}},
+        {1, 1, 2, 3, {0.25f, 1.0f, 2.0f, 3.0f, NAN, NAN, NAN, NAN, NAN, NAN}},
+        {1, 2, 0, 0, {0.25f, 1.0f, 2.0f, 3.0f, -8.00024414f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f}},
+        {1, 2, 0, 1, {0.25f, 1.0f, 2.0f, 3.0f, 0.0f, 16.0002441f, 0.0f, 0.0f, 0.0f, 0.0f}},
+        {1, 2, 0, 2, {0.25f, 1.0f, 2.0f, 3.0f, 14.0f, 0.0f, 0.0f, 4.0f, 3.0f, 2.0f}},
+        {1, 2, 0, 3, {0.25f, 1.0f, 2.0f, 3.0f, NAN, NAN, NAN, 0.0f, 0.0f, 0.0f}},
+        {1, 2, 2, 0, {0.25f, 1.0f, 2.0f, 3.0f, -8.00024414f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f}},
+        {1, 2, 2, 1, {0.25f, 1.0f, 2.0f, 3.0f, 0.0f, 16.0002441f, 0.0f, 0.0f, 0.0f, 0.0f}},
+        {1, 2, 2, 2, {0.25f, 1.0f, 2.0f, 3.0f, 14.0f, 0.0f, 0.0f, 4.0f, 3.0f, 2.0f}},
+        {1, 2, 2, 3, {0.25f, 1.0f, 2.0f, 3.0f, NAN, NAN, NAN, 0.0f, 0.0f, 0.0f}},
+        {1, 3, 0, 0, {8.0f, 1.0f, 2.0f, 3.0f, -6.0f, 0.0f, 0.0f, 4.0f, 3.0f, 2.0f}},
+        {1, 3, 0, 1, {8.0f, 1.0f, 2.0f, 3.0f, 0.0f, 14.0f, 0.0f, 4.0f, 3.0f, 2.0f}},
+        {1, 3, 0, 2, {0.25f, 1.0f, 2.0f, 3.0f, 14.0f, 0.0f, 0.0f, 4.0f, 3.0f, 2.0f}},
+        {1, 3, 0, 3, {8.0f, 1.0f, 2.0f, 3.0f, 0.0f, 0.0f, 0.0f, 4.0f, 3.0f, 2.0f}},
+        {1, 3, 2, 0, {8.0f, 1.0f, 2.0f, 3.0f, -6.0f, 0.0f, 0.0f, 4.0f, 3.0f, 2.0f}},
+        {1, 3, 2, 1, {8.0f, 1.0f, 2.0f, 3.0f, 0.0f, 14.0f, 0.0f, 4.0f, 3.0f, 2.0f}},
+        {1, 3, 2, 2, {0.25f, 1.0f, 2.0f, 3.0f, 14.0f, 0.0f, 0.0f, 4.0f, 3.0f, 2.0f}},
+        {1, 3, 2, 3, {8.0f, 1.0f, 2.0f, 3.0f, 0.0f, 0.0f, 0.0f, 4.0f, 3.0f, 2.0f}},
+        {2, 0, 0, 0, {0.25f, 1.0f, 2.0f, 3.0f, -8.00024414f, 0.0f, 0.0f, -1.99926758f, 3.0f, 2.0f}},
+        {2, 0, 0, 1, {0.25f, 1.0f, 2.0f, 3.0f, -0.529843628f, 15.5895309f, 0.0f, 4.74997807f, 0.750065804f, 2.0f}},
+        {2, 0, 0, 2, {0.25f, 1.0f, 2.0f, 3.0f, 14.0f, 0.0f, 0.0f, 4.0f, 3.0f, 2.0f}},
+        {2, 0, 0, 3, {0.25f, 1.0f, 2.0f, 3.0f, -5.99951172f, 0.0f, 0.0f, -1.99853516f, 3.0f, 2.0f}},
+        {2, 0, 2, 0, {0.25f, 1.0f, 2.0f, 3.0f, -8.00024414f, 0.0f, 0.0f, -1.99926758f, 3.0f, 2.0f}},
+        {2, 0, 2, 1, {0.25f, 1.0f, 2.0f, 3.0f, -0.529843628f, 15.5895309f, 0.0f, 4.74997807f, 0.750065804f, 2.0f}},
+        {2, 0, 2, 2, {0.25f, 1.0f, 2.0f, 3.0f, 14.0f, 0.0f, 0.0f, 4.0f, 3.0f, 2.0f}},
+        {2, 0, 2, 3, {0.25f, 1.0f, 2.0f, 3.0f, -5.99951172f, 0.0f, 0.0f, -1.99853516f, 3.0f, 2.0f}},
+        {2, 1, 0, 0, {0.25f, 1.0f, 2.0f, 3.0f, -8.00024414f, 0.0f, 0.0f, 0.00048828125f, 3.0f, 2.0f}},
+        {2, 1, 0, 1, {0.25f, 1.0f, 2.0f, 3.0f, -0.529843628f, 15.5895309f, 0.0f, 4.49998522f, 1.50004387f, 2.0f}},
+        {2, 1, 0, 2, {0.25f, 1.0f, 2.0f, 3.0f, 14.0f, 0.0f, 0.0f, 4.0f, 3.0f, 2.0f}},
+        {2, 1, 0, 3, {0.25f, 1.0f, 2.0f, 3.0f, -5.99951172f, 0.0f, 0.0f, 0.0009765625f, 3.0f, 2.0f}},
+        {2, 1, 2, 0, {0.25f, 1.0f, 2.0f, 3.0f, -8.00024414f, 0.0f, 0.0f, 0.00048828125f, 3.0f, 2.0f}},
+        {2, 1, 2, 1, {0.25f, 1.0f, 2.0f, 3.0f, -0.529843628f, 15.5895309f, 0.0f, 4.49998522f, 1.50004387f, 2.0f}},
+        {2, 1, 2, 2, {0.25f, 1.0f, 2.0f, 3.0f, 14.0f, 0.0f, 0.0f, 4.0f, 3.0f, 2.0f}},
+        {2, 1, 2, 3, {0.25f, 1.0f, 2.0f, 3.0f, -5.99951172f, 0.0f, 0.0f, 0.0009765625f, 3.0f, 2.0f}},
+        {2, 2, 0, 0, {0.25f, 1.0f, 2.0f, 3.0f, -8.00024414f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f}},
+        {2, 2, 0, 1, {0.25f, 1.0f, 2.0f, 3.0f, -0.529843628f, 15.5895309f, 0.0f, 0.0f, 0.0f, 0.0f}},
+        {2, 2, 0, 2, {0.25f, 1.0f, 2.0f, 3.0f, 14.0f, 0.0f, 0.0f, 4.0f, 3.0f, 2.0f}},
+        {2, 2, 0, 3, {0.25f, 1.0f, 2.0f, 3.0f, -5.99951172f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f}},
+        {2, 2, 2, 0, {0.25f, 1.0f, 2.0f, 3.0f, -8.00024414f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f}},
+        {2, 2, 2, 1, {0.25f, 1.0f, 2.0f, 3.0f, -0.529843628f, 15.5895309f, 0.0f, 0.0f, 0.0f, 0.0f}},
+        {2, 2, 2, 2, {0.25f, 1.0f, 2.0f, 3.0f, 14.0f, 0.0f, 0.0f, 4.0f, 3.0f, 2.0f}},
+        {2, 2, 2, 3, {0.25f, 1.0f, 2.0f, 3.0f, -5.99951172f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f}},
+        {2, 3, 0, 0, {8.0f, 1.0f, 2.0f, 3.0f, -6.0f, 0.0f, 0.0f, 4.0f, 3.0f, 2.0f}},
+        {2, 3, 0, 1, {8.0f, 1.0f, 2.0f, 3.0f, 0.0f, 14.0f, 0.0f, 4.0f, 3.0f, 2.0f}},
+        {2, 3, 0, 2, {0.25f, 1.0f, 2.0f, 3.0f, 14.0f, 0.0f, 0.0f, 4.0f, 3.0f, 2.0f}},
+        {2, 3, 0, 3, {8.0f, 1.0f, 2.0f, 3.0f, 0.0f, 0.0f, 0.0f, 4.0f, 3.0f, 2.0f}},
+        {2, 3, 2, 0, {8.0f, 1.0f, 2.0f, 3.0f, -6.0f, 0.0f, 0.0f, 4.0f, 3.0f, 2.0f}},
+        {2, 3, 2, 1, {8.0f, 1.0f, 2.0f, 3.0f, 0.0f, 14.0f, 0.0f, 4.0f, 3.0f, 2.0f}},
+        {2, 3, 2, 2, {0.25f, 1.0f, 2.0f, 3.0f, 14.0f, 0.0f, 0.0f, 4.0f, 3.0f, 2.0f}},
+        {2, 3, 2, 3, {8.0f, 1.0f, 2.0f, 3.0f, 0.0f, 0.0f, 0.0f, 4.0f, 3.0f, 2.0f}},
+    };
+    const glm::vec3 points[] {{-6,0,0},{0,14,0},{14,0,0},{0,0,0}};
+    for (const auto& row : recorded) {
+        CAPTURE (row.capsules, row.response, row.flags, row.lane);
+        const CollisionCapsule capsules[] {{{0,-8,0},{0,1,0},16,8},{{2,-8,0},{0,1,0},16,8}};
+        CollisionState state {points[row.lane], {4,3,2}, {1,2,3}, .25f, 8};
+        collideModel (state, std::span (capsules).first (row.capsules),
+            static_cast<CollisionResponse> (row.response), .5f);
+        const float result[] {state.age,state.angularVelocity.x,state.angularVelocity.y,state.angularVelocity.z,
+            state.position.x,state.position.y,state.position.z,state.velocity.x,state.velocity.y,state.velocity.z};
+        for (size_t index=0;index<10;++index) {
+            CAPTURE (index);
+            if (std::isnan (row.streams[index])) REQUIRE (std::isnan (result[index]));
+            else REQUIRE (result[index] == row.streams[index]);
+        }
+    }
+    // Reversing overlapping bounds changes the last selected contact. The
+    // zero-axis first capsule must not poison the later valid contact.
+    CollisionState original {{0,0,0},{4,3,2},{1,2,3},.25f,8}, reversed = original;
+    const CollisionCapsule a {{0,-8,0},{0,1,0},16,8}, b {{2,-8,0},{0,1,0},16,8};
+    const std::array forward {a,b}, backward {b,a};
+    REQUIRE (collideModel (original, forward, CollisionResponse::Bounce, .5f));
+    REQUIRE (collideModel (reversed, backward, CollisionResponse::Bounce, .5f));
+    REQUIRE (original.position.x == -5.99951171875f);
+    REQUIRE (std::isnan (reversed.position.x));
+}
+
+TEST_CASE ("MODEL capsule construction composes current pose and nonuniform source bounds", "[particle][collision-model]") {
+    using namespace WallpaperEngine::Render::Objects;
+    PuppetSkeletonData::EmissionBound bound {{8,16,0},{}};
+    glm::mat4 b=glm::translate (glm::mat4(1),glm::vec3(-8,0,0));
+    std::copy (glm::value_ptr (b),glm::value_ptr (b)+16,bound.matrix.begin ());
+    const glm::mat4 bone=glm::translate (glm::mat4(1),glm::vec3(3,4,0));
+    const glm::mat4 source=glm::translate (glm::mat4(1),glm::vec3(100,200,0))
+        *glm::scale (glm::mat4(1),glm::vec3(2,3,1));
+    const glm::mat4 inverse=glm::translate (glm::mat4(1),glm::vec3(-90,-180,0));
+    const auto capsules=modelCollisionCapsules (std::span(&bound,1),std::span(&bone,1),source,inverse);
+    REQUIRE (capsules.size ()==1);
+    REQUIRE (capsules[0].start==glm::vec3(0,8,0));
+    REQUIRE (capsules[0].direction==glm::vec3(0,1,0));
+    REQUIRE (capsules[0].length==48);
+    REQUIRE (capsules[0].radius==16); // transformed X radius, not maximal ellipse scale
+    const auto signedAxis=modelCollisionCapsule ({-16,8,0},glm::mat4(1));
+    REQUIRE (signedAxis.direction==glm::vec3(1,0,0));
+    REQUIRE (signedAxis.start==glm::vec3(24,0,0));
+    REQUIRE (signedAxis.length==48);
+}
+
+TEST_CASE ("MODEL compiled dependency ordinals preserve image records and duplicate order", "[particle][collision-model]") {
+    using namespace WallpaperEngine::Data::Model;
+    using WallpaperEngine::Data::Parsers::ObjectParser;
+    using WallpaperEngine::Data::JSON::JSON;
+    Project project {};
+    const auto parsed=ObjectParser::parse (JSON::parse (R"({"id":1,"dependencies":[
+        {"type":"emitterimage","index":0,"id":10},{"type":"collisionmodel","index":1,"id":20},
+        {"type":"collisionmodel","index":2,"id":21}],"particle":{"emitter":[{"name":"boxrandom"},{"name":"layerimage"}],
+        "operator":[{"name":"collisionmodel","flags":2},{"name":"movement"},
+        {"name":"collisionmodel","collisionbehavior":"delete"}]}})"),project);
+    auto& particle=*parsed->as<Particle> ();
+    REQUIRE (particle.operators.size ()==3);
+    const auto& first=*particle.operators[0]->as<CollisionOperator> ();
+    const auto& second=*particle.operators[2]->as<CollisionOperator> ();
+    REQUIRE (first.kind==CollisionOperator::Kind::Model);
+    REQUIRE (first.dependencyIndex==1);
+    REQUIRE (second.dependencyIndex==2);
+    REQUIRE (first.flags==2);
+    REQUIRE (first.bounceFactor==.5f);
+    REQUIRE (second.behavior==CollisionOperator::Behavior::Delete);
+    // Scheduling is based on high-water, including dead slots, never compact
+    // live count. Every block is visited once across its native frame phases.
+    constexpr uint32_t high=20001;
+    for (uint32_t slot : {0u,4u,8u,9996u,20000u}) {
+        unsigned visits=0;
+        for(uint32_t frame=0;frame<3;++frame) visits+=modelCollisionSlotScheduled(slot,high,frame);
+        REQUIRE (visits==1);
+    }
+    REQUIRE (needsNativeSlotStreams(particle));
+    REQUIRE (nativeSlotScopeError(particle)); // IMAGE readback needs separate physical-stream validation.
+    particle.emitters.pop_back ();
+    REQUIRE_FALSE (nativeSlotScopeError(particle));
+}
+
+TEST_CASE ("MODEL missing skeleton bounds use authored mesh boxes with an explicit legacy boundary", "[particle][collision-model]") {
+    using namespace WallpaperEngine::Render::Objects;
+    std::array<PuppetMeshData, 2> meshes;
+    meshes[0].authoredBounds = std::array<float, 6> {-8, -16, -2, 8, 16, 2};
+    meshes[1].authoredBounds = std::array<float, 6> {4, -4, -1, 12, 20, 1};
+    // Triangle positions cannot replace the MDLV's authored asset bounds.
+    meshes[0].positions.push_back ({1000, 1000, 1000});
+    const auto bound = modelCollisionFallbackBound (meshes);
+    REQUIRE (bound);
+    REQUIRE (bound->extent == std::array<float, 3> {10, 18, 2});
+    const auto capsule = modelCollisionCapsule (glm::make_vec3 (bound->extent.data ()),
+        glm::make_mat4 (bound->matrix.data ()));
+    REQUIRE (capsule.start == glm::vec3 (2, -6, 0));
+    REQUIRE (capsule.length == 16);
+    REQUIRE (capsule.radius == 10);
+    meshes[1].authoredBounds.reset ();
+    REQUIRE_FALSE (modelCollisionFallbackBound (meshes));
+    REQUIRE_FALSE (modelCollisionFallbackBound ({}));
+    meshes[0].authoredBounds = std::array<float, 6> {0, -1, -1, 0, 1, 1};
+    REQUIRE_FALSE (modelCollisionFallbackBound (std::span (meshes).first (1)));
 }

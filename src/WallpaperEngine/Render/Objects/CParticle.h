@@ -148,7 +148,7 @@ protected:
     // Emitter creators
     EmitterFunc createBoxEmitter (const ParticleEmitter& emitter, size_t index);
     EmitterFunc createSphereEmitter (const ParticleEmitter& emitter, size_t index);
-    EmitterFunc createImageEmitter (const ParticleEmitter& emitter, size_t index);
+    EmitterFunc createImageEmitter (const ParticleEmitter& emitter, size_t index, size_t dependencyIndex);
 
     // Initializer creators
     InitializerFunc createColorRandomInitializer (const ColorRandomInitializer& init);

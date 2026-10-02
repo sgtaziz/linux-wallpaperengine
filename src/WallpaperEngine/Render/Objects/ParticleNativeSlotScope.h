@@ -12,7 +12,9 @@ namespace WallpaperEngine::Render::Objects::ParticleCore {
 inline bool needsNativeSlotStreams (const Data::Model::Particle& particle) {
     using namespace Data::Model;
     return std::any_of (particle.operators.begin (), particle.operators.end (), [] (const auto& op) {
-        return op && (op->template is<BoidsOperator> () || (op->template is<VectorRemapValueOperator> ()
+        return op && (op->template is<BoidsOperator> () || (op->template is<CollisionOperator> ()
+            && op->template as<CollisionOperator> ()->kind == CollisionOperator::Kind::Model)
+            || (op->template is<VectorRemapValueOperator> ()
             && op->template as<VectorRemapValueOperator> ()->output == VectorRemapValueOperator::Output::ControlPoint));
     });
 }
@@ -31,7 +33,13 @@ inline std::optional<std::string> nativeSlotScopeError (
     const bool boids = std::any_of (particle.operators.begin (), particle.operators.end (), [] (const auto& op) {
         return op && op->template is<BoidsOperator> ();
     });
-    const std::string owner = boids ? "Native boids physical streams" : "Runtime control-point output";
+    const bool modelCollision = std::any_of (particle.operators.begin (), particle.operators.end (), [] (const auto& op) {
+        return op && op->template is<CollisionOperator> ()
+            && op->template as<CollisionOperator> ()->kind == CollisionOperator::Kind::Model;
+    });
+    const bool ordinarySlots = (boids || modelCollision) && !controlPointOutput;
+    const std::string owner = boids ? "Native boids physical streams" : modelCollision
+        ? "Native model collision physical streams" : "Runtime control-point output";
     if (particleRuntimeParent || !particle.children.empty ())
         return owner + " requires a root particle node without event children";
     if (particle.hasUnsupportedComponents)
@@ -48,7 +56,7 @@ inline std::optional<std::string> nativeSlotScopeError (
         if (op->is<BoidsOperator> () && op->blendEnvelope)
             return owner + " boids blend envelope requires separate per-lane clock validation";
         if (op->is<MovementOperator> () || op->is<CapVelocityOperator> () || op->is<BoidsOperator> ()) continue;
-        if (boids && !controlPointOutput && (op->is<AngularMovementOperator> () || op->is<CollisionOperator> ()
+        if (ordinarySlots && (op->is<AngularMovementOperator> () || op->is<CollisionOperator> ()
             || op->is<AlphaFadeOperator> () || op->is<SizeChangeOperator> ()
             || op->is<AlphaChangeOperator> () || op->is<ColorChangeOperator> ())) continue;
         if (op->is<ScalarRemapValueOperator> ()) {
@@ -60,7 +68,7 @@ inline std::optional<std::string> nativeSlotScopeError (
         }
         if (op->is<VectorRemapValueOperator> ()
             && op->as<VectorRemapValueOperator> ()->transform == VectorRemapValueOperator::Transform::Identity) continue;
-        return boids && !controlPointOutput
+        return ordinarySlots
             ? owner + " operator lacks physical-slot validation (supported: boids, movement, angularmovement, capvelocity, primitive collisions, fades/size/color, identity remaps)"
             : owner + " supports boids, movement, capvelocity and identity remaps";
     }
