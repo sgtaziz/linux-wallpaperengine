@@ -2,10 +2,12 @@
 // https://github.com/if1live/cef-gl-example
 // https://github.com/andmcgregor/cefgui
 #include "CWeb.h"
+#include "WallpaperEngine/Render/Drivers/VideoDriver.h"
 #include "WallpaperEngine/WebBrowser/CEF/WPSchemeHandlerFactory.h"
 #include "WallpaperEngine/WebBrowser/WebPropertyPayload.h"
 #include "WallpaperEngine/WebBrowser/WebAudioFrame.h"
 #include "include/cef_process_message.h"
+#include <stdexcept>
 
 #include "WallpaperEngine/Data/Model/Project.h"
 #include "WallpaperEngine/Data/Model/Wallpaper.h"
@@ -23,49 +25,63 @@ CWeb::CWeb (
     // setup framebuffers
     this->setupFramebuffers ();
 
-    CefWindowInfo window_info;
-    window_info.SetAsWindowless (0);
-
     this->m_renderHandler = new WebBrowser::CEF::RenderHandler (this);
-
-    CefBrowserSettings browserSettings;
-    // documentaion says that 60 fps is maximum value
-    browserSettings.windowless_frame_rate = std::max (60, context.getApp ().getContext ().settings.render.maximumFPS);
 
     const auto propertyPayload = WebBrowser::webPropertyPayload (this->getWeb ().project);
     this->m_client = new WebBrowser::CEF::BrowserClient (m_renderHandler, propertyPayload,
         WebBrowser::webFilePropertyPaths (this->getWeb ().project, propertyPayload));
+}
+
+void CWeb::createBrowser () {
+    // Pages commonly snapshot the viewport at script startup. Create the
+    // browser only after renderFrame supplies the actual output dimensions.
+    CefWindowInfo window_info;
+    window_info.SetAsWindowless (0);
+    window_info.bounds = CefRect (0, 0, this->getWidth (), this->getHeight ());
+    CefBrowserSettings browserSettings;
+    browserSettings.windowless_frame_rate = std::max (60,
+        this->getContext ().getApp ().getContext ().settings.render.maximumFPS);
     // use the custom scheme for the wallpaper's files
     const std::string htmlURL = WPSchemeHandlerFactory::generateSchemeName (this->getWeb ().project.workshopId)
 	+ "://root/" + this->getWeb ().filename;
     this->m_browser
 	= CefBrowserHost::CreateBrowserSync (window_info, this->m_client, htmlURL, browserSettings, nullptr, nullptr);
+    if (!this->m_browser) throw std::runtime_error ("Cannot create web wallpaper browser");
 }
 
 void CWeb::setSize (const int width, const int height) {
-    this->m_width = width > 0 ? width : this->m_width;
-    this->m_height = height > 0 ? height : this->m_height;
-
-    // do not refresh the texture if any of the sizes are invalid
-    if (this->m_width <= 0 || this->m_height <= 0) {
-	return;
-    }
-
-    // reconfigure the texture
-    glBindTexture (GL_TEXTURE_2D, this->getWallpaperTexture ());
-    glTexImage2D (
-	GL_TEXTURE_2D, 0, GL_RGBA8, this->getWidth (), this->getHeight (), 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr
-    );
+    if (width <= 0 || height <= 0) return;
+    this->m_sceneFBO->resize (width, height, width, height);
+    this->m_width = width;
+    this->m_height = height;
 
     // Notify cef that it was resized(maybe it's not even needed)
-    this->m_browser->GetHost ()->WasResized ();
+    if (this->m_browser) this->m_browser->GetHost ()->WasResized ();
 }
 
 void CWeb::renderFrame (const glm::ivec4& viewport) {
-    // ensure the viewport matches the window size, and resize if needed
-    if (viewport.z != this->getWidth () || viewport.w != this->getHeight ()) {
-	this->setSize (viewport.z, viewport.w);
+    if (viewport.z <= 0 || viewport.w <= 0) return;
+    glm::ivec2 size (viewport.z, viewport.w);
+    if (!this->m_browser) {
+        const auto mode = this->getContext ().getApp ().getContext ().settings.render.mode;
+        if (mode == Application::ApplicationContext::NORMAL_WINDOW
+            || mode == Application::ApplicationContext::EXPLICIT_WINDOW) {
+            auto& driver = this->getContext ().getDriver ();
+            // The first surface presentation and its event poll deliver the
+            // compositor's initial window configuration. Do not start page
+            // scripts with the provisional dimensions before that happens.
+            if (driver.getFrameCounter () == 0) return;
+            // Output viewports refresh before the event poll, so their cached
+            // size can lag the newly configured framebuffer by one frame.
+            size = driver.getFramebufferSize ();
+            if (size.x <= 0 || size.y <= 0) return;
+        }
     }
+    // ensure the viewport matches the window size, and resize if needed
+    if (size.x != this->getWidth () || size.y != this->getHeight ()) {
+	this->setSize (size.x, size.y);
+    }
+    if (!this->m_browser) this->createBrowser ();
 
     // ensure the virtual mouse position is up to date
     this->updateMouse (viewport);
@@ -139,5 +155,5 @@ CWeb::~CWeb () {
     // Closing can leave queued CEF callbacks while the browser releases its
     // client. Keep the ref-counted handler alive, without a destroyed owner.
     this->m_renderHandler->detach ();
-    this->m_browser->GetHost ()->CloseBrowser (true);
+    if (this->m_browser) this->m_browser->GetHost ()->CloseBrowser (true);
 }

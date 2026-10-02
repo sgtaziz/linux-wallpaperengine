@@ -40,6 +40,7 @@ public:
 protected:
     void renderFrame (const glm::ivec4& viewport) override;
     void updateMouse (const glm::ivec4& viewport);
+    void createBrowser ();
     const Web& getWeb () const { return *this->getWallpaperData ().as<Web> (); }
 
     friend class CWallpaper;

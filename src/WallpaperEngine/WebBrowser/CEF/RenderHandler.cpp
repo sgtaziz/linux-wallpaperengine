@@ -22,10 +22,10 @@ void RenderHandler::OnPaint (
     CefRefPtr<CefBrowser> browser, PaintElementType type, const RectList& dirtyRects, const void* buffer,
     const int width, const int height
 ) {
-    if (!m_webdata) return;
+    if (!m_webdata || type != PET_VIEW || width != getWidth () || height != getHeight ()) return;
     glActiveTexture (GL_TEXTURE0);
     glBindTexture (GL_TEXTURE_2D, this->texture ());
-    glTexImage2D (GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_BGRA_EXT, GL_UNSIGNED_BYTE, buffer);
+    glTexSubImage2D (GL_TEXTURE_2D, 0, 0, 0, width, height, GL_BGRA_EXT, GL_UNSIGNED_BYTE, buffer);
     glBindTexture (GL_TEXTURE_2D, 0);
 }
 
