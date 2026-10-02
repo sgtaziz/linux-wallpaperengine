@@ -58,6 +58,10 @@ struct PuppetBoneRecord {
 };
 
 struct PuppetSkeletonData {
+    struct EmissionBound {
+        std::array<float, 3> extent {};
+        std::array<float, 16> matrix {};
+    };
     int version = 0;
     size_t sectionEndOffset = 0;
     size_t boneRecordsEndOffset = 0;
@@ -69,6 +73,7 @@ struct PuppetSkeletonData {
     std::vector<int32_t> mappingRecordByBone;
     std::vector<PuppetBoneRecord> bones;
     std::vector<std::array<float, 16>> optionalRestMatrices;
+    std::vector<EmissionBound> emissionBounds;
 };
 
 struct PuppetClipHeader {

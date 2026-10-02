@@ -30,6 +30,7 @@ class CPass;
 } // namespace WallpaperEngine::Render::Objects::Effects
 
 namespace WallpaperEngine::Render::Objects {
+namespace ParticleCore { struct ImageEmitterSample; }
 class CImage final : public CRenderable, public ScriptableObject {
     friend CObject;
 
@@ -47,7 +48,8 @@ public:
     void setAlignment (std::string alignment) { m_alignment = std::move (alignment); }
     [[nodiscard]] std::optional<glm::mat4> puppetAttachmentTransform (const std::string& name) const;
     [[nodiscard]] std::optional<glm::mat4> puppetEmissionBoneTransform (uint8_t boneIndex) const;
-    /** Source-pixel image emission needs native puppet bone association. */
+    [[nodiscard]] std::optional<glm::mat4> puppetPreviousEmissionBoneTransform (uint8_t boneIndex) const;
+    [[nodiscard]] bool assignPuppetEmissionBones (std::span<ParticleCore::ImageEmitterSample> samples) const;
     [[nodiscard]] bool hasPuppetEmissionDeformation () const;
     [[nodiscard]] glm::vec2 getSize () const;
     /** Execute a named authored material function on this image's effect targets. */
@@ -160,6 +162,9 @@ private:
     std::optional<PuppetSkeletonData> m_puppetSkeleton;
     std::optional<PuppetAnimationHeader> m_puppetAnimation;
     std::vector<glm::mat4> m_puppetCurrentGlobals;
+    std::vector<glm::mat4> m_puppetEmissionBindGlobals;
+    std::vector<glm::mat4> m_puppetEmissionInverseBind;
+    PuppetEmissionWorldHistory m_puppetEmissionWorldHistory;
     uint32_t m_puppetPoseFrame = UINT32_MAX;
     std::vector<PuppetPoseSample> m_puppetReferencePose;
     std::vector<glm::mat4> m_puppetInverseBind;
