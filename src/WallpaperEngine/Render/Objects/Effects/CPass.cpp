@@ -320,7 +320,8 @@ CPass::resolveTextureAnimationState (const std::shared_ptr<const TextureProvider
     const auto& frames = texture->getFrames ();
     const auto* image = dynamic_cast<const CImage*> (&m_renderable);
     const auto imageFrame = image ? image->textureAnimationFrameOverride () : std::nullopt;
-    const auto* sharedTexture = image && !imageFrame
+    const bool explicitTextureFrame = m_textureFrameOverride && texture == m_renderable.getTexture ();
+    const auto* sharedTexture = !imageFrame && !explicitTextureFrame
         ? dynamic_cast<const CTexture*> (texture.get ()) : nullptr;
     const auto& sharedAnimation = sharedTexture ? sharedTexture->getAnimationPlayback ()
         : std::shared_ptr<SharedTextureAnimation> {};

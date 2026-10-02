@@ -5,6 +5,7 @@
 #include "WallpaperEngine/Scripting/SceneScriptClassRegistration.h"
 #include "WallpaperEngine/Application/RenderFrameClock.h"
 #include "WallpaperEngine/Render/Wallpapers/ParticleSceneClock.h"
+#include "WallpaperEngine/Render/Objects/ParticleCore.h"
 
 #include <chrono>
 #include <memory>
@@ -13,6 +14,34 @@
 using WallpaperEngine::Scripting::EngineTimers;
 using WallpaperEngine::Scripting::registerSceneScriptClass;
 using namespace std::chrono_literals;
+
+TEST_CASE ("Loading time does not advance the first live particle schedule", "[particle][clock][particle-stages]") {
+    using namespace WallpaperEngine::Render::Objects::ParticleCore;
+    float current = 0.0f;
+    float previous = 0.0f;
+    EmitterScheduleConfig schedule {};
+    schedule.rate = 2.0f;
+    auto state = initialState (schedule);
+    const auto random = [] (float low, float) { return low; };
+
+    // The host discards seven seconds of setup. Absolute shader/runtime time
+    // remains intact, while a warmed particle still consumes the next frame.
+    WallpaperEngine::Application::resumeRenderFrameClock (7.0f, current, previous);
+    float warmedAge = 0.1f;
+    uint32_t births = 0;
+    for (int frame = 1; frame <= 31; ++frame) {
+        WallpaperEngine::Application::sampleRenderFrameClock (
+            7.0f + frame * 0.016f, current, previous);
+        const float dt = current - previous;
+        warmedAge += dt;
+        births += advanceEmitter (schedule, state, dt, 16, random);
+        REQUIRE (births == 0);
+    }
+    REQUIRE (warmedAge == Catch::Approx (0.596f).margin (0.00001f));
+    WallpaperEngine::Application::sampleRenderFrameClock (7.512f, current, previous);
+    REQUIRE (advanceEmitter (schedule, state, current - previous, 16, random) == 1);
+    REQUIRE (current == Catch::Approx (7.512f));
+}
 
 TEST_CASE ("Fullscreen resume excludes the paused interval from the next scene tick", "[particle][clock]") {
     float current = 10.0f;

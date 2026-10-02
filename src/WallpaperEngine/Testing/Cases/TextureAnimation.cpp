@@ -13,6 +13,37 @@ using WallpaperEngine::Render::framePhaseAtTime;
 using WallpaperEngine::Render::particleSequenceCycles;
 using WallpaperEngine::Render::particleAtlasBlendEnabled;
 
+TEST_CASE ("Separate particle texture pages share an authored clock across births and renderer passes",
+           "[particle][texture][animation][particle-pages]") {
+    std::vector<FrameSharedPtr> frames;
+    for (unsigned page = 0; page < 2; ++page) {
+        auto frame = std::make_shared<Frame> ();
+        frame->frameNumber = page;
+        frame->frametime = 0.5f;
+        frames.push_back (std::move (frame));
+    }
+    WallpaperEngine::Render::SharedTextureAnimation texture (frames);
+    // A second birth/material pass joins the existing texture clock. Sampling
+    // twice in one render frame cannot accelerate it, and neither a six-second
+    // particle lifetime nor a late birth restarts the half-second page duration.
+    texture.sample (0.25f, 10);
+    REQUIRE (texture.getFrame () == 0);
+    texture.sample (0.25f, 10);
+    REQUIRE (texture.cursor ().subframe == 0.25f);
+    texture.sample (0.25f, 11);
+    REQUIRE (texture.getFrame () == 1);
+    texture.sample (0.25f, 11);
+    REQUIRE (texture.cursor ().subframe == 0.0f);
+    texture.sample (0.25f, 12);
+    REQUIRE (texture.getFrame () == 1);
+    texture.sample (0.25f, 13);
+    REQUIRE (texture.getFrame () == 0);
+
+    // Atlas UV animation retains its independent lifetime-normalized shader
+    // sequence; it must not replace this separate-page shared material clock.
+    REQUIRE (particleSequenceCycles (0.5, 6.0, 1.0) == Catch::Approx (1.0 / 12.0));
+}
+
 TEST_CASE ("Native atlas sequence blend respects particle mode and flag 2",
            "[particle][texture][animation]") {
     // The native renderer supplies this combo even when the material omits it

@@ -2487,7 +2487,7 @@ TEST_CASE ("Scripted particle births borrow future emitter rate credit", "[parti
 
     config.delay = 0.5f;
     state = initialState (config);
-    REQUIRE (advanceEmitterForced (config, state, 3, 10, zeroRandom) == 0);
+    REQUIRE (advanceEmitterForced (config, state, 3, 10, zeroRandom) == 3);
     REQUIRE (state.instantaneousRemaining == 2);
     REQUIRE (state.fractional == 0.0f);
 
@@ -2517,6 +2517,33 @@ TEST_CASE ("Scripted particle births borrow future emitter rate credit", "[parti
     state.fractional = 1.75f;
     REQUIRE (advanceEmitterForced (config, state, 2, 10, zeroRandom) == 3);
     REQUIRE (state.fractional == -1.25f);
+
+    // Native's paused forced path bypasses scheduler credit consumption. A
+    // scripted birth during pause must not delay subsequent rate emissions.
+    config.rate = 2.0f;
+    config.instantaneous = 2;
+    config.periodic = true;
+    state = initialState (config);
+    state.fractional = 0.25f;
+    state.periodTimer = 0.0f;
+    int randomCalls = 0;
+    periodRestarted = true;
+    REQUIRE (advanceEmitterForced (config, state, 3, 2,
+        [&] (float min, float) { ++randomCalls; return min; }, &periodRestarted, true) == 2);
+    REQUIRE (state.fractional == 0.25f);
+    REQUIRE (state.instantaneousRemaining == 2);
+    REQUIRE (state.periodTimer == 0);
+    REQUIRE (randomCalls == 0);
+    REQUIRE_FALSE (periodRestarted);
+    config.periodic = false;
+    config.instantaneous = 0;
+    state.instantaneousRemaining = 0;
+    REQUIRE (advanceEmitter (config, state, 0.4f, 10, zeroRandom) == 1);
+    REQUIRE (state.fractional == Catch::Approx (0.05f));
+    state.expired = true;
+    REQUIRE (advanceEmitterForced (config, state, 1, 10, zeroRandom) == 1);
+    REQUIRE (state.expired);
+    REQUIRE (state.fractional == Catch::Approx (0.05f));
 }
 
 TEST_CASE ("Native scene MT draw uses top 24 bits across twists", "[particle][random]") {
