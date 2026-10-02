@@ -28,7 +28,11 @@ bool WPSchemeHandler::Open (CefRefPtr<CefRequest> request, bool& handle_request,
     }
 
     const std::string host = CefString (&parts.host);
-    const std::string path = CefString (&parts.path);
+    // Chromium encodes authored filenames (including spaces and non-ASCII
+    // characters) in the URL; asset lookup uses the decoded filename.
+    const std::string path = CefURIDecode (
+        CefString (&parts.path), true,
+        static_cast<cef_uri_unescape_rule_t> (UU_NORMAL | UU_SPACES | UU_URL_SPECIAL_CHARS_EXCEPT_PATH_SEPARATORS));
 
     const std::string file = path.substr (1);
 

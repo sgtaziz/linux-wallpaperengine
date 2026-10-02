@@ -3,6 +3,9 @@
 // https://github.com/andmcgregor/cefgui
 #include "CWeb.h"
 #include "WallpaperEngine/WebBrowser/CEF/WPSchemeHandlerFactory.h"
+#include "WallpaperEngine/WebBrowser/WebPropertyPayload.h"
+#include "WallpaperEngine/WebBrowser/WebAudioFrame.h"
+#include "include/cef_process_message.h"
 
 #include "WallpaperEngine/Data/Model/Project.h"
 #include "WallpaperEngine/Data/Model/Wallpaper.h"
@@ -29,7 +32,9 @@ CWeb::CWeb (
     // documentaion says that 60 fps is maximum value
     browserSettings.windowless_frame_rate = std::max (60, context.getApp ().getContext ().settings.render.maximumFPS);
 
-    this->m_client = new WebBrowser::CEF::BrowserClient (m_renderHandler);
+    const auto propertyPayload = WebBrowser::webPropertyPayload (this->getWeb ().project);
+    this->m_client = new WebBrowser::CEF::BrowserClient (m_renderHandler, propertyPayload,
+        WebBrowser::webFilePropertyPaths (this->getWeb ().project, propertyPayload));
     // use the custom scheme for the wallpaper's files
     const std::string htmlURL = WPSchemeHandlerFactory::generateSchemeName (this->getWeb ().project.workshopId)
 	+ "://root/" + this->getWeb ().filename;
@@ -78,6 +83,21 @@ void CWeb::renderFrame (const glm::ivec4& viewport) {
     // But for now let it be like this
     //  glClear (GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
     CefDoMessageLoopWork ();
+
+    const auto now = std::chrono::steady_clock::now ();
+    if (now >= m_nextAudioFrame) {
+        const auto& recorder = this->getAudioContext ().getRecorder ();
+        const auto values = WebBrowser::webAudioFrame (recorder.audio64Left, recorder.audio64Right);
+        const auto message = CefProcessMessage::Create ("wallpaperAudioFrame");
+        const auto arguments = message->GetArgumentList ();
+        arguments->SetSize (values.size ());
+        for (size_t index = 0; index < values.size (); ++index)
+            arguments->SetDouble (index, values[index]);
+        this->m_browser->GetMainFrame ()->SendProcessMessage (PID_RENDERER, message);
+        const auto interval = std::chrono::microseconds (33333);
+        m_nextAudioFrame += interval;
+        if (m_nextAudioFrame < now - interval) m_nextAudioFrame = now + interval;
+    }
 }
 
 void CWeb::updateMouse (const glm::ivec4& viewport) {

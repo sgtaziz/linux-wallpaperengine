@@ -32,6 +32,8 @@ struct Project {
     bool supportsAudioProcessing;
     /** All the available properties that the project defines for the user to change */
     Properties properties;
+    /** Web property combo values preserve the authored numeric/string distinction. */
+    std::map<std::string, bool> numericComboProperties;
     /** The wallpaper this project defines */
     WallpaperUniquePtr wallpaper;
     /** Abstraction over asset loading to provide access to them */

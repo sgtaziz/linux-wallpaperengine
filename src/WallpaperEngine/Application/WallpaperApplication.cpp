@@ -76,22 +76,23 @@ void WallpaperApplication::initializeSubsystems () {
     m_mediaSource = std::make_unique<WallpaperEngine::Media::DBusMediaSource> (std::chrono::milliseconds (2000));
 }
 
-AssetLocatorUniquePtr WallpaperApplication::setupAssetLocator (const std::string& bg) const {
+AssetLocatorUniquePtr WallpaperApplication::setupAssetLocator (
+    const std::vector<std::filesystem::path>& directories) const {
     auto container = std::make_unique<Container> ();
-
-    const std::filesystem::path path = bg;
 
     container->registerAdapterFactory (std::make_unique<MediaCoverFactory> (*this->m_mediaSource));
     container->mount ("$mediaThumbnail", "$mediaThumbnail");
-    container->mount (path, "/");
+    for (const auto& path : directories) {
+        container->mount (path, "/");
 
-    try {
-	container->mount (path / "scene.pkg", "/");
-    } catch (std::runtime_error&) { }
+        try {
+            container->mount (path / "scene.pkg", "/");
+        } catch (std::runtime_error&) { }
 
-    try {
-	container->mount (path / "gifscene.pkg", "/");
-    } catch (std::runtime_error&) { }
+        try {
+            container->mount (path / "gifscene.pkg", "/");
+        } catch (std::runtime_error&) { }
+    }
 
     try {
 	container->mount (this->m_context.settings.general.assets, "/");
@@ -225,9 +226,11 @@ void WallpaperApplication::loadBackgrounds () {
 }
 
 ProjectUniquePtr WallpaperApplication::loadBackground (const std::string& bg) {
-    auto container = this->setupAssetLocator (bg);
-    auto json = WallpaperEngine::Data::JSON::parseAuthoringJson (
-        container->readString ("project.json"), "project.json");
+    auto resolved = WallpaperEngine::Data::Parsers::ProjectParser::resolve (bg, [] (const std::string& id) {
+        return Steam::FileSystem::findWorkshopDirectory (431960, id).value_or (std::filesystem::path {});
+    });
+    auto container = this->setupAssetLocator (resolved.assetDirectories);
+    auto json = std::move (resolved.data);
 
     // when a background is loaded, reset the screenshot variables
     // this allows taking screenshots after a background changes
@@ -355,9 +358,10 @@ bool WallpaperApplication::makeAnyViewportCurrent () const {
 bool WallpaperApplication::preflightWallpaper (const std::string& path) {
     try {
 	// avoid mutating state, just ensure project.json parses
-	auto container = this->setupAssetLocator (path);
-    const auto json = WallpaperEngine::Data::JSON::parseAuthoringJson (
-        container->readString ("project.json"), "project.json");
+	const auto resolved = WallpaperEngine::Data::Parsers::ProjectParser::resolve (path, [] (const std::string& id) {
+            return Steam::FileSystem::findWorkshopDirectory (431960, id).value_or (std::filesystem::path {});
+        });
+	const auto& json = resolved.data;
 	if (!json.contains ("type") || !json.contains ("file")) {
 	    sLog.error ("Preflight failed for ", path, ": missing required fields");
 	    return false;

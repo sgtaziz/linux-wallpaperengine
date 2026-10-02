@@ -85,9 +85,9 @@ private:
     /**
      * Sets up an asset locator for the given background
      *
-     * @param bg
+     * @param directories Project asset directories, in lookup order
      */
-    AssetLocatorUniquePtr setupAssetLocator (const std::string& bg) const;
+    AssetLocatorUniquePtr setupAssetLocator (const std::vector<std::filesystem::path>& directories) const;
     /**
      * Initializes subsystems required for application operation
      */

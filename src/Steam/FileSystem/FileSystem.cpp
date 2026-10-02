@@ -4,6 +4,9 @@
 #include <cstdlib>
 #include <filesystem>
 #include <sstream>
+#include <fstream>
+#include <regex>
+#include <set>
 #include <sys/stat.h>
 
 std::vector<std::string> appDirectoryPaths = {
@@ -36,7 +39,7 @@ std::filesystem::path detectHomepath () {
     return path;
 }
 
-std::filesystem::path Steam::FileSystem::workshopDirectory (int appID, const std::string& contentID) {
+std::optional<std::filesystem::path> Steam::FileSystem::findWorkshopDirectory (int appID, const std::string& contentID) {
     auto homepath = detectHomepath ();
 
     for (const auto& current : workshopDirectoryPaths) {
@@ -48,6 +51,29 @@ std::filesystem::path Steam::FileSystem::workshopDirectory (int appID, const std
 
 	return currentpath;
     }
+    // Workshop content can live in any library registered with Steam.
+    std::set<std::filesystem::path> libraries;
+    const std::regex pathLine (R"vdf(^\s*"path"\s*"([^"]+)"\s*$)vdf");
+    for (const auto& current : appDirectoryPaths) {
+        const auto steamapps = (homepath / current).parent_path ();
+        for (const auto& metadata : {steamapps / "libraryfolders.vdf",
+                                    steamapps.parent_path () / "config/libraryfolders.vdf"}) {
+            std::ifstream input (metadata);
+            for (std::string line; std::getline (input, line);) {
+                std::smatch match;
+                if (std::regex_match (line, match, pathLine)) libraries.emplace (match[1].str ());
+            }
+        }
+    }
+    for (const auto& library : libraries) {
+        const auto path = library / "steamapps/workshop/content" / std::to_string (appID) / contentID;
+        if (std::filesystem::is_directory (path)) return path;
+    }
+    return std::nullopt;
+}
+
+std::filesystem::path Steam::FileSystem::workshopDirectory (int appID, const std::string& contentID) {
+    if (const auto path = findWorkshopDirectory (appID, contentID)) return *path;
 
     sLog.exception ("Cannot find workshop directory for steam app ", appID, " and content ", contentID);
 }
