@@ -30,12 +30,6 @@ struct ImageDimensionFlags {
     bool projectlayer = false;
 };
 
-// Automatic projection is inferred before image source loading. Omitted
-// authored size must not add the logical constructor default to that extent.
-inline glm::vec2 imageAutoProjectionExtent (glm::vec2 origin, std::optional<glm::vec2> authoredSize) {
-    return glm::abs (origin) + authoredSize.value_or (glm::vec2 (0.0f)) * 0.5f;
-}
-
 inline LoadedImageDimensions loadedImageDimensions (
     glm::vec2 authored, ImageDimensionFlags flags,
     std::optional<glm::vec2> source, glm::vec2 projection
