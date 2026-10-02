@@ -321,6 +321,7 @@ private:
     uint32_t m_maxParticles { 0 };
 
     std::vector<EmitterFunc> m_emitters;
+    std::vector<ParticleCore::ImageEmitterSourceHistory> m_imageEmitterHistory;
     std::vector<uint8_t> m_emitterCanProduce;
     std::vector<InitializerFunc> m_initializers;
     glm::mat3 m_birthInitializerBasis { 1.0f };

@@ -18,6 +18,7 @@
 
 #include <glm/glm.hpp>
 #include <glm/gtc/constants.hpp>
+#include <glm/gtc/matrix_transform.hpp>
 
 namespace WallpaperEngine::Render::Objects::ParticleCore {
 
@@ -272,6 +273,57 @@ struct ImageEmitterSample {
     uint8_t bone = 0xff;
     int16_t x, y;
 };
+
+// The emitter's previous source matrix survives timer/sequence resets
+// (14022f6c0). Only a ready, positive image-emission attempt advances it.
+struct ImageEmitterSourceHistory {
+    glm::mat4 previousWorld {1.0f};
+};
+
+inline glm::vec3 imageEmitterPoint (const glm::mat4& matrix, const glm::vec3& pixel) {
+    glm::vec3 result;
+    for (int axis = 0; axis < 3; ++axis)
+        result[axis] = ((matrix[0][axis] * pixel.x + matrix[1][axis] * pixel.y)
+            + matrix[2][axis] * pixel.z) + matrix[3][axis];
+    return result;
+}
+
+inline glm::vec3 imageEmitterSourceVelocity (
+    const glm::vec3& current, const glm::vec3& previous, float sceneDelta, float speed
+) {
+    // 14023aaa5..23ab08 divides each displacement by the current scene
+    // delta before multiplying the sampled speed, not the attempt interval.
+    return {((current.x - previous.x) / sceneDelta) * speed,
+            ((current.y - previous.y) / sceneDelta) * speed,
+            ((current.z - previous.z) / sceneDelta) * speed};
+}
+
+inline glm::mat4 imageEmitterInvocationMatrix (
+    const glm::mat4& simulationStack, bool orthographic, glm::vec2 canvas,
+    bool forced, bool world
+) {
+    // Script API 14024cac0 calls the emitter directly on the scene's identity
+    // stack. Automatic local emission instead runs inside 140229760's push,
+    // which includes the current parent/child stack, not just authored origin.
+    if (forced || world) return glm::mat4 (1.0f);
+    const glm::mat4 flip = glm::scale (glm::mat4 (1.0f), glm::vec3 (1, -1, 1));
+    const glm::mat4 nativeStack = orthographic
+        ? flip * glm::translate (glm::mat4 (1.0f), glm::vec3 (
+            canvas.x * 0.5f, -canvas.y * 0.5f, 0)) * simulationStack * flip
+        : simulationStack * flip;
+    return glm::inverse (nativeStack);
+}
+
+inline glm::vec3 imageEmitterSimulationPosition (
+    const glm::vec3& nativePosition, bool world, bool orthographic, glm::vec2 canvas
+) {
+    glm::vec3 result (nativePosition.x, -nativePosition.y, nativePosition.z);
+    if (world && orthographic) {
+        result.x -= canvas.x * 0.5f;
+        result.y += canvas.y * 0.5f;
+    }
+    return result;
+}
 
 inline glm::uvec2 imageEmitterReadbackSize (uint32_t sourceWidth, uint32_t sourceHeight) {
     // 1401d3ae0 caps the source at 3840x2160 while preserving its aspect,

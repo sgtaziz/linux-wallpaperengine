@@ -1708,6 +1708,9 @@ const glm::vec3& CParticle::getCompositeColor () const { return getColor (); }
 // ========== EMITTERS ==========
 
 void CParticle::setupEmitters () {
+    // Native emitter+b8 is initialized only on allocation; partial resets
+    // recreate scheduling state without resetting the source matrix history.
+    m_imageEmitterHistory.resize (m_particle.emitters.size ());
     for (const auto& emitter : m_particle.emitters) {
 	EmitterFunc func;
 
@@ -2001,12 +2004,6 @@ EmitterFunc CParticle::createImageEmitter (const ParticleEmitter& emitter, size_
                     " emitter index ", index);
         return {};
     }
-    if ((emitter.flags & 0x40000u) != 0) {
-        sLog.error ("Layer-image emitter velocity-from-source flag needs native matrix path: ",
-                    m_particle.name);
-        return {};
-    }
-
     const auto schedule = ParticleCore::scheduleConfig (emitter, emitter.rate);
     struct Cache {
         ParticleImageEmitterReadback reader;
@@ -2125,15 +2122,14 @@ EmitterFunc CParticle::createImageEmitter (const ParticleEmitter& emitter, size_
         };
         const auto sourceTransform = Wallpapers::resolveSceneTransform (
             image->getImage (), findParent);
-        const auto particleTransform = Wallpapers::resolveSceneTransform (
-            m_particle, findParent);
-        const auto inverseParticle = Wallpapers::inverseFiniteTransform (
-            particleTransform.authoredMatrix);
-        if ((m_particle.flags & 1u) == 0 && !inverseParticle) return;
-        const glm::vec2 sourceSize = image->getSize ();
-        const glm::vec2 pixelScale (
-            sourceSize.x / static_cast<float> (width),
-            sourceSize.y / static_cast<float> (height));
+        const bool world = (m_particle.flags & 1u) != 0;
+        const bool orthographic = getScene ().getCamera ().isOrthogonal ();
+        const glm::vec2 canvas (getScene ().getWidth (), getScene ().getHeight ());
+        const glm::mat4 invocation = ParticleCore::imageEmitterInvocationMatrix (
+            m_simulationModelMatrix, orthographic, canvas, m_forcedEmitCount != 0, world);
+        const glm::mat4 currentSource = invocation * sourceTransform.authoredMatrix;
+        auto& history = m_imageEmitterHistory[index];
+        const glm::mat4 previousSource = invocation * history.previousWorld;
 
         for (uint32_t emitted = 0; emitted < toEmit && count < particles.size (); ++emitted) {
             auto& particle = emittedParticleTarget (particles, count);
@@ -2149,15 +2145,25 @@ EmitterFunc CParticle::createImageEmitter (const ParticleEmitter& emitter, size_
                 offset.z = WallpaperEngine::Maths::randomFloat (
                     m_rng, emitter.offsetMin.z, emitter.offsetMax.z);
             }
-            const glm::vec4 sourcePoint (
-                (static_cast<float> (sample.x) + offset.x) * pixelScale.x,
-                (-static_cast<float> (sample.y) + offset.y) * pixelScale.y,
-                offset.z, 1.0f);
-            const glm::vec4 worldAuthored = sourceTransform.authoredMatrix * sourcePoint;
-            const glm::vec4 birthAuthored = (m_particle.flags & 1u) != 0
-                ? worldAuthored : *inverseParticle * worldAuthored;
-            particle.position = {birthAuthored.x, -birthAuthored.y, birthAuthored.z};
+            // The cache already stores physical source-pixel coordinates.
+            // Ordinary native image virtual+80 does not scale by authored size.
+            const glm::vec3 sourcePoint (
+                static_cast<float> (sample.x) + offset.x,
+                -static_cast<float> (sample.y) + offset.y, offset.z);
+            const glm::vec3 birth = ParticleCore::imageEmitterPoint (currentSource, sourcePoint);
+            particle.position = ParticleCore::imageEmitterSimulationPosition (
+                birth, world, orthographic, canvas);
             particle.velocity = glm::vec3 (0.0f);
+            if ((emitter.flags & 0x40000u) != 0) {
+                const glm::vec3 previous = ParticleCore::imageEmitterPoint (previousSource, sourcePoint);
+                const glm::vec2 speedBounds = ParticleCore::emitterSpeedBounds (
+                    emitter.speedMin, emitter.speedMax, speedOverrideValue ()->getFloat (), m_particle.flags);
+                const float speed = WallpaperEngine::Maths::randomFloat (
+                    m_rng, speedBounds.x, speedBounds.y);
+                const auto velocity = ParticleCore::imageEmitterSourceVelocity (
+                    birth, previous, getScene ().getDeltaTime (), speed);
+                particle.velocity = {velocity.x, -velocity.y, velocity.z};
+            }
             particle.acceleration = glm::vec3 (0.0f);
             particle.rotation = glm::vec3 (0.0f);
             particle.angularVelocity = glm::vec3 (0.0f);
@@ -2185,11 +2191,12 @@ EmitterFunc CParticle::createImageEmitter (const ParticleEmitter& emitter, size_
                     " color=", particle.color.x, ",", particle.color.y, ",", particle.color.z);
             // Native image opcode 3 supplies scene-stack basis for world
             // particles and identity for local particles (238c54–cc6).
-            m_birthInitializerBasis = (m_particle.flags & 1u) != 0
+            m_birthInitializerBasis = world && m_forcedEmitCount == 0
                 ? glm::mat3 (m_simulationModelMatrix) : glm::mat3 (1.0f);
             for (auto& initializer : m_initializers) initializer (particle);
             finishEmittedParticle (particle, count);
         }
+        history.previousWorld = sourceTransform.authoredMatrix;
     };
 }
 
