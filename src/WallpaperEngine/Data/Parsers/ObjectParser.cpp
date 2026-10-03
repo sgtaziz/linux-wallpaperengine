@@ -1732,7 +1732,8 @@ ParticleChild ObjectParser::parseParticleChild (const JSON& it, const Project& p
 	.type = type,
 	.name = name,
 	.flags = it.optional ("flags", 0u),
-	.maxCount = it.optional ("maxcount", 20),
+	// Native (maxcount, 10) writes 10 when absent.
+	.maxCount = it.optional ("maxcount", 10),
 	.controlPointStartIndex = it.optional ("controlpointstartindex", 0),
 	.probability = it.optional ("probability", 1.0f),
 	.angles = parseVec3 ("angles", glm::vec3 (0.0f)),

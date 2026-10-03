@@ -3428,6 +3428,28 @@ TEST_CASE ("Child particle records retain native flags and event configuration",
     REQUIRE (particle->children[1].maxCount == 7);
 }
 
+TEST_CASE ("Child event descriptors default to the native maxcount of 10", "[particle][child][parser]") {
+    using WallpaperEngine::Data::Parsers::ObjectParser;
+    using WallpaperEngine::Data::Model::Particle;
+    using WallpaperEngine::Data::Model::Project;
+    using WallpaperEngine::Data::JSON::JSON;
+    // (maxcount, 10) only fills an absent key.
+    Project project {};
+    auto data = JSON::parse (R"({"id":1,"name":"child-cap","particle":{"children":[
+        {"type":"eventfollow","particle":"particles/a.json"},
+        {"type":"eventdeath","particle":"particles/b.json","maxcount":0},
+        {"type":"eventspawn","particle":"particles/c.json","maxcount":20}
+    ]}})");
+    const auto object = ObjectParser::parse (data, project);
+    const auto* particle = dynamic_cast<const Particle*> (object.get ());
+    REQUIRE (particle != nullptr);
+    REQUIRE (particle->children.size () == 3);
+    CHECK (particle->children[0].maxCount == 10);
+    CHECK (particle->children[0].probability == 1.0f);
+    CHECK (particle->children[1].maxCount == 0);
+    CHECK (particle->children[2].maxCount == 20);
+}
+
 TEST_CASE ("Particle control points retain parent and angle records", "[particle][child][parser]") {
     using WallpaperEngine::Data::Parsers::ObjectParser;
     using WallpaperEngine::Data::Model::Particle;
