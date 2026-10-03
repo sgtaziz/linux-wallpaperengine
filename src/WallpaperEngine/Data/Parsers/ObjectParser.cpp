@@ -1611,11 +1611,12 @@ ParticleOperatorUniquePtr ObjectParser::parseParticleOperator (
 	    it.user ("phasemin", properties, 0.0f), it.user ("phasemax", properties, glm::two_pi<float> ())
 	);
     } else if (name == "oscillateposition") {
+	// defaults; an omitted scalemax depends on the scene projection.
 	return std::make_unique<OscillatePositionOperator> (
-	    it.user ("frequencymin", properties, 0.0f), it.user ("frequencymax", properties, 5.0f),
+	    it.user ("frequencymin", properties, 1.0f), it.user ("frequencymax", properties, 5.0f),
 	    it.user ("scalemin", properties, 0.0f), it.user ("scalemax", properties, 10.0f),
 	    it.user ("phasemin", properties, 0.0f), it.user ("phasemax", properties, glm::two_pi<float> ()),
-	    it.user ("mask", properties, glm::vec3 (1.0f, 1.0f, 0.0f))
+	    it.user ("mask", properties, glm::vec3 (1.0f, 1.0f, 0.0f)), !it.contains ("scalemax")
 	);
     }
 

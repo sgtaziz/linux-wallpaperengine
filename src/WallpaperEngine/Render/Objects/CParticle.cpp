@@ -3538,16 +3538,23 @@ OperatorFunc CParticle::createOscillatePositionOperator (const OscillatePosition
     DynamicValue* maskValue = op.mask->value.get ();
     DynamicValue* speedOverride = speedOverrideValue ();
     const auto* blend = op.blendEnvelope ? &*op.blendEnvelope : nullptr;
+    const auto& projection = getScene ().getScene ().camera.projection;
+    const float sceneScaleMax = ParticleCore::oscillatePositionScaleMaxDefault (projection.isOrthogonal);
+    const bool scaleMaxSceneDefault = op.scaleMaxSceneDefault;
+    // Factory binds the frequency min and span to the instance speed
+    // unless particle flag 0x10 is set; scale and phase are not bound.
+    const bool bindSpeed = (m_particle.flags & 0x10u) == 0;
 
     return [this, freqMinValue, freqMaxValue, scaleMinValue, scaleMaxValue, phaseMinValue, phaseMaxValue, maskValue,
-	    speedOverride, blend] (
+	    speedOverride, blend, sceneScaleMax, scaleMaxSceneDefault, bindSpeed] (
 	       std::vector<ParticleInstance>& particles, uint32_t count, const std::vector<ControlPointData>&, float,
 	       float dt
 	   ) {
-	float freqMin = freqMinValue->getFloat ();
-	float freqMax = freqMaxValue->getFloat ();
+	const float speed = bindSpeed ? speedOverride->getFloat () : 1.0f;
+	float freqMin = freqMinValue->getFloat () * speed;
+	float freqMax = freqMaxValue->getFloat () * speed;
 	float scaleMin = scaleMinValue->getFloat ();
-	float scaleMax = scaleMaxValue->getFloat ();
+	float scaleMax = scaleMaxSceneDefault ? sceneScaleMax : scaleMaxValue->getFloat ();
 	float phaseMin = phaseMinValue->getFloat ();
 	float phaseMax = phaseMaxValue->getFloat ();
 	glm::vec3 mask = maskValue->getVec3 ();
@@ -3556,12 +3563,12 @@ OperatorFunc CParticle::createOscillatePositionOperator (const OscillatePosition
 	for (uint32_t i = 0; i < count; i++) {
 	    auto& p = particles[i];
 
-	    const float move = ParticleCore::positionOscillationDelta (
+	    const glm::vec3 move = ParticleCore::positionOscillationDelta (
 		p.age, dt, p.oscillatorRandom, freqMin, freqMax, phaseMin, phaseMax,
-		scaleMin, scaleMax, speedOverride->getFloat (),
+		scaleMin, scaleMax, mask,
 		envelope && ParticleCore::usesBlendOpcode (*envelope)
 		    ? ParticleCore::blendWeight (p.getLifetimePos (), *envelope) : 1.0f);
-	    p.position += mask * move;
+	    p.position += ParticleCore::toSimulationVector (move);
 	}
     };
 }
