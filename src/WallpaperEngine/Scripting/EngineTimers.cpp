@@ -104,6 +104,7 @@ uint32_t EngineTimers::reserve (std::map<uint32_t, Timer>& timers, uint32_t& nex
         JS_DupValue (m_context, module ? module->layer : m_activeLayer),
         JS_DupValue (m_context, module ? module->thisObject : m_activeThisObject),
         module ? &module->object : m_activeOwner,
+        module ? &module->value : m_activeValue,
         duration, now + duration});
     return nextId;
 }
@@ -141,15 +142,18 @@ void EngineTimers::cancelOwner (const ScriptableObject& object) {
 }
 
 void EngineTimers::call (JSValueConst callback, JSValueConst layer, JSValueConst thisObject,
-                         const ScriptableObject* owner) {
+                         const ScriptableObject* owner, Data::Model::DynamicValue* value) {
     const auto* previousOwner = m_activeOwner;
+    auto* previousValue = m_activeValue;
     const JSValue previousLayer = m_activeLayer;
     const JSValue previousObject = m_activeThisObject;
     m_activeOwner = owner;
+    m_activeValue = value;
     m_activeLayer = layer;
     m_activeThisObject = thisObject;
     ScopeGuard activeGuard ([&] {
         m_activeOwner = previousOwner;
+        m_activeValue = previousValue;
         m_activeLayer = previousLayer;
         m_activeThisObject = previousObject;
     });
@@ -196,7 +200,8 @@ void EngineTimers::tick (Clock::time_point now) {
 	JSValue layer = JS_DupValue (m_context, it->second.layer);
 	JSValue thisObject = JS_DupValue (m_context, it->second.thisObject);
 	const auto* owner = it->second.owner;
-	call (callback, layer, thisObject, owner);
+	auto* value = it->second.value;
+	call (callback, layer, thisObject, owner, value);
 	JS_FreeValue (m_context, callback);
 	JS_FreeValue (m_context, layer);
 	JS_FreeValue (m_context, thisObject);
@@ -208,8 +213,9 @@ void EngineTimers::tick (Clock::time_point now) {
 	JSValue layer = it->second.layer;
 	JSValue thisObject = it->second.thisObject;
 	const auto* owner = it->second.owner;
+	auto* value = it->second.value;
 	m_timeouts.erase (it); // A one-shot is gone before its callback can cancel itself.
-	call (callback, layer, thisObject, owner);
+	call (callback, layer, thisObject, owner, value);
 	JS_FreeValue (m_context, callback);
 	JS_FreeValue (m_context, layer);
 	JS_FreeValue (m_context, thisObject);

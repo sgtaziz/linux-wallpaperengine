@@ -6,6 +6,9 @@
 #include <cstdint>
 #include <map>
 
+namespace WallpaperEngine::Data::Model {
+class DynamicValue;
+}
 namespace WallpaperEngine::Scripting {
 class ScriptEngine;
 class ScriptableObject;
@@ -29,6 +32,9 @@ public:
     void clearInterval (uint32_t id);
     void cancelOwner (const ScriptableObject& object);
     void tick (Clock::time_point now = Clock::now ());
+    /** The layer and script property that scheduled the callback now running, if any. */
+    const ScriptableObject* activeOwner () const { return m_activeOwner; }
+    Data::Model::DynamicValue* activeValue () const { return m_activeValue; }
 
 private:
     struct Timer {
@@ -36,6 +42,9 @@ private:
         JSValue layer;
         JSValue thisObject;
         const ScriptableObject* owner;
+        // The scheduling script's own property. Timers are cancelled with their
+        // owner, which also owns this value.
+        Data::Model::DynamicValue* value;
 	std::chrono::milliseconds duration;
 	Clock::time_point next;
     };
@@ -44,11 +53,12 @@ private:
 		      int64_t delayMs, Clock::time_point now);
     void clear (std::map<uint32_t, Timer>& timers, uint32_t id);
     void call (JSValueConst callback, JSValueConst layer, JSValueConst thisObject,
-               const ScriptableObject* owner);
+               const ScriptableObject* owner, Data::Model::DynamicValue* value);
 
     JSContext* m_context;
     ScriptEngine* m_engine = nullptr;
     const ScriptableObject* m_activeOwner = nullptr;
+    Data::Model::DynamicValue* m_activeValue = nullptr;
     JSValue m_activeLayer = JS_UNDEFINED;
     JSValue m_activeThisObject = JS_UNDEFINED;
     uint32_t m_instanceId;

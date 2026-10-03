@@ -23,6 +23,8 @@ public:
 	std::string title;
 	std::string artist;
 	std::string album;
+	// First MPRIS xesam:albumArtist entry; native sends "" when absent.
+	std::string albumArtist;
 	std::optional<std::string> url;
 	bool thumbnailAvailable = false;
 	std::shared_ptr<const MediaArtwork> artwork;

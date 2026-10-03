@@ -60,9 +60,23 @@ MediaEventPayloads::MediaEventPayloads (
     const MediaPalette& palette, const std::function<JSValue (const glm::vec3&)>& vectorValue) :
     m_context (context), m_events {JS_NewObject (context), JS_NewObject (context),
                                    JS_NewObject (context), JS_NewObject (context)} {
-    JS_SetPropertyStr (context, m_events[0], "title", JS_NewString (context, media.title.c_str ()));
-    JS_SetPropertyStr (context, m_events[0], "artist", JS_NewString (context, media.artist.c_str ()));
-    JS_SetPropertyStr (context, m_events[0], "albumTitle", JS_NewString (context, media.album.c_str ()));
+    // The host always sends these seven strings, each defaulting to ""
+    // native builds the event object
+    // in this key order (2.7.3 case 0x10, matching the 2.8.42 DLL
+    // string table). MPRIS has no subtitle or content-type key, and the
+    // Windows genre-list join is in winrtutil64.exe, which is not recovered,
+    // so those keep the native empty default.
+    const auto text = [context] (const std::string& value) {
+        return JS_NewStringLen (context, value.data (), value.size ());
+    };
+    const std::string none;
+    JS_SetPropertyStr (context, m_events[0], "title", text (media.title));
+    JS_SetPropertyStr (context, m_events[0], "artist", text (media.artist));
+    JS_SetPropertyStr (context, m_events[0], "albumArtist", text (media.albumArtist));
+    JS_SetPropertyStr (context, m_events[0], "albumTitle", text (media.album));
+    JS_SetPropertyStr (context, m_events[0], "subTitle", text (none));
+    JS_SetPropertyStr (context, m_events[0], "genres", text (none));
+    JS_SetPropertyStr (context, m_events[0], "contentType", text (none));
     JS_SetPropertyStr (context, m_events[1], "state", JS_NewInt32 (context, media.playbackState));
     JS_SetPropertyStr (context, m_events[2], "position", JS_NewFloat64 (context, media.position));
     JS_SetPropertyStr (context, m_events[2], "duration", JS_NewFloat64 (context, media.duration));

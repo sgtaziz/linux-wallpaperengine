@@ -6,6 +6,7 @@
 #include "InputObject.h"
 #include "LocalStorageObject.h"
 #include "Modules/ScriptModule.h"
+#include "Modules/ScriptModuleAssets.h"
 #include "SceneObject.h"
 
 #include <chrono>
@@ -78,6 +79,15 @@ public:
     JSContext* getContext () const { return m_context; }
     JSValue getGlobalThis () const { return m_globalThis; }
     LoadedModule* getRunningModule () const { return m_runningModule; }
+    struct ScriptProperty {
+        const ScriptableObject* object = nullptr;
+        DynamicValue* value = nullptr;
+    };
+    /**
+     * The layer and property of the script whose code is executing: the running
+     * module, or the module that scheduled the timer callback now running.
+     */
+    [[nodiscard]] ScriptProperty currentScriptProperty () const;
     [[nodiscard]] std::optional<std::string> registeredAssetPath (JSValueConst value) const {
         return m_engineObject ? m_engineObject->registeredAssetPath (value) : std::nullopt;
     }
@@ -90,6 +100,8 @@ public:
     [[nodiscard]] bool isInitializingAuthoredLayer () const { return m_initialAuthoredInit; }
     JSValue dynamicToJs (DynamicValue& value, bool detached = false, bool angleProperty = false,
                          bool rgbColorProperty = false) const;
+    /** A fresh converted snapshot of the current project user properties. */
+    JSValue userPropertiesValue () const;
 
     /**
      * Evaluate a WallpaperEngine script's update() function.
@@ -171,6 +183,7 @@ public:
     const JSObjectAdapters& getAdapters () const { return m_adapters; }
     const Render::Wallpapers::CScene& getScene () const { return m_scene; }
     const std::map<std::string, std::unique_ptr<Modules::ScriptModule>>& getModules () const { return m_modules; }
+    Modules::ScriptModuleAssets& getModuleAssets () const { return *m_moduleAssets; }
 
 private:
     JSValue call (JSValue module, int argc, JSValueConst argv[], const char* name);
@@ -198,6 +211,7 @@ private:
     std::unique_ptr<ScriptPropertiesObject> m_scriptPropertiesObject;
 
     std::map<std::string, std::unique_ptr<Modules::ScriptModule>> m_modules = {};
+    std::unique_ptr<Modules::ScriptModuleAssets> m_moduleAssets;
     std::map<std::string, LoadedModule> m_scriptModules = {};
     size_t m_nextScriptQueueOrder = 0;
     struct AnimatedValue { DynamicValue* value; ScriptableObject* object; };

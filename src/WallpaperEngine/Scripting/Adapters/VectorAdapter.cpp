@@ -1,4 +1,5 @@
 #include "VectorAdapter.h"
+#include "VectorMath.h"
 #include "VectorSubtraction.h"
 
 #include "../ScriptEngine.h"
@@ -461,6 +462,21 @@ template JSValue vector_length<3> (JSContext* ctx, JSValueConst this_val, int ar
 template JSValue vector_length<4> (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv);
 
 template <int components>
+JSValue vector_length_sqr (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
+    JSClassID classId = 0;
+
+    auto* container = static_cast<VectorOpaqueContainer<components>*> (JS_GetAnyOpaque (this_val, &classId));
+
+    VEC_MAGIC_CHECK_EXCEPTION (container, components);
+
+    return JS_NewFloat64 (ctx, lengthSqrVectorValue (vector_get<components> (container->value)));
+}
+
+template JSValue vector_length_sqr<2> (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv);
+template JSValue vector_length_sqr<3> (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv);
+template JSValue vector_length_sqr<4> (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv);
+
+template <int components>
 JSValue vector_constructor (JSContext* ctx, JSValueConst new_target, int argc, JSValueConst* argv, int magic) {
     auto it = vectorAdapterInstances<components>.find (magic);
 
@@ -740,17 +756,8 @@ template <int components> JSValue vector_dot (JSContext* ctx, JSValueConst this_
     const auto argument = vector_get_script<components> (ctx, argv[0]);
     if (!argument) return JS_EXCEPTION;
 
-    JSValue newVector = container->adapter.instantiate ();
-    const auto* newContainer = static_cast<VectorOpaqueContainer<components>*> (JS_GetAnyOpaque (newVector, &classId));
-
-    VEC_MAGIC_CHECK_EXCEPTION (newContainer, components);
-
-    newContainer->value.update (
-	glm::dot (*argument, vector_get<components> (container->value)),
-	DynamicValue::UpdateSource::Initialization
-    );
-
-    return newVector;
+    // Shipped baseclasses.js dot() returns a number, not a vector.
+    return JS_NewFloat64 (ctx, dotVectorValue (vector_get<components> (container->value), *argument));
 }
 
 template JSValue vector_dot<2> (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv);
@@ -776,7 +783,7 @@ template <int components> JSValue vector_cross (JSContext* ctx, JSValueConst thi
     VEC_MAGIC_CHECK_EXCEPTION (newContainer, components);
 
     newContainer->value.update (
-	glm::cross (*argument, vector_get<components> (container->value)),
+	crossVectorValue (vector_get<components> (container->value), *argument),
 	DynamicValue::UpdateSource::Initialization
     );
 
@@ -784,6 +791,37 @@ template <int components> JSValue vector_cross (JSContext* ctx, JSValueConst thi
 }
 
 template JSValue vector_cross<3> (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv);
+
+template <int components>
+JSValue vector_reflect (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
+    if (argc != 1) {
+	return JS_ThrowTypeError (ctx, "Vec%d.reflect requires a normal vector", components);
+    }
+
+    JSClassID classId = 0;
+    const auto* container = static_cast<VectorOpaqueContainer<components>*> (JS_GetAnyOpaque (this_val, &classId));
+
+    VEC_MAGIC_CHECK_EXCEPTION (container, components);
+
+    const auto normal = vector_get_script<components> (ctx, argv[0]);
+    if (!normal) return JS_EXCEPTION;
+
+    JSValue newVector = container->adapter.instantiate ();
+    const auto* newContainer = static_cast<VectorOpaqueContainer<components>*> (JS_GetAnyOpaque (newVector, &classId));
+
+    VEC_MAGIC_CHECK_EXCEPTION (newContainer, components);
+
+    newContainer->value.update (
+	reflectVectorValue (vector_get<components> (container->value), *normal),
+	DynamicValue::UpdateSource::Initialization
+    );
+
+    return newVector;
+}
+
+template JSValue vector_reflect<2> (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv);
+template JSValue vector_reflect<3> (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv);
+template JSValue vector_reflect<4> (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv);
 
 template <int components> JSValue vector_mix (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
     if (argc != 2) {
@@ -1051,7 +1089,7 @@ VectorAdapter<components>::VectorAdapter (ScriptEngine& engine) :
     );
     JS_DefinePropertyValueStr (
 	this->m_engine.getContext (), m_prototype, "lengthSqr",
-	JS_NewCFunction (this->m_engine.getContext (), vector_length<components>, "lengthSqr", 0), JS_PROP_ENUMERABLE
+	JS_NewCFunction (this->m_engine.getContext (), vector_length_sqr<components>, "lengthSqr", 0), JS_PROP_ENUMERABLE
     );
     JS_DefinePropertyValueStr (
 	this->m_engine.getContext (), m_prototype, "normalize",
@@ -1083,6 +1121,10 @@ VectorAdapter<components>::VectorAdapter (ScriptEngine& engine) :
 	    JS_NewCFunction (this->m_engine.getContext (), vector_cross<components>, "cross", 1), JS_PROP_ENUMERABLE
 	);
     }
+    JS_DefinePropertyValueStr (
+	this->m_engine.getContext (), m_prototype, "reflect",
+	JS_NewCFunction (this->m_engine.getContext (), vector_reflect<components>, "reflect", 1), JS_PROP_ENUMERABLE
+    );
     JS_DefinePropertyValueStr (
 	this->m_engine.getContext (), m_prototype, "mix",
 	JS_NewCFunction (this->m_engine.getContext (), vector_mix<components>, "mix", 2), JS_PROP_ENUMERABLE

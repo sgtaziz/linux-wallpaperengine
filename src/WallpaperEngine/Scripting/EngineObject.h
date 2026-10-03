@@ -13,6 +13,27 @@ class CScene;
 namespace WallpaperEngine::Scripting {
 class ScriptEngine;
 class ScriptableObject;
+/**
+ * Marks a cursorClick, cursorDown or cursorUp callback on one context, the
+ * only callbacks in which native accepts openUserShortcut
+ * (2.7.3 accepts callback phases 0xb..0xd; dispatches
+ * those as the cursor event payload callbacks after cursorMove).
+ */
+class UserCommandScope {
+public:
+    explicit UserCommandScope (JSContext* context);
+    ~UserCommandScope ();
+    UserCommandScope (const UserCommandScope&) = delete;
+    UserCommandScope& operator= (const UserCommandScope&) = delete;
+
+    static bool active (JSContext* context);
+    /** True for the authored callbacks that open a user command scope. */
+    static bool allows (const char* callback);
+
+private:
+    JSContext* m_previous;
+};
+
 class EngineObject {
 public:
     EngineObject (ScriptEngine& engine, Render::Wallpapers::CScene& scene);
@@ -30,6 +51,7 @@ public:
 
     void tick ();
     void cancelTimersForObject (const ScriptableObject& object) { m_timers.cancelOwner (object); }
+    const EngineTimers& getTimers () const { return m_timers; }
 
 protected:
     Render::Wallpapers::CScene& m_scene;
