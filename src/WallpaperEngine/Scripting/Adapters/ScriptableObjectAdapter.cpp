@@ -3,6 +3,7 @@
 #include <utility>
 
 #include "WallpaperEngine/Data/Utils/ScopeGuard.h"
+#include "WallpaperEngine/Scripting/LayerPropertyWrites.h"
 #include "WallpaperEngine/Scripting/ScriptEngine.h"
 #include "WallpaperEngine/Scripting/ScriptableObject.h"
 #include "WallpaperEngine/Scripting/TextureAnimationObject.h"
@@ -606,28 +607,23 @@ int scriptableobject_property_set (
         }
         return 1;
     }
-    if (std::string_view (name) == "horizontalalign" ||
-        std::string_view (name) == "verticalalign") {
-        auto* text = dynamic_cast<WallpaperEngine::Render::Objects::CText*> (
-            container->lifetime->object);
-        if (!text || !JS_IsString (val))
-            return JS_ThrowTypeError (ctx, "Text alignment requires a string"), -1;
-        const char* value = JS_ToCString (ctx, val);
-        if (!value) return -1;
-        if (std::string_view (name) == "horizontalalign") text->setHorizontalAlign (value);
+    // Native text and image layers register these as String host
+    // properties. Other layers do not have them, so a write there falls
+    // through to the unknown-name path below.
+    auto* text = dynamic_cast<WallpaperEngine::Render::Objects::CText*> (container->lifetime->object);
+    auto* image = dynamic_cast<WallpaperEngine::Render::Objects::CImage*> (container->lifetime->object);
+    const bool textAlign = text && (std::string_view (name) == "horizontalalign"
+                                    || std::string_view (name) == "verticalalign");
+    if (textAlign || (image && std::string_view (name) == "alignment")) {
+        std::string value;
+        switch (WallpaperEngine::Scripting::convertLayerString (ctx, val, value)) {
+            case WallpaperEngine::Scripting::LayerStringWrite::Exception: return -1;
+            case WallpaperEngine::Scripting::LayerStringWrite::Ignore: return 1;
+            case WallpaperEngine::Scripting::LayerStringWrite::Assign: break;
+        }
+        if (!textAlign) image->setAlignment (value);
+        else if (std::string_view (name) == "horizontalalign") text->setHorizontalAlign (value);
         else text->setVerticalAlign (value);
-        JS_FreeCString (ctx, value);
-        return 1;
-    }
-    if (std::string_view (name) == "alignment") {
-        auto* image = dynamic_cast<WallpaperEngine::Render::Objects::CImage*> (
-            container->lifetime->object);
-        if (!image || !JS_IsString (val))
-            return JS_ThrowTypeError (ctx, "Image alignment requires a string"), -1;
-        const char* value = JS_ToCString (ctx, val);
-        if (!value) return -1;
-        image->setAlignment (value);
-        JS_FreeCString (ctx, value);
         return 1;
     }
     const auto& properties = container->lifetime->object->getProperties ();
@@ -641,7 +637,20 @@ int scriptableobject_property_set (
         : publicName == "opaquebackground" ? "opaqueBackground"
         : publicName == "backgroundcolor" ? "backgroundColor" : name;
     const auto it = properties.find (propertyName);
-    if (it == properties.end ()) return JS_ThrowTypeError (ctx, "Unknown layer property: %s", name), -1;
+    if (it == properties.end ()) {
+        // A name that reads as undefined is not a layer member. A name that
+        // reads as a function is a method, which native installs as a
+        // writable data member. In both cases the write is stored as an
+        // ordinary property of the receiver, so later reads see it. Other
+        // read-only members keep rejecting writes.
+        JSValue current = scriptableobject_property_get (ctx, obj_val, atom, receiver);
+        if (JS_IsException (current)) return -1;
+        const bool assignable = JS_IsUndefined (current) || JS_IsFunction (ctx, current);
+        JS_FreeValue (ctx, current);
+        if (assignable)
+            return WallpaperEngine::Scripting::defineLayerExpando (ctx, receiver, atom, val, flags);
+        return JS_ThrowTypeError (ctx, "Layer property is read-only: %s", name), -1;
+    }
 
     auto& property = it->second.value;
     switch (property.getType ()) {
@@ -666,13 +675,14 @@ int scriptableobject_property_set (
 	    property.update (static_cast<float> (number), DynamicValue::Script);
 	    return 1;
 	case DynamicValue::String:
-	    if (!JS_IsString (val)) break;
 	    {
-		size_t length = 0;
-		const char* string = JS_ToCStringLen (ctx, &length, val);
-		if (!string) return -1;
-		property.update (std::string (string, length), DynamicValue::Script);
-		JS_FreeCString (ctx, string);
+		std::string string;
+		switch (WallpaperEngine::Scripting::convertLayerString (ctx, val, string)) {
+		    case WallpaperEngine::Scripting::LayerStringWrite::Exception: return -1;
+		    case WallpaperEngine::Scripting::LayerStringWrite::Ignore: return 1;
+		    case WallpaperEngine::Scripting::LayerStringWrite::Assign: break;
+		}
+		property.update (string, DynamicValue::Script);
 		return 1;
 	    }
 	case DynamicValue::Vec2:
