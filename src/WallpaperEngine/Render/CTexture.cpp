@@ -349,6 +349,10 @@ uint32_t CTexture::getRealHeight () const {
     return this->isAnimated () ? this->getHeader ().gifHeight : this->getHeader ().height;
 }
 
+uint32_t CTexture::getImageWidth () const { return this->getHeader ().width; }
+
+uint32_t CTexture::getImageHeight () const { return this->getHeader ().height; }
+
 TextureFormat CTexture::getFormat () const { return this->getHeader ().format; }
 
 uint32_t CTexture::getFlags () const { return this->getHeader ().flags; }

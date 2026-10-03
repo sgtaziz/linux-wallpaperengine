@@ -650,7 +650,6 @@ void CParticle::setup () {
 	m_spritesheetCols = static_cast<int> (texture->getSpritesheetCols ());
 	m_spritesheetRows = static_cast<int> (texture->getSpritesheetRows ());
 	m_spritesheetFrames = static_cast<int> (texture->getSpritesheetFrames ());
-	m_spritesheetDuration = texture->getSpritesheetDuration ();
 	const auto& frames = texture->getFrames ();
         if (m_slotStreams && ((texture->getFlags () & TextureFlags_IsGif) != 0
             || texture->isAnimated () || m_spritesheetFrames > 1 || frames.size () > 1))
@@ -660,15 +659,11 @@ void CParticle::setup () {
 	    && std::any_of (frames.begin () + 1, frames.end (), [&] (const auto& frame) {
 	        return frame && frames.front () && frame->frameNumber != frames.front ()->frameNumber;
 	    });
-	m_authoredFrameTimeline = m_animationFrameCount > 0
-	    && std::all_of (frames.begin (), frames.end (), [&] (const auto& frame) {
-		return frame && std::isfinite (frame->frametime) && frame->frametime > 0.0f;
-	    });
-	if (m_authoredFrameTimeline) {
-	    m_spritesheetDuration = std::accumulate (frames.begin (), frames.end (), 0.0f,
-	        [] (float sum, const auto& frame) { return sum + frame->frametime; });
-	}
-	if (m_animationFrameCount > 1 && m_spritesheetFrames == 0 && !m_separatePageAnimation)
+	// Same-page TEXS atlases sample per-frame windows; TEXS frame durations
+	// do not enter the particle sequence timeline.
+	setupAtlas (texture);
+	if (m_atlas) m_spritesheetFrames = static_cast<int> (m_atlas->windows.size ());
+	if (!m_atlas && m_animationFrameCount > 1 && m_spritesheetFrames == 0 && !m_separatePageAnimation)
 	    sLog.error ("Particle animated texture has irregular same-page atlas without grid mapping: ",
 	                m_particle.name);
     }
@@ -1336,37 +1331,9 @@ void CParticle::update (ParticleCore::TickClock clock) {
 	    const double sequenceCycles = particleSequenceCycles (
 		p.age, p.lifetime, m_particle.sequenceMultiplier);
 
-	    if (m_particle.animationMode == "once") {
-		if (m_authoredFrameTimeline) {
-		    const double animationTime = sequenceCycles * m_spritesheetDuration;
-		    if (animationTime >= m_spritesheetDuration)
-			p.frame = static_cast<float> (p.frameOrdinal = frameCount - 1);
-		    else if (const auto phase = framePhaseAtTime (getTexture ()->getFrames (), animationTime)) {
-			p.frameOrdinal = static_cast<uint32_t> (phase->ordinal);
-			p.frame = static_cast<float> (phase->ordinal + phase->fraction);
-		    }
-		} else {
-		    p.frame = std::min (
-			static_cast<float> (sequenceCycles * frameCount), static_cast<float> (frameCount - 1)
-		    );
-		}
-	    } else {
-		if (m_authoredFrameTimeline) {
-		    if (const auto phase = framePhaseAtTime (
-			getTexture ()->getFrames (), sequenceCycles * m_spritesheetDuration)) {
-			p.frameOrdinal = static_cast<uint32_t> (phase->ordinal);
-			p.frame = static_cast<float> (phase->ordinal + phase->fraction);
-		    }
-		} else if (m_spritesheetDuration > 0.0f) {
-		    float cyclePos = static_cast<float> (std::fmod (sequenceCycles, 1.0));
-		    p.frame = std::fmod (cyclePos * frameCount, static_cast<float> (frameCount));
-		} else {
-		    p.frame = std::fmod (
-			static_cast<float> (sequenceCycles * frameCount), static_cast<float> (frameCount)
-		    );
-		}
-	    }
-	    if (!m_authoredFrameTimeline && std::isfinite (p.frame))
+	    p.frame = ParticleAtlas::sequenceFrame (sequenceCycles, static_cast<uint32_t> (frameCount),
+	                                           m_particle.animationMode == "once");
+	    if (std::isfinite (p.frame))
 		p.frameOrdinal = static_cast<uint32_t> (std::clamp (
 		    p.frame, 0.0f, static_cast<float> (frameCount - 1)));
 	}
@@ -3651,6 +3618,7 @@ void CParticle::setupPass () {
         override->combos["SPRITESHEET"] = 1;
         override->combos["SPRITESHEETBLEND"] = particleAtlasBlendEnabled (
             m_particle.flags, m_particle.animationMode) ? 1 : 0;
+        if (m_atlas && !ropePass) override->combos["LINUX_CPU_SPRITE_UV"] = 1;
     }
     if (trailPass) override->combos["TRAILRENDERER"] = 1;
     if (ropePass) override->combos["LINUX_CPU_ROPE_UV"] = 1;
@@ -3741,9 +3709,20 @@ void CParticle::setupPass () {
 	    glVertexAttribPointer (loc10, 3, GL_FLOAT, GL_FALSE, stride, (void*)(sizeof (float) * 34));
 	}
     } else {
-	// Sprite vertex layout: 5 attributes, 17 floats/vertex, stride=68 bytes
+	// Sprite vertex layout: 7 attributes, 22 floats/vertex, stride=88 bytes
 	// a_Position(3) + a_TexCoordVec4(4) + a_Color(4) + a_TexCoordVec4C1(4) + a_TexCoordC2(2) = 17
+	// + Linux CPU atlas a_CpuSpriteUV(4) + a_CpuSpriteBlend(1) = 22
 	const GLsizei stride = sizeof (float) * SPRITE_FLOATS_PER_VERTEX;
+	const GLint loc5 = glGetAttribLocation (program, "a_CpuSpriteUV");
+	const GLint loc6 = glGetAttribLocation (program, "a_CpuSpriteBlend");
+	if (loc5 >= 0) {
+	    glEnableVertexAttribArray (loc5);
+	    glVertexAttribPointer (loc5, 4, GL_FLOAT, GL_FALSE, stride, (void*)(sizeof (float) * 17));
+	}
+	if (loc6 >= 0) {
+	    glEnableVertexAttribArray (loc6);
+	    glVertexAttribPointer (loc6, 1, GL_FLOAT, GL_FALSE, stride, (void*)(sizeof (float) * 21));
+	}
 
 	const GLint loc0 = glGetAttribLocation (program, "a_Position");
 	const GLint loc1 = glGetAttribLocation (program, "a_TexCoordVec4");
@@ -4001,6 +3980,68 @@ void CParticle::updateParticleViewProjection () {
         m_viewProjectionMatrix = getScene ().getRootRenderClipTransform () * m_viewProjectionMatrix;
 }
 
+void CParticle::setupAtlas (const std::shared_ptr<const TextureProvider>& provider) {
+    m_atlas.reset ();
+    const TextureProvider& texture = *provider;
+    const auto& frames = texture.getFrames ();
+    const auto* stored = dynamic_cast<const CTexture*> (&texture);
+    if (stored == nullptr || frames.empty () || m_separatePageAnimation
+        || std::any_of (frames.begin (), frames.end (), [] (const auto& frame) { return !frame; }))
+        return;
+    const uint32_t page = frames.front ()->frameNumber;
+    // Render-thread only (scene setup and event-child creation): one layout,
+    // and at most one page readback, per live texture page.
+    static ParticleAtlas::LayoutCache<TextureProvider> layouts;
+    auto layout = layouts.get (provider, page, [&] {
+        ParticleAtlas::Source source;
+        source.mipWidth = texture.getTextureWidth (page);
+        source.mipHeight = texture.getTextureHeight (page);
+        source.imageWidth = stored->getImageWidth ();
+        source.imageHeight = stored->getImageHeight ();
+        for (const auto& frame : frames)
+            source.authored.emplace_back (frame->x, frame->y, frame->width1, frame->height1);
+        // Coverage is the channel ConvertTexture0Format reads as alpha. The
+        // page is read back from GL (decoding any upload format) only when a
+        // frame's native window departs from its authored rect.
+        const TextureFormat format = texture.getFormat ();
+        const uint32_t channel = format == TextureFormat_R8 || format == TextureFormat_R16f ? 0u
+            : format == TextureFormat_RG88 || format == TextureFormat_RG1616f ? 1u : 3u;
+        std::vector<uint8_t> pixels;
+        bool read = false;
+        const auto coverage = [&] (const ParticleAtlas::TexelRect& rect) {
+            if (!read) {
+                read = true;
+                GLint previousTexture = 0, previousBuffer = 0, previousAlignment = 4, previousRowLength = 0;
+                glGetIntegerv (GL_TEXTURE_BINDING_2D, &previousTexture);
+                glGetIntegerv (GL_PIXEL_PACK_BUFFER_BINDING, &previousBuffer);
+                glGetIntegerv (GL_PACK_ALIGNMENT, &previousAlignment);
+                glGetIntegerv (GL_PACK_ROW_LENGTH, &previousRowLength);
+                glBindBuffer (GL_PIXEL_PACK_BUFFER, 0);
+                glPixelStorei (GL_PACK_ALIGNMENT, 1);
+                glPixelStorei (GL_PACK_ROW_LENGTH, 0);
+                glBindTexture (GL_TEXTURE_2D, texture.getTextureID (page));
+                GLint width = 0, height = 0;
+                glGetTexLevelParameteriv (GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &width);
+                glGetTexLevelParameteriv (GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &height);
+                if (width == static_cast<GLint> (source.mipWidth) && height == static_cast<GLint> (source.mipHeight)) {
+                    pixels.resize (static_cast<size_t> (width) * static_cast<size_t> (height) * 4);
+                    glGetTexImage (GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data ());
+                }
+                glBindTexture (GL_TEXTURE_2D, static_cast<GLuint> (previousTexture));
+                glPixelStorei (GL_PACK_ROW_LENGTH, previousRowLength);
+                glPixelStorei (GL_PACK_ALIGNMENT, previousAlignment);
+                glBindBuffer (GL_PIXEL_PACK_BUFFER, static_cast<GLuint> (previousBuffer));
+            }
+            // Unknown coverage keeps the authored rect.
+            if (pixels.empty ()) return true;
+            return ParticleAtlas::rectHasCoverage (
+                pixels.data (), source.mipWidth, source.mipHeight, 4, channel, rect);
+        };
+        return ParticleAtlas::layout (source, coverage);
+    });
+    if (!layout->windows.empty ()) m_atlas = std::move (layout);
+}
+
 void CParticle::updateParticleRenderVars () {
     m_renderVar0 = glm::vec4 (m_trailLength, m_trailMaxLength, m_trailMinLength, 0.0f);
     if (m_useRopeRenderer && m_useTrailRenderer) {
@@ -4015,7 +4056,10 @@ void CParticle::updateParticleRenderVars () {
 	                         phase, maxCount);
     }
 
-    if (m_spritesheetFrames > 0 && !m_separatePageAnimation
+    if (m_atlas) {
+	// Native g_RenderVar1; the CPU windows replace only its frame grid.
+	m_renderVar1 = m_atlas->renderVar1;
+    } else if (m_spritesheetFrames > 0 && !m_separatePageAnimation
         && m_spritesheetCols > 0 && m_spritesheetRows > 0) {
 	float frameWidth = 1.0f / static_cast<float> (m_spritesheetCols);
 	float frameHeight = 1.0f / static_cast<float> (m_spritesheetRows);
@@ -4087,14 +4131,28 @@ void CParticle::buildSprites (uint32_t rendererIndex) {
 	// mode passes the birth random stream directly instead.
 	float lifetime = m_slotStreams ? p.sequenceFraction : p.getLifetimePos ();
 
+	ParticleAtlas::FrameSample atlasFrame;
 	if (m_spritesheetFrames > 0 && m_particle.animationMode == "randomframe") {
 	    lifetime = ParticleCore::randomFrameLifetime (p.oscillatorRandom);
+	    if (m_atlas) atlasFrame = ParticleAtlas::sampleFrames (lifetime, m_spritesheetFrames);
 	} else if (m_spritesheetFrames > 0 && p.frame >= 0.0f) {
 		// Encode frame index + fractional blend: shader reconstructs via
 		// floor(lifetime * numFrames) = current frame,
 		// frac(lifetime * numFrames) = blend toward next frame
 		lifetime = p.frame / static_cast<float> (m_spritesheetFrames);
+		if (m_atlas) {
+		    // The CPU windows take the sequence position directly.
+		    const float frames = static_cast<float> (m_spritesheetFrames);
+		    const float current = std::clamp (std::floor (p.frame), 0.0f, frames - 1.0f);
+		    atlasFrame = {static_cast<uint32_t> (current),
+		                  static_cast<uint32_t> (std::min (frames - 1.0f, current + 1.0f)),
+		                  p.frame - std::floor (p.frame)};
+		}
+	} else if (m_atlas) {
+	    atlasFrame = ParticleAtlas::sampleFrames (lifetime, m_spritesheetFrames);
 	}
+	const glm::vec4 currentWindow = m_atlas ? m_atlas->windows[atlasFrame.current] : glm::vec4 (0.0f);
+	const glm::vec4 nextWindow = m_atlas ? m_atlas->windows[atlasFrame.next] : glm::vec4 (0.0f);
 
 	auto addVertex = [&] (float u, float v) {
 	    const uint32_t base = vertexIndex * SPRITE_FLOATS_PER_VERTEX;
@@ -4120,6 +4178,13 @@ void CParticle::buildSprites (uint32_t rendererIndex) {
 	    // a_TexCoordC2 (vec2: rotX, rotY)
 	    m_vertices[base + 15] = p.rotation.x;
 	    m_vertices[base + 16] = p.rotation.y;
+	    // a_CpuSpriteUV (current xy, next zw) + a_CpuSpriteBlend: the
+	    // corner of each frame's own window (ComputeSpriteFrame offsets).
+	    m_vertices[base + 17] = currentWindow.x + u * currentWindow.z;
+	    m_vertices[base + 18] = currentWindow.y + v * currentWindow.w;
+	    m_vertices[base + 19] = nextWindow.x + u * nextWindow.z;
+	    m_vertices[base + 20] = nextWindow.y + v * nextWindow.w;
+	    m_vertices[base + 21] = atlasFrame.blend;
 	    vertexIndex++;
 	};
 

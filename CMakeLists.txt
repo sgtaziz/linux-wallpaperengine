@@ -597,6 +597,7 @@ if(BUILD_TESTING)
         src/WallpaperEngine/Testing/Cases/MouseCoordinates.cpp
         src/WallpaperEngine/Testing/Cases/PropertyParser.cpp)
     target_sources(tests PRIVATE src/WallpaperEngine/Testing/Cases/ParticleCore.cpp)
+    target_sources(tests PRIVATE src/WallpaperEngine/Testing/Cases/ParticleAtlas.cpp)
     target_sources(tests PRIVATE src/WallpaperEngine/Testing/Cases/ParticleBirthGeometry.cpp)
     target_sources(tests PRIVATE src/WallpaperEngine/Testing/Cases/ParticleBirthParser.cpp)
     target_sources(tests PRIVATE src/WallpaperEngine/Testing/Cases/ParticleInitialColor.cpp)
