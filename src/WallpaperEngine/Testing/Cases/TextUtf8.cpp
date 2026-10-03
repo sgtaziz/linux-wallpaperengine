@@ -5,8 +5,11 @@
 #include "WallpaperEngine/Render/Objects/TextRaster.h"
 #include "WallpaperEngine/Render/Objects/TextShaping.h"
 #include "WallpaperEngine/Render/Objects/TextLayout.h"
+#include "WallpaperEngine/Render/Objects/TextRowLayout.h"
 
+#include <cstdlib>
 #include <filesystem>
+#include <string_view>
 #include <algorithm>
 #include <vector>
 
@@ -290,4 +293,545 @@ TEST_CASE ("HarfBuzz shapes Latin ligature and Arabic order with the selected Fr
 
     FT_Done_Face (face);
     FT_Done_FreeType (library);
+}
+
+namespace {
+using WallpaperEngine::Render::Objects::layoutTextRows;
+using WallpaperEngine::Render::Objects::shapeNativeTextRow;
+using WallpaperEngine::Render::Objects::TextFaceResolver;
+using WallpaperEngine::Render::Objects::TextLaidRow;
+using WallpaperEngine::Render::Objects::TextLayoutLimits;
+using WallpaperEngine::Render::Objects::TextRowGlyph;
+using WallpaperEngine::Render::Objects::textGlyphHorizontalInk;
+
+constexpr long kNativeTestSize26_6 = 24 * 64;
+
+struct TestFonts {
+    FT_Library library = nullptr;
+    std::vector<FT_Face> faces;
+    TestFonts () { REQUIRE (FT_Init_FreeType (&library) == 0); }
+    ~TestFonts () {
+        for (FT_Face face : faces) FT_Done_Face (face);
+        FT_Done_FreeType (library);
+    }
+    TestFonts (const TestFonts&) = delete;
+    TestFonts& operator= (const TestFonts&) = delete;
+    FT_Face load (const std::filesystem::path& path) {
+        FT_Face face = nullptr;
+        REQUIRE (FT_New_Face (library, path.c_str (), 0, &face) == 0);
+        REQUIRE (FT_Set_Char_Size (face, 0, kNativeTestSize26_6, 300, 300) == 0);
+        faces.push_back (face);
+        return face;
+    }
+    FT_Face loadSystem (const char* name) {
+        for (const char* directory : {"/usr/share/fonts/TTF/", "/usr/share/fonts/truetype/dejavu/",
+                                      "/usr/share/fonts/dejavu/"})
+            if (std::filesystem::exists (std::filesystem::path (directory) / name))
+                return load (std::filesystem::path (directory) / name);
+        FAIL ("system test font is unavailable: " << name);
+        return nullptr;
+    }
+};
+
+// The product resolver contract: the first face covering the scalar, or
+// nullptr when every face is exhausted.
+TextFaceResolver resolverFor (std::vector<FT_Face> order) {
+    return [order] (char32_t codepoint) -> FT_Face {
+        for (FT_Face face : order)
+            if (FT_Get_Char_Index (face, static_cast<FT_ULong> (codepoint)) != 0) return face;
+        return nullptr;
+    };
+}
+
+std::vector<char32_t> scalars (std::string_view utf8) { return decodeTextCodepoints (utf8); }
+
+std::vector<std::vector<char32_t>> rowTexts (const std::vector<TextLaidRow>& rows) {
+    std::vector<std::vector<char32_t>> result;
+    for (const auto& row : rows) result.push_back (row.text);
+    return result;
+}
+
+struct PlacedRow { std::vector<float> x; std::vector<float> right; float pen = 0.0f; };
+
+PlacedRow placeRow (const std::vector<TextRowGlyph>& glyphs) {
+    PlacedRow placed;
+    for (const auto& glyph : glyphs) {
+        const float x = placed.pen + static_cast<float> (glyph.glyph.xOffset26_6 >> 6);
+        float low = 0.0f, high = 0.0f;
+        REQUIRE (textGlyphHorizontalInk (glyph.face, glyph.glyph.glyphIndex, low, high));
+        placed.x.push_back (x);
+        placed.right.push_back (x + high);
+        placed.pen += static_cast<float> (glyph.glyph.xAdvance26_6 >> 6);
+    }
+    return placed;
+}
+
+// Ink right edge of the nth glyph that advances the pen; zero-width
+// default-ignorables do not count as a visible column.
+float inkRightOfAdvancingGlyph (const std::vector<TextRowGlyph>& glyphs, size_t nth) {
+    const auto placed = placeRow (glyphs);
+    size_t seen = 0;
+    for (size_t index = 0; index < glyphs.size (); ++index)
+        if ((glyphs[index].glyph.xAdvance26_6 >> 6) != 0 && ++seen == nth) return placed.right[index];
+    FAIL ("row has too few advancing glyphs");
+    return 0.0f;
+}
+
+TextLayoutLimits widthLimit (float maxWidth, int maxRows = 0, bool ellipsis = false) {
+    TextLayoutLimits limits;
+    limits.maxWidth = maxWidth;
+    limits.maxRows = maxRows;
+    limits.ellipsis = ellipsis;
+    return limits;
+}
+
+TextLayoutLimits rowLimit (int maxRows, bool ellipsis) {
+    TextLayoutLimits limits;
+    limits.maxRows = maxRows;
+    limits.ellipsis = ellipsis;
+    return limits;
+}
+
+using Rows = std::vector<std::vector<char32_t>>;
+} // namespace
+
+TEST_CASE ("Native wrap triggers on the ink right edge rather than the advance", "[text][layout][wrap]") {
+    TestFonts fonts;
+    const FT_Face sans = fonts.loadSystem ("DejaVuSans.ttf");
+    const auto resolve = resolverFor ({sans});
+
+    const auto dotted = scalars ("aaaaaaa.");
+    const auto dottedPlaced = placeRow (shapeNativeTextRow (dotted, resolve).glyphs);
+    const float dotInkRight = dottedPlaced.right.back ();
+    // The period's ink ends well before its advance, which the old wrap measured.
+    REQUIRE (dotInkRight < dottedPlaced.pen);
+    auto rows = layoutTextRows (dotted, resolve, widthLimit (dotInkRight));
+    REQUIRE (rows.size () == 1);
+    REQUIRE (rows[0].glyphs.size () == 8);
+    rows = layoutTextRows (dotted, resolve, widthLimit (dotInkRight - 1.0f));
+    REQUIRE (rowTexts (rows) == Rows {scalars ("aaaaaaa"), scalars (".")});
+
+    const auto eight = scalars ("aaaaaaaa");
+    const float eighthInk = placeRow (shapeNativeTextRow (eight, resolve).glyphs).right.back ();
+    rows = layoutTextRows (eight, resolve, widthLimit (eighthInk - 1.0f));
+    REQUIRE (rowTexts (rows) == Rows {scalars ("aaaaaaa"), scalars ("a")});
+    REQUIRE (rows[0].glyphs.size () == 7);
+    REQUIRE (rows[1].glyphs.size () == 1);
+}
+
+TEST_CASE ("Only ASCII space, tab and CR are native wrap opportunities", "[text][layout][wrap]") {
+    TestFonts fonts;
+    const FT_Face sans = fonts.loadSystem ("DejaVuSans.ttf");
+    const auto resolve = resolverFor ({sans});
+    struct Case { const char* text; const char* first; const char* second; };
+    // Native break-opportunities fixture: the seventh column fits, the eighth overflows.
+    for (const Case& value : {Case {"aaaa bbbb", "aaaa", "bbbb"}, Case {"aaaa\tbbbb", "aaaa", "bbbb"},
+                              Case {"aaaa-bbbb", "aaaa-bb", "bb"},
+                              Case {"aaaa bbbb", "aaaa bb", "bb"},
+                              Case {"aaaa​bbbb", "aaaa​bbb", "b"}}) {
+        INFO (value.text);
+        const auto text = scalars (value.text);
+        const float maxWidth = inkRightOfAdvancingGlyph (shapeNativeTextRow (text, resolve).glyphs, 7);
+        const auto rows = layoutTextRows (text, resolve, widthLimit (maxWidth));
+        REQUIRE (rowTexts (rows) == Rows {scalars (value.first), scalars (value.second)});
+    }
+}
+
+TEST_CASE ("A native wrap at dropped leading whitespace leaves an empty first row", "[text][layout][wrap]") {
+    TestFonts fonts;
+    const FT_Face sans = fonts.loadSystem ("DejaVuSans.ttf");
+    const auto resolve = resolverFor ({sans});
+    const auto control = scalars ("MMMMMMMMMMMM");
+    const float maxWidth = inkRightOfAdvancingGlyph (shapeNativeTextRow (control, resolve).glyphs, 7);
+
+    auto rows = layoutTextRows (control, resolve, widthLimit (maxWidth));
+    REQUIRE (rowTexts (rows) == Rows {scalars ("MMMMMMM"), scalars ("MMMMM")});
+
+    rows = layoutTextRows (scalars ("  MMMMMMMMMMMM"), resolve, widthLimit (maxWidth));
+    REQUIRE (rows.size () == 3);
+    REQUIRE (rows[0].text.empty ());
+    REQUIRE (rows[0].glyphs.empty ());
+    REQUIRE (rows[1].text == scalars ("MMMMMMM"));
+    REQUIRE (rows[1].glyphs.size () == 7);
+    REQUIRE (rows[2].text == scalars ("MMMMM"));
+    REQUIRE (rows[2].glyphs.size () == 5);
+}
+
+TEST_CASE ("The last allowed row is cut at the overflowing glyph or refitted with an ellipsis", "[text][layout][maxrows]") {
+    TestFonts fonts;
+    const FT_Face sans = fonts.loadSystem ("DejaVuSans.ttf");
+    const auto resolve = resolverFor ({sans});
+    const auto text = scalars ("aaaa bbbb cccc");
+    const float sevenColumns = inkRightOfAdvancingGlyph (shapeNativeTextRow (text, resolve).glyphs, 7);
+
+    // No back-search to the space and no trim: the glyphs kept so far stay.
+    auto rows = layoutTextRows (text, resolve, widthLimit (sevenColumns, 1));
+    REQUIRE (rowTexts (rows) == Rows {scalars ("aaaa bb")});
+    REQUIRE (rows[0].glyphs.size () == 7);
+
+    const auto fitted = scalars ("aaaa b…");
+    const float fittedRight = placeRow (shapeNativeTextRow (fitted, resolve).glyphs).right.back ();
+    rows = layoutTextRows (text, resolve, widthLimit (fittedRight, 1, true));
+    REQUIRE (rowTexts (rows) == Rows {fitted});
+    REQUIRE (rows[0].glyphs.size () == 7);
+    REQUIRE (rows[0].glyphs.back ().glyph.glyphIndex == FT_Get_Char_Index (sans, 0x2026));
+    REQUIRE (placeRow (rows[0].glyphs).right.back () <= fittedRight);
+
+    // When only "aaaa …" fits, the refit trims the space before the ellipsis.
+    const float shortRight =
+        placeRow (shapeNativeTextRow (scalars ("aaaa …"), resolve).glyphs).right.back ();
+    rows = layoutTextRows (text, resolve, widthLimit (shortRight, 1, true));
+    REQUIRE (rowTexts (rows) == Rows {scalars ("aaaa…")});
+}
+
+TEST_CASE ("The explicit row cap appends an ellipsis before width layout refits it", "[text][layout][maxrows]") {
+    TestFonts fonts;
+    const FT_Face sans = fonts.loadSystem ("DejaVuSans.ttf");
+    const auto resolve = resolverFor ({sans});
+
+    auto rows = layoutTextRows (scalars ("aaaa\nbbbb \ncccc"), resolve, rowLimit (2, true));
+    REQUIRE (rowTexts (rows) == Rows {scalars ("aaaa"), scalars ("bbbb…")});
+    rows = layoutTextRows (scalars ("aaaa\nbbbb \ncccc"), resolve, rowLimit (2, false));
+    REQUIRE (rowTexts (rows) == Rows {scalars ("aaaa"), scalars ("bbbb")});
+
+    const auto refit = scalars ("bbbbbb…");
+    const float refitRight = placeRow (shapeNativeTextRow (refit, resolve).glyphs).right.back ();
+    rows = layoutTextRows (scalars ("aaaa\nbbbbbbbbbb\ncccc"), resolve, widthLimit (refitRight, 2, true));
+    REQUIRE (rowTexts (rows) == Rows {scalars ("aaaa"), refit});
+    REQUIRE (rows[1].glyphs.size () == 7);
+
+    // A wrap that pushes rows past the cap trims and ellipsizes the last kept row.
+    const auto wrapped = scalars ("aaaa bbbb\ncccc");
+    const float sevenColumns = inkRightOfAdvancingGlyph (shapeNativeTextRow (wrapped, resolve).glyphs, 7);
+    rows = layoutTextRows (wrapped, resolve, widthLimit (sevenColumns, 2, true));
+    REQUIRE (rowTexts (rows) == Rows {scalars ("aaaa"), scalars ("bbbb…")});
+
+    // A terminal LF adds no row; empty explicit rows still count.
+    rows = layoutTextRows (scalars ("a\n\nb\n"), resolve, TextLayoutLimits {});
+    REQUIRE (rowTexts (rows) == Rows {scalars ("a"), scalars (""), scalars ("b")});
+}
+
+TEST_CASE ("Glyph id 0 and leading whitespace take no native position or advance", "[text][layout][runs]") {
+    TestFonts fonts;
+    const FT_Face sans = fonts.loadSystem ("DejaVuSans.ttf");
+    REQUIRE (FT_Get_Char_Index (sans, 0x0378) == 0);
+    REQUIRE (FT_Get_Char_Index (sans, '\t') == 0);
+    const auto resolve = resolverFor ({sans});
+    const TextLayoutLimits none;
+
+    const auto inner = layoutTextRows (scalars ("A͸B"), resolve, none);
+    REQUIRE (inner.size () == 1);
+    REQUIRE (inner[0].glyphs.size () == 2);
+    REQUIRE (inner[0].glyphs[1].glyph.glyphIndex == FT_Get_Char_Index (sans, 'B'));
+    REQUIRE (placeRow (inner[0].glyphs).x[1]
+             == static_cast<float> (inner[0].glyphs[0].glyph.xAdvance26_6 >> 6));
+
+    for (const char* leading : {"͸A", "    A", "\tA", "‍A"}) {
+        INFO (leading);
+        const auto rows = layoutTextRows (scalars (leading), resolve, none);
+        REQUIRE (rows.size () == 1);
+        REQUIRE (rows[0].glyphs.size () == 1);
+        REQUIRE (rows[0].glyphs[0].glyph.glyphIndex == FT_Get_Char_Index (sans, 'A'));
+        REQUIRE (placeRow (rows[0].glyphs).x[0] == 0.0f);
+    }
+
+    const auto trailing = layoutTextRows (scalars ("A    "), resolve, none);
+    REQUIRE (trailing[0].glyphs.size () == 5);
+    const auto exhausted = layoutTextRows (scalars ("͸͸\nA"), resolve, none);
+    REQUIRE (exhausted.size () == 2);
+    REQUIRE (exhausted[0].glyphs.empty ());
+    REQUIRE (exhausted[1].glyphs.size () == 1);
+}
+
+TEST_CASE ("Whitespace and exhausted scalars stay in the current native face run", "[text][layout][runs]") {
+    TestFonts fonts;
+    const FT_Face sans = fonts.loadSystem ("DejaVuSans.ttf");
+    const FT_Face mono = fonts.loadSystem ("DejaVuSansMono.ttf");
+    const auto numeralsMono = [&] (char32_t codepoint) -> FT_Face {
+        if (codepoint >= '0' && codepoint <= '9') return mono;
+        return FT_Get_Char_Index (sans, codepoint) ? sans : nullptr;
+    };
+
+    const auto numerals = shapeNativeTextRow (scalars ("12 34"), numeralsMono);
+    REQUIRE (numerals.glyphs.size () == 5);
+    for (const auto& glyph : numerals.glyphs) {
+        REQUIRE (glyph.face == mono);
+        REQUIRE (glyph.runStart == 0);
+    }
+    REQUIRE (numerals.glyphs[2].glyph.xAdvance26_6
+             == shapeTextRun (mono, scalars (" ")).glyphs[0].xAdvance26_6);
+
+    const auto mixed = shapeNativeTextRow (scalars ("1 A"), numeralsMono);
+    REQUIRE (mixed.glyphs.size () == 3);
+    REQUIRE (mixed.glyphs[1].face == mono);
+    REQUIRE (mixed.glyphs[2].face == sans);
+    REQUIRE (mixed.glyphs[2].runStart == 2);
+
+    // An exhausted combining mark is shaped with the base run's face, so
+    // HarfBuzz composes it with its base exactly like the precomposed scalar.
+    const auto markExhausted = [&] (char32_t codepoint) -> FT_Face {
+        return codepoint == 0x0308 ? nullptr : sans;
+    };
+    const auto composed = shapeNativeTextRow (scalars ("Ä"), markExhausted);
+    REQUIRE (composed.glyphs.size () == 1);
+    REQUIRE (composed.glyphs[0].glyph.glyphIndex == FT_Get_Char_Index (sans, 0x00c4));
+}
+
+TEST_CASE ("Rows containing an RTL run keep the readable Linux word wrap", "[text][layout][wrap][rtl]") {
+    TestFonts fonts;
+    const FT_Face sans = fonts.loadSystem ("DejaVuSans.ttf");
+    const auto resolve = resolverFor ({sans});
+    float widestWord = 0.0f;
+    for (const char* word : {"مرحبا", "بالعالم"}) {
+        float width = 0.0f;
+        for (const auto& glyph : shapeTextRun (sans, scalars (word)).glyphs)
+            width += static_cast<float> (glyph.xAdvance26_6 >> 6);
+        widestWord = std::max (widestWord, width);
+    }
+    const auto rows = layoutTextRows (scalars ("مرحبا بالعالم مرحبا"), resolve,
+                                      widthLimit (widestWord + 1.0f, 3));
+    REQUIRE (rowTexts (rows) == Rows {scalars ("مرحبا"), scalars ("بالعالم"), scalars ("مرحبا")});
+    for (const auto& row : rows) REQUIRE (row.glyphs.size () == row.text.size ());
+}
+
+TEST_CASE ("Shipped fonts keep emoji spacing and reproduce native layout fixtures", "[text][layout][runs][shipped]") {
+    const char* root = std::getenv ("WPE_SHIPPED_ASSETS");
+    if (!root) SKIP ("WPE_SHIPPED_ASSETS is not set; shipped NotoSans/RobotoMono/Twemoji fixtures not run");
+    const std::filesystem::path assets (root);
+    TestFonts fonts;
+    const FT_Face noto = fonts.load (assets / "fonts/NotoSans-Regular.ttf");
+    const FT_Face roboto = fonts.load (assets / "fonts/RobotoMono-Regular.ttf");
+    const FT_Face twemoji = fonts.load (assets / "fonts/TwemojiMozilla.ttf");
+    REQUIRE (FT_Get_Char_Index (twemoji, ' ') == 0);
+    const auto resolve = resolverFor ({noto, twemoji});
+    const TextLayoutLimits none;
+
+    // Linux draws colour Twemoji, which has no space: the space keeps the
+    // advance of the face that supplies it instead of collapsing the gap.
+    const auto pair = layoutTextRows (scalars ("😀 😀"), resolve, none);
+    REQUIRE (pair[0].glyphs.size () == 3);
+    REQUIRE (pair[0].glyphs[1].face == noto);
+    const auto pairPlaced = placeRow (pair[0].glyphs);
+    const float gap = pairPlaced.x[2]
+        - (pairPlaced.x[0] + static_cast<float> (pair[0].glyphs[0].glyph.xAdvance26_6 >> 6));
+    REQUIRE (gap == static_cast<float> (shapeTextRun (noto, scalars (" ")).glyphs[0].xAdvance26_6 >> 6));
+    REQUIRE (gap > 0.0f);
+
+    const auto heart = layoutTextRows (scalars ("A 🧡 B"), resolve, none);
+    REQUIRE (heart[0].glyphs.size () == 5);
+    const std::vector<FT_Face> heartFaces {noto, noto, twemoji, noto, noto};
+    for (size_t index = 0; index < heartFaces.size (); ++index) {
+        REQUIRE (heart[0].glyphs[index].face == heartFaces[index]);
+        REQUIRE ((heart[0].glyphs[index].glyph.xAdvance26_6 >> 6) > 0);
+    }
+
+    // The ellipsis trial measures the substituted space that is drawn, not
+    // Twemoji's notdef advance.
+    const auto emojiRow = scalars ("😀 AAAA");
+    const float emojiFit = placeRow (shapeNativeTextRow (scalars ("😀 A…"), resolve).glyphs).right.back ();
+    REQUIRE (rowTexts (layoutTextRows (emojiRow, resolve, widthLimit (emojiFit, 1, true)))
+             == Rows {scalars ("😀 A…")});
+
+    // Native run-boundary-emoji: an exhausted scalar after an emoji takes no advance.
+    const auto exhausted = placeRow (layoutTextRows (scalars ("😀͸A"), resolve, none)[0].glyphs);
+    const auto control = placeRow (layoutTextRows (scalars ("😀A"), resolve, none)[0].glyphs);
+    REQUIRE (exhausted.x == control.x);
+
+    // Native marks-across-runs: RobotoMono lacks U+0308, so A+U+0308 composes to Ä.
+    REQUIRE (FT_Get_Char_Index (roboto, 0x0308) == 0);
+    const auto robotoResolve = resolverFor ({roboto});
+    const auto decomposed = layoutTextRows (scalars ("Ä"), robotoResolve, none);
+    REQUIRE (decomposed[0].glyphs.size () == 1);
+    REQUIRE (decomposed[0].glyphs[0].glyph.glyphIndex == FT_Get_Char_Index (roboto, 0x00c4));
+
+    // Native fixture outcomes at RobotoMono 24 pt (raster pixels).
+    REQUIRE (layoutTextRows (scalars ("aaaaaaa."), robotoResolve, widthLimit (469.0f)).size () == 1);
+    REQUIRE (rowTexts (layoutTextRows (scalars ("aaaaaaaa"), robotoResolve, widthLimit (469.0f)))
+             == Rows {scalars ("aaaaaaa"), scalars ("a")});
+    REQUIRE (rowTexts (layoutTextRows (scalars ("  MMMMMMMMMMMM"), robotoResolve, widthLimit (450.0f)))
+             == Rows {scalars (""), scalars ("MMMMMMM"), scalars ("MMMMM")});
+    REQUIRE (rowTexts (layoutTextRows (scalars ("aaaa bbbb cccc"), robotoResolve, widthLimit (450.0f, 1)))
+             == Rows {scalars ("aaaa bb")});
+    REQUIRE (rowTexts (layoutTextRows (scalars ("aaaa bbbb cccc"), robotoResolve, widthLimit (450.0f, 1, true)))
+             == Rows {scalars ("aaaa b…")});
+    REQUIRE (rowTexts (layoutTextRows (scalars ("aaaa\nbbbbbbbbbb\ncccc"), robotoResolve,
+                                       widthLimit (450.0f, 2, true)))
+             == Rows {scalars ("aaaa"), scalars ("bbbbbb…")});
+    REQUIRE (rowTexts (layoutTextRows (scalars ("aaaa bbbb\ncccc"), robotoResolve, widthLimit (450.0f, 2, true)))
+             == Rows {scalars ("aaaa"), scalars ("bbbb…")});
+    struct Case { const char* text; const char* first; const char* second; };
+    for (const Case& value : {Case {"aaaa bbbb", "aaaa", "bbbb"}, Case {"aaaa-bbbb", "aaaa-bb", "bb"},
+                              Case {"aaaa bbbb", "aaaa bb", "bb"},
+                              Case {"aaaa​bbbb", "aaaa​bbb", "b"}}) {
+        INFO (value.text);
+        REQUIRE (rowTexts (layoutTextRows (scalars (value.text), robotoResolve, widthLimit (450.0f)))
+                 == Rows {scalars (value.first), scalars (value.second)});
+    }
+}
+
+namespace {
+TextLayoutLimits spacedLimit (float maxWidth, float spacing, int maxRows = 0, bool ellipsis = false) {
+    auto limits = widthLimit (maxWidth, maxRows, ellipsis);
+    limits.letterSpacing = spacing;
+    return limits;
+}
+} // namespace
+
+TEST_CASE ("Native wrap includes letter spacing in the pen but the ellipsis trial excludes it", "[text][layout][wrap]") {
+    TestFonts fonts;
+    const FT_Face sans = fonts.loadSystem ("DejaVuSans.ttf");
+    const auto resolve = resolverFor ({sans});
+    constexpr float spacing = 8.0f;
+
+    const auto eight = scalars ("aaaaaaaa");
+    const auto glyphs = shapeNativeTextRow (eight, resolve).glyphs;
+    const float advance = static_cast<float> (glyphs[0].glyph.xAdvance26_6 >> 6);
+    // The eighth glyph's ink with seven spaced advances before it.
+    const float spacedRight = placeRow (glyphs).right.back () + 7.0f * spacing;
+    REQUIRE (layoutTextRows (eight, resolve, spacedLimit (spacedRight, spacing)).size () == 1);
+    REQUIRE (rowTexts (layoutTextRows (eight, resolve, spacedLimit (spacedRight - 1.0f, spacing)))
+             == Rows {scalars ("aaaaaaa"), scalars ("a")});
+    REQUIRE (spacedRight - 7.0f * spacing < spacedRight - 1.0f);
+    REQUIRE (advance > 0.0f);
+
+    // The spaced walk overflows at the second b; the unspaced trial still fits "aaaa b…".
+    const float unspacedFit = placeRow (shapeNativeTextRow (scalars ("aaaa b…"), resolve).glyphs).right.back ();
+    REQUIRE (rowTexts (layoutTextRows (scalars ("aaaa bbbb cccc"), resolve, spacedLimit (unspacedFit, spacing, 1, true)))
+             == Rows {scalars ("aaaa b…")});
+}
+
+TEST_CASE ("Native wrap never breaks inside one shaped cluster", "[text][layout][wrap]") {
+    TestFonts fonts;
+    const FT_Face sans = fonts.loadSystem ("DejaVuSans.ttf");
+    const auto resolve = resolverFor ({sans});
+    // U+035D is a double diacritic: its ink extends right of its base glyph,
+    // but it shares the base's cluster, so it cannot trigger a break.
+    const auto text = scalars ("aa͝");
+    const auto glyphs = shapeNativeTextRow (text, resolve).glyphs;
+    REQUIRE (glyphs.size () == 3);
+    REQUIRE (glyphs[1].glyph.cluster == glyphs[2].glyph.cluster);
+    const auto placed = placeRow (glyphs);
+    REQUIRE (placed.right[2] > placed.right[1] + 1.0f);
+    const auto rows = layoutTextRows (text, resolve, widthLimit (placed.right[1]));
+    REQUIRE (rows.size () == 1);
+    REQUIRE (rows[0].glyphs.size () == 3);
+}
+
+TEST_CASE ("A wrap pops every trailing space and reports unsafe splits", "[text][layout][wrap]") {
+    TestFonts fonts;
+    const FT_Face sans = fonts.loadSystem ("DejaVuSans.ttf");
+    const auto resolve = resolverFor ({sans});
+    const auto text = scalars ("aaaa  bbbb");
+    const float maxWidth = inkRightOfAdvancingGlyph (shapeNativeTextRow (text, resolve).glyphs, 7);
+    const auto rows = layoutTextRows (text, resolve, widthLimit (maxWidth));
+    REQUIRE (rowTexts (rows) == Rows {scalars ("aaaa"), scalars ("bbbb")});
+    // The tail pop uses the trimmed length: neither space stays in the bounds.
+    REQUIRE (rows[0].glyphs.size () == 4);
+
+    // reprocess only when glyphs remain in the popped
+    // run and the last popped glyph is unsafe to break.
+    using WallpaperEngine::Render::Objects::detail::dropTextGlyphTail;
+    const auto run = [] (std::initializer_list<bool> unsafe) {
+        std::vector<TextRowGlyph> glyphs;
+        uint32_t cluster = 0;
+        for (const bool flag : unsafe)
+            glyphs.push_back ({nullptr, {1, cluster++, 64, 0, 0, 0, flag}, 0});
+        return glyphs;
+    };
+    auto kept = run ({false, false, false, true, false});
+    REQUIRE (dropTextGlyphTail (kept, 3));
+    REQUIRE (kept.size () == 3);
+    kept = run ({false, false, false, false, true});
+    REQUIRE_FALSE (dropTextGlyphTail (kept, 3));
+    kept = run ({true, false, false});
+    REQUIRE_FALSE (dropTextGlyphTail (kept, 0));
+    REQUIRE (kept.empty ());
+}
+
+TEST_CASE ("The native ellipsis trial measures notdef glyphs and keeps glyphs when nothing fits", "[text][layout][maxrows]") {
+    TestFonts fonts;
+    const FT_Face sans = fonts.loadSystem ("DejaVuSans.ttf");
+    const auto resolve = resolverFor ({sans});
+
+    // Drawn rows skip the notdef of U+0378, but the trial counts its advance.
+    const float drawnFit = placeRow (shapeNativeTextRow (scalars ("aaaa͸b…"), resolve).glyphs).right.back ();
+    auto rows = layoutTextRows (scalars ("aaaa͸bbbb"), resolve, widthLimit (drawnFit, 1, true));
+    REQUIRE (rowTexts (rows) == Rows {scalars ("aaaa͸…")});
+    REQUIRE (rows[0].glyphs.size () == 5);
+
+    // When no prefix plus "…" fits, the kept glyphs stay and no ellipsis is added.
+    const float oneGlyph = placeRow (shapeNativeTextRow (scalars ("M"), resolve).glyphs).right.back ();
+    rows = layoutTextRows (scalars ("MMMM"), resolve, widthLimit (oneGlyph + 1.0f, 1, true));
+    REQUIRE (rowTexts (rows) == Rows {scalars ("M")});
+    REQUIRE (rows[0].glyphs.size () == 1);
+    REQUIRE (rows[0].glyphs[0].glyph.glyphIndex == FT_Get_Char_Index (sans, 'M'));
+}
+
+TEST_CASE ("The row cap ellipsizes the last row kept by the Linux RTL wrap", "[text][layout][wrap][rtl]") {
+    TestFonts fonts;
+    const FT_Face sans = fonts.loadSystem ("DejaVuSans.ttf");
+    const auto resolve = resolverFor ({sans});
+    float widestWord = 0.0f;
+    for (const char* word : {"مرحبا", "بالعالم"}) {
+        float width = 0.0f;
+        for (const auto& glyph : shapeTextRun (sans, scalars (word)).glyphs)
+            width += static_cast<float> (glyph.xAdvance26_6 >> 6);
+        widestWord = std::max (widestWord, width);
+    }
+    const auto rows = layoutTextRows (scalars ("مرحبا بالعالم مرحبا"), resolve,
+                                      widthLimit (widestWord + 1.0f, 2, true));
+    REQUIRE (rowTexts (rows) == Rows {scalars ("مرحبا"), scalars ("بالعالم…")});
+}
+
+TEST_CASE ("A fallback-supplied mark stays in its base run when the run face composes it", "[text][layout][runs][shipped]") {
+    const char* root = std::getenv ("WPE_SHIPPED_ASSETS");
+    if (!root) SKIP ("WPE_SHIPPED_ASSETS is not set; shipped RobotoMono/NotoSans mark composition not run");
+    const std::filesystem::path assets (root);
+    TestFonts fonts;
+    const FT_Face roboto = fonts.load (assets / "fonts/RobotoMono-Regular.ttf");
+    const FT_Face noto = fonts.load (assets / "fonts/NotoSans-Regular.ttf");
+    REQUIRE (FT_Get_Char_Index (roboto, 0x0308) == 0);
+    REQUIRE (FT_Get_Char_Index (noto, 0x0308) != 0);
+    // As on Linux, a fallback face supplies the mark that RobotoMono lacks.
+    const auto resolve = resolverFor ({roboto, noto});
+    const TextLayoutLimits none;
+
+    // Native marks-across-runs: the mark is exhausted there, stays in the base
+    // run and composes; Linux keeps it in the run because RobotoMono has Ä.
+    const auto composed = layoutTextRows (scalars ("A\xcc\x88"), resolve, none);
+    REQUIRE (composed[0].glyphs.size () == 1);
+    REQUIRE (composed[0].glyphs[0].face == roboto);
+    REQUIRE (composed[0].glyphs[0].glyph.glyphIndex == FT_Get_Char_Index (roboto, 0x00c4));
+
+    // The following space then keeps the base face's advance.
+    const auto cafe = layoutTextRows (scalars ("Cafe\xcc\x81 A\xcc\x88 n\xcc\x83"), resolve, none);
+    for (const auto& glyph : cafe[0].glyphs) {
+        REQUIRE (glyph.face == roboto);
+        REQUIRE (glyph.runStart == 0);
+    }
+    const auto precomposed = layoutTextRows (scalars ("Café Ä ñ"), resolve, none);
+    REQUIRE (placeRow (cafe[0].glyphs).x == placeRow (precomposed[0].glyphs).x);
+
+    // Without a precomposed form in the run face the Fontconfig-style
+    // fallback stays: Q+U+0308 draws the NotoSans mark in its own run.
+    REQUIRE (FT_Get_Char_Index (roboto, 0x0051) != 0);
+    hb_codepoint_t q = 0;
+    REQUIRE_FALSE (hb_unicode_compose (hb_unicode_funcs_get_default (), 'Q', 0x0308, &q));
+    const auto fallback = layoutTextRows (scalars ("Q\xcc\x88"), resolve, none);
+    REQUIRE (fallback[0].glyphs.size () == 2);
+    REQUIRE (fallback[0].glyphs[0].face == roboto);
+    REQUIRE (fallback[0].glyphs[1].face == noto);
+    REQUIRE (fallback[0].glyphs[1].runStart == 1);
+
+    // A canonical composition the run face does not cover (A+U+030C = U+01CD)
+    // also keeps the fallback mark.
+    REQUIRE (FT_Get_Char_Index (roboto, 0x01cd) == 0);
+    REQUIRE (FT_Get_Char_Index (roboto, 0x030c) == 0);
+    REQUIRE (FT_Get_Char_Index (noto, 0x030c) != 0);
+    hb_codepoint_t caron = 0;
+    REQUIRE (hb_unicode_compose (hb_unicode_funcs_get_default (), 'A', 0x030c, &caron));
+    REQUIRE (caron == 0x01cd);
+    const auto uncovered = layoutTextRows (scalars ("A\xcc\x8c"), resolve, none);
+    REQUIRE (uncovered[0].glyphs.size () == 2);
+    REQUIRE (uncovered[0].glyphs[1].face == noto);
 }
