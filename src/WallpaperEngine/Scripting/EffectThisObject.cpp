@@ -4,6 +4,7 @@
 #include "WallpaperEngine/Data/Model/Object.h"
 #include "WallpaperEngine/Render/Objects/CImage.h"
 #include "WallpaperEngine/Scripting/Adapters/ScriptableObjectAdapter.h"
+#include "WallpaperEngine/Scripting/LayerPropertyWrites.h"
 #include "WallpaperEngine/Scripting/ScriptableObject.h"
 
 #include <limits>
@@ -43,10 +44,12 @@ JSValue visibleSet (JSContext* context, JSValueConst, int argc, JSValueConst* ar
     const auto* effect = effectAt (data[0], index);
     if (!effect || !effect->visible || !effect->visible->value)
         return JS_ThrowTypeError (context, "Effect is no longer available");
-    if (argc != 1 || !JS_IsBool (argv[0]))
-        return JS_ThrowTypeError (context, "Effect visibility requires a boolean");
-    effect->visible->value->update (JS_ToBool (context, argv[0]) != 0,
-                                    WallpaperEngine::Data::Model::DynamicValue::Script);
+    // IEffect `visible` is a Boolean host property.
+    // The shared converter skips any value that is not a Boolean.
+    bool visible = false;
+    if (WallpaperEngine::Scripting::convertLayerBoolean (argc > 0 ? argv[0] : JS_UNDEFINED, visible)
+        == WallpaperEngine::Scripting::LayerWrite::Assign)
+        effect->visible->value->update (visible, WallpaperEngine::Data::Model::DynamicValue::Script);
     return JS_UNDEFINED;
 }
 }

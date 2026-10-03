@@ -102,8 +102,6 @@ static JSValue particle_emit_particles (JSContext* ctx, JSValueConst thisValue,
 
 enum ParticleMethod { ParticlePlay, ParticlePause, ParticleStop, ParticleIsPlaying };
 
-static bool readVector (JSContext* ctx, JSValueConst value, int count, float* components);
-
 static WallpaperEngine::Render::Objects::CParticle* particle_instance_layer (JSValueConst layer) {
     return dynamic_cast<WallpaperEngine::Render::Objects::CParticle*> (
         ScriptableObjectAdapter::resolve (layer));
@@ -147,13 +145,13 @@ static JSValue particle_instance_set (JSContext* ctx, JSValueConst, int argc,
                                       JSValueConst* argv, int magic, JSValue* data) {
     auto* value = particle_instance_value (data[0], magic);
     if (!value) return JS_ThrowTypeError (ctx, "Particle instance is no longer available");
-    if (argc != 1 || !JS_IsNumber (argv[0]))
-        return JS_ThrowTypeError (ctx, "Particle instance factor requires a number");
-    double number = 0.0;
-    if (JS_ToFloat64 (ctx, &number, argv[0]) < 0) return JS_EXCEPTION;
-    if (!std::isfinite (number) || std::abs (number) > std::numeric_limits<float>::max ())
-        return JS_ThrowTypeError (ctx, "Particle instance factor must be a finite float");
-    value->update (static_cast<float> (number), DynamicValue::Script);
+    // The instance factors are Float host properties and use the
+    // same converter as layer properties: a non-number is skipped.
+    float number = 0.0f;
+    const auto result = WallpaperEngine::Scripting::convertLayerFloat (
+        ctx, argc > 0 ? argv[0] : JS_UNDEFINED, number);
+    if (result == WallpaperEngine::Scripting::LayerWrite::Exception) return JS_EXCEPTION;
+    if (result == WallpaperEngine::Scripting::LayerWrite::Assign) value->update (number, DynamicValue::Script);
     return JS_UNDEFINED;
 }
 
@@ -182,18 +180,12 @@ static JSValue layer_vec2 (JSContext* ctx, const glm::vec2& size) {
     return result;
 }
 
-static bool particle_instance_read_vec3 (JSContext* ctx, JSValueConst value, float* components) {
-    if (JS_IsNumber (value)) {
-        double number = 0.0;
-        if (JS_ToFloat64 (ctx, &number, value) < 0) return false;
-        if (!std::isfinite (number) || std::abs (number) > std::numeric_limits<float>::max ()) {
-            JS_ThrowTypeError (ctx, "Particle instance vector requires a finite float");
-            return false;
-        }
-        components[0] = components[1] = components[2] = static_cast<float> (number);
-        return true;
-    }
-    return readVector (ctx, value, 3, components);
+// Instance control points and colorn are Vec3 host properties
+// without the angle flag; they use the layer vector conversion.
+static WallpaperEngine::Scripting::LayerWrite particle_instance_read_vec3 (
+    JSContext* ctx, int argc, JSValueConst* argv, float* components) {
+    return WallpaperEngine::Scripting::convertLayerVector (
+        ctx, argc > 0 ? argv[0] : JS_UNDEFINED, 3, false, components);
 }
 
 static JSValue particle_instance_cp_get (JSContext* ctx, JSValueConst, int,
@@ -212,7 +204,9 @@ static JSValue particle_instance_cp_set (JSContext* ctx, JSValueConst, int argc,
     auto* particle = particle_instance_layer (data[0]);
     if (!particle) return JS_ThrowTypeError (ctx, "Particle instance is no longer available");
     float components[3] {};
-    if (argc != 1 || !particle_instance_read_vec3 (ctx, argv[0], components)) return JS_EXCEPTION;
+    const auto result = particle_instance_read_vec3 (ctx, argc, argv, components);
+    if (result == WallpaperEngine::Scripting::LayerWrite::Exception) return JS_EXCEPTION;
+    if (result == WallpaperEngine::Scripting::LayerWrite::Ignore) return JS_UNDEFINED;
     const glm::vec3 value (components[0], components[1], components[2]);
     const size_t index = static_cast<size_t> (magic % 8);
     if (magic < 8) particle->setInstanceControlPoint (index, value);
@@ -239,7 +233,9 @@ static JSValue particle_instance_colorn_set (JSContext* ctx, JSValueConst, int a
     auto* value = particle_instance_colorn_value (data[0]);
     if (!value) return JS_ThrowTypeError (ctx, "Particle instance is no longer available");
     float components[3] {};
-    if (argc != 1 || !particle_instance_read_vec3 (ctx, argv[0], components)) return JS_EXCEPTION;
+    const auto result = particle_instance_read_vec3 (ctx, argc, argv, components);
+    if (result == WallpaperEngine::Scripting::LayerWrite::Exception) return JS_EXCEPTION;
+    if (result == WallpaperEngine::Scripting::LayerWrite::Ignore) return JS_UNDEFINED;
     value->update (glm::vec3 (components[0], components[1], components[2]), DynamicValue::Script);
     return JS_UNDEFINED;
 }
@@ -465,8 +461,10 @@ JSValue scriptableobject_property_get (JSContext* ctx, JSValueConst obj_val, JSA
 
     ScopeGuard guard ([=] { JS_FreeCString (ctx, name); });
 
-    if (std::string_view (name) == "name")
-        return JS_NewString (ctx, container->lifetime->object->getObject ().name.c_str ());
+    if (std::string_view (name) == "name") {
+        const auto& layerName = container->lifetime->object->getScriptName ();
+        return JS_NewStringLen (ctx, layerName.data (), layerName.size ());
+    }
     if (std::string_view (name) == "solid")
         return JS_NewBool (ctx, container->lifetime->object->isSolid ());
     if (std::string_view (name) == "disablepropagation")
@@ -500,7 +498,7 @@ JSValue scriptableobject_property_get (JSContext* ctx, JSValueConst obj_val, JSA
     if (std::string_view (name) == "font") {
         const auto* text = dynamic_cast<WallpaperEngine::Render::Objects::CText*> (
             container->lifetime->object);
-        if (text) return JS_NewString (ctx, text->getObject ().as<Text> ()->font.c_str ());
+        if (text) return JS_NewStringLen (ctx, text->getFont ().data (), text->getFont ().size ());
     }
 
     if ((dynamic_cast<WallpaperEngine::Render::Objects::CImage*> (container->lifetime->object)
@@ -535,18 +533,9 @@ JSValue scriptableobject_property_get (JSContext* ctx, JSValueConst obj_val, JSA
     }
 
     const auto& properties = container->lifetime->object->getProperties ();
-    // SceneScript's public text names are lowercase, while the retained
-    // renderer settings use the parser's camel-case field names.
-    const std::string_view publicName (name);
-    const char* propertyName = publicName == "pointsize" ? "pointSize"
-        : publicName == "limitrows" ? "limitRows"
-        : publicName == "maxrows" ? "maxRows"
-        : publicName == "limitwidth" ? "limitWidth"
-        : publicName == "maxwidth" ? "maxWidth"
-        : publicName == "limituseellipsis" ? "limitUseEllipsis"
-        : publicName == "opaquebackground" ? "opaqueBackground"
-        : publicName == "backgroundcolor" ? "backgroundColor" : name;
-    const auto it = properties.find (propertyName);
+    const auto key = WallpaperEngine::Scripting::layerPropertyKey (name);
+    if (!key) return JS_UNDEFINED;
+    const auto it = properties.find (std::string (*key));
     if (it == properties.end ()) return JS_UNDEFINED;
     auto& value = it->second.value;
     if (value.getType () == DynamicValue::Vec4
@@ -560,34 +549,20 @@ JSValue scriptableobject_property_get (JSContext* ctx, JSValueConst obj_val, JSA
         value, true, container->lifetime->object->isAngleProperty (value));
 }
 
-static bool readVector (JSContext* ctx, JSValueConst value, int count, float* components) {
-    if (!JS_IsObject (value)) {
-	JS_ThrowTypeError (ctx, "Layer vector property requires an object");
-	return false;
-    }
-    for (int index = 0; index < count; ++index) {
-	const char name[] = {"xyzw"[index], '\0'};
-	JSValue component = JS_GetPropertyStr (ctx, value, name);
-	if (JS_IsException (component)) return false;
-	double number = 0.0;
-	const bool valid = JS_IsNumber (component) && JS_ToFloat64 (ctx, &number, component) == 0
-		&& std::isfinite (number) && std::abs (number) <= std::numeric_limits<float>::max ();
-	JS_FreeValue (ctx, component);
-	if (!valid) {
-	    JS_ThrowTypeError (ctx, "Layer vector property requires finite numeric components");
-	    return false;
-	}
-	components[index] = static_cast<float> (number);
-    }
-    return true;
+// Applies a converter result: an exception propagates, and a skipped value
+// leaves the property unchanged.
+static int layerWriteResult (WallpaperEngine::Scripting::LayerWrite result) {
+    return result == WallpaperEngine::Scripting::LayerWrite::Exception ? -1 : 1;
 }
 
 int scriptableobject_property_set (
     JSContext* ctx, JSValueConst obj_val, JSAtom atom, JSValueConst val, JSValueConst receiver, int flags
 ) {
+    using WallpaperEngine::Scripting::LayerWrite;
     auto* container = scriptableContainer (obj_val);
     if (!container) return JS_ThrowTypeError (ctx, "Invalid layer object"), -1;
     if (!container->lifetime->object) return 1;
+    auto* layer = container->lifetime->object;
 
     const char* name = JS_AtomToCString (ctx, atom);
 
@@ -596,122 +571,110 @@ int scriptableobject_property_set (
     }
 
     ScopeGuard guard ([=] { JS_FreeCString (ctx, name); });
-    if (std::string_view (name) == "solid" || std::string_view (name) == "disablepropagation") {
-        // Native base-layer Boolean setters ignore non-Boolean values. These
-        // flags affect live input routing without changing the authored config.
-        if (JS_IsBool (val)) {
-            if (std::string_view (name) == "solid")
-                container->lifetime->object->setSolid (JS_VALUE_GET_BOOL (val));
-            else
-                container->lifetime->object->setDisablePropagation (JS_VALUE_GET_BOOL (val));
-        }
-        return 1;
-    }
-    // Native text and image layers register these as String host
-    // properties. Other layers do not have them, so a write there falls
-    // through to the unknown-name path below.
-    auto* text = dynamic_cast<WallpaperEngine::Render::Objects::CText*> (container->lifetime->object);
-    auto* image = dynamic_cast<WallpaperEngine::Render::Objects::CImage*> (container->lifetime->object);
-    const bool textAlign = text && (std::string_view (name) == "horizontalalign"
-                                    || std::string_view (name) == "verticalalign");
-    if (textAlign || (image && std::string_view (name) == "alignment")) {
-        std::string value;
-        switch (WallpaperEngine::Scripting::convertLayerString (ctx, val, value)) {
-            case WallpaperEngine::Scripting::LayerStringWrite::Exception: return -1;
-            case WallpaperEngine::Scripting::LayerStringWrite::Ignore: return 1;
-            case WallpaperEngine::Scripting::LayerStringWrite::Assign: break;
-        }
-        if (!textAlign) image->setAlignment (value);
-        else if (std::string_view (name) == "horizontalalign") text->setHorizontalAlign (value);
-        else text->setVerticalAlign (value);
-        return 1;
-    }
-    const auto& properties = container->lifetime->object->getProperties ();
     const std::string_view publicName (name);
-    const char* propertyName = publicName == "pointsize" ? "pointSize"
-        : publicName == "limitrows" ? "limitRows"
-        : publicName == "maxrows" ? "maxRows"
-        : publicName == "limitwidth" ? "limitWidth"
-        : publicName == "maxwidth" ? "maxWidth"
-        : publicName == "limituseellipsis" ? "limitUseEllipsis"
-        : publicName == "opaquebackground" ? "opaqueBackground"
-        : publicName == "backgroundcolor" ? "backgroundColor" : name;
-    const auto it = properties.find (propertyName);
+    // Native layers have no read-only host properties: every host property
+    // shares the setter with attribute 0. Each write below goes
+    // through the type converter.
+    if (publicName == "solid" || publicName == "disablepropagation") {
+        // These flags affect live input routing without changing the authored config.
+        bool flag = false;
+        if (WallpaperEngine::Scripting::convertLayerBoolean (val, flag) == LayerWrite::Assign) {
+            if (publicName == "solid") layer->setSolid (flag);
+            else layer->setDisablePropagation (flag);
+        }
+        return 1;
+    }
+    auto* text = dynamic_cast<WallpaperEngine::Render::Objects::CText*> (layer);
+    auto* image = dynamic_cast<WallpaperEngine::Render::Objects::CImage*> (layer);
+    // String host properties. `name` is on every layer; text layers add the
+    // alignments and `font`; image layers add `alignment`. On other layers
+    // these names fall through to the unknown-name path below.
+    const bool textString = text && (publicName == "horizontalalign" || publicName == "verticalalign"
+                                     || publicName == "font");
+    if (publicName == "name" || textString || (image && publicName == "alignment")) {
+        std::string value;
+        const auto result = WallpaperEngine::Scripting::convertLayerString (ctx, val, value);
+        if (result != LayerWrite::Assign) return layerWriteResult (result);
+        if (publicName == "name") layer->setScriptName (std::move (value));
+        else if (publicName == "alignment") image->setAlignment (value);
+        else if (publicName == "horizontalalign") text->setHorizontalAlign (value);
+        else if (publicName == "verticalalign") text->setVerticalAlign (value);
+        else text->setFont (std::move (value));
+        return 1;
+    }
+    // Text inherits the image `size` host property (Vec2 at 0x2f0, setter
+    // no change callback; the text lookup falls back to
+    // the image map). How text layout uses that field after a write is not
+    // recovered, so the write is accepted without effect.
+    if (text && publicName == "size") return 1;
+    // The particle `instance` host property is registered as type 7
+    // and the converter's case 7 returns without calling the
+    // setter.
+    if (publicName == "instance" && dynamic_cast<WallpaperEngine::Render::Objects::CParticle*> (layer))
+        return 1;
+
+    const auto& properties = layer->getProperties ();
+    const auto key = WallpaperEngine::Scripting::layerPropertyKey (publicName);
+    const auto it = key ? properties.find (std::string (*key)) : properties.end ();
     if (it == properties.end ()) {
-        // A name that reads as undefined is not a layer member. A name that
-        // reads as a function is a method, which native installs as a
-        // writable data member. In both cases the write is stored as an
-        // ordinary property of the receiver, so later reads see it. Other
-        // read-only members keep rejecting writes.
-        JSValue current = scriptableobject_property_get (ctx, obj_val, atom, receiver);
-        if (JS_IsException (current)) return -1;
-        const bool assignable = JS_IsUndefined (current) || JS_IsFunction (ctx, current);
-        JS_FreeValue (ctx, current);
-        if (assignable)
-            return WallpaperEngine::Scripting::defineLayerExpando (ctx, receiver, atom, val, flags);
-        return JS_ThrowTypeError (ctx, "Layer property is read-only: %s", name), -1;
+        // Any other name is not a host property. A method is a writable data
+        // member of the native template. Either way the write is stored on
+        // the receiver, so later reads see it.
+        return WallpaperEngine::Scripting::defineLayerExpando (ctx, receiver, atom, val, flags);
     }
 
     auto& property = it->second.value;
     switch (property.getType ()) {
-	case DynamicValue::Boolean:
-	    if (!JS_IsBool (val)) break;
-	    property.update (static_cast<bool> (JS_VALUE_GET_BOOL (val)), DynamicValue::Script);
-	    return 1;
-	case DynamicValue::Int:
-	    if (!JS_IsNumber (val)) break;
-	    double integer;
-	    if (JS_ToFloat64 (ctx, &integer, val) < 0) return -1;
-	    if (!std::isfinite (integer) || std::trunc (integer) != integer
-		|| integer < std::numeric_limits<int32_t>::min ()
-		|| integer > std::numeric_limits<int32_t>::max ()) break;
-	    property.update (static_cast<int32_t> (integer), DynamicValue::Script);
-	    return 1;
-	case DynamicValue::Float:
-	    if (!JS_IsNumber (val)) break;
-	    double number;
-	    if (JS_ToFloat64 (ctx, &number, val) < 0) return -1;
-	    if (!std::isfinite (number) || std::abs (number) > std::numeric_limits<float>::max ()) break;
-	    property.update (static_cast<float> (number), DynamicValue::Script);
-	    return 1;
-	case DynamicValue::String:
-	    {
-		std::string string;
-		switch (WallpaperEngine::Scripting::convertLayerString (ctx, val, string)) {
-		    case WallpaperEngine::Scripting::LayerStringWrite::Exception: return -1;
-		    case WallpaperEngine::Scripting::LayerStringWrite::Ignore: return 1;
-		    case WallpaperEngine::Scripting::LayerStringWrite::Assign: break;
-		}
-		property.update (string, DynamicValue::Script);
-		return 1;
-	    }
+	case DynamicValue::Boolean: {
+	    bool value = false;
+	    const auto result = WallpaperEngine::Scripting::convertLayerBoolean (val, value);
+	    if (result == LayerWrite::Assign) property.update (value, DynamicValue::Script);
+	    return layerWriteResult (result);
+	}
+	case DynamicValue::Int: {
+	    int32_t value = 0;
+	    const auto result = WallpaperEngine::Scripting::convertLayerInt (ctx, val, value);
+	    if (result == LayerWrite::Assign) property.update (value, DynamicValue::Script);
+	    return layerWriteResult (result);
+	}
+	case DynamicValue::Float: {
+	    float value = 0.0f;
+	    const auto result = WallpaperEngine::Scripting::convertLayerFloat (ctx, val, value);
+	    if (result == LayerWrite::Assign) property.update (value, DynamicValue::Script);
+	    return layerWriteResult (result);
+	}
+	case DynamicValue::String: {
+	    std::string value;
+	    const auto result = WallpaperEngine::Scripting::convertLayerString (ctx, val, value);
+	    if (result == LayerWrite::Assign) property.update (value, DynamicValue::Script);
+	    return layerWriteResult (result);
+	}
 	case DynamicValue::Vec2:
 	case DynamicValue::Vec3:
-	case DynamicValue::Vec4:
-	    {
-		float components[4] {};
-		const bool rgbColor = property.getType () == DynamicValue::Vec4
-                    && container->lifetime->object->isRgbColorProperty (property);
-		const int count = property.getType () == DynamicValue::Vec2 ? 2
-                    : property.getType () == DynamicValue::Vec3 || rgbColor ? 3 : 4;
-		if (!readVector (ctx, val, count, components)) return -1;
-		if (rgbColor) property.update (
-                    glm::vec4 (components[0], components[1], components[2], property.getVec4 ().w),
-                    DynamicValue::Script);
-		else if (count == 2) property.update (glm::vec2 (components[0], components[1]), DynamicValue::Script);
-		else if (count == 3) {
-                    const glm::vec3 vector (components[0], components[1], components[2]);
-                    property.update (container->lifetime->object->isAngleProperty (property)
-                        ? glm::radians (vector) : vector, DynamicValue::Script);
-                }
-		else property.update (glm::vec4 (components[0], components[1], components[2], components[3]), DynamicValue::Script);
-		return 1;
-	    }
+	case DynamicValue::Vec4: {
+	    // Layer colours are Vec3 host properties kept with their alpha in a Vec4.
+	    const bool rgbColor = property.getType () == DynamicValue::Vec4 && layer->isRgbColorProperty (property);
+	    const int count = property.getType () == DynamicValue::Vec2 ? 2
+		: property.getType () == DynamicValue::Vec3 || rgbColor ? 3 : 4;
+	    const bool angle = count == 3 && layer->isAngleProperty (property);
+	    float components[4] {};
+	    const auto result = WallpaperEngine::Scripting::convertLayerVector (ctx, val, count, angle, components);
+	    if (result != LayerWrite::Assign) return layerWriteResult (result);
+	    if (rgbColor)
+		property.update (glm::vec4 (components[0], components[1], components[2], property.getVec4 ().w),
+				 DynamicValue::Script);
+	    else if (count == 2) property.update (glm::vec2 (components[0], components[1]), DynamicValue::Script);
+	    else if (count == 3)
+		property.update (glm::vec3 (components[0], components[1], components[2]), DynamicValue::Script);
+	    else
+		property.update (glm::vec4 (components[0], components[1], components[2], components[3]),
+				 DynamicValue::Script);
+	    return 1;
+	}
 	default:
-	    break;
+	    // No other value type is retained for a layer host property.
+	    return 1;
     }
-    JS_ThrowTypeError (ctx, "Invalid value for layer property: %s", name);
-    return -1;
 }
 
 ScriptableObjectAdapter::ScriptableObjectAdapter (ScriptEngine& engine, std::string name) :

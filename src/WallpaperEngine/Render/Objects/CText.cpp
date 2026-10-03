@@ -125,7 +125,7 @@ GLuint compileShader (GLenum type, const char* source) {
 CText::CText (Wallpapers::CScene& scene, const Text& text) :
     CObject (scene, text), CRenderable (scene, text, kTextEffectMaterial),
     ScriptableObject (scene, text), m_text (text),
-    m_horizontalAlign (text.alignment), m_verticalAlign (text.verticalalign) {
+    m_horizontalAlign (text.alignment), m_verticalAlign (text.verticalalign), m_font (text.font) {
     for (const auto& binding : Scripting::scriptPropertyBindings (text))
 	this->registerProperty (binding.name, binding.value);
     // Effect visibility and shader constants retain their own UserSettings.
@@ -200,6 +200,7 @@ void CText::setup () {
     if (!loadEmbeddedFont () && !loadSystemFont ()) {
 	return;
     }
+    m_loadedFont = m_font;
 
     m_lastCharacterSize26_6 = computeCharacterSize26_6 ();
     FT_Set_Char_Size (m_ftFace, 0, m_lastCharacterSize26_6, 300, 300);
@@ -225,12 +226,12 @@ bool CText::loadEmbeddedFont () {
     // Wallpapers packed in .pkg don't expose physical paths, so we read the font
     // into memory and use FT_New_Memory_Face. m_fontData must outlive the face.
     // `systemfont_*` references signal "use a system font"; let the fallback handle them.
-    if (m_text.font.empty () || m_text.font.rfind ("systemfont_", 0) == 0) {
+    if (m_font.empty () || m_font.rfind ("systemfont_", 0) == 0) {
 	return false;
     }
 
     try {
-	auto stream = getAssetLocator ().read (m_text.font);
+	auto stream = getAssetLocator ().read (m_font);
 	stream->seekg (0, std::ios::end);
 	const auto size = stream->tellg ();
 	stream->seekg (0, std::ios::beg);
@@ -244,9 +245,9 @@ bool CText::loadEmbeddedFont () {
 	    return true;
 	}
 
-	sLog.error ("CText: FT_New_Memory_Face failed for '", m_text.font, "', falling back to system font");
+	sLog.error ("CText: FT_New_Memory_Face failed for '", m_font, "', falling back to system font");
     } catch (const std::exception& e) {
-	sLog.error ("CText: cannot read font '", m_text.font, "': ", e.what (), ", falling back to system font");
+	sLog.error ("CText: cannot read font '", m_font, "': ", e.what (), ", falling back to system font");
     }
 
     m_fontData.clear ();
@@ -269,6 +270,27 @@ bool CText::loadSystemFont () {
 	sLog.error ("CText: FT_New_Face failed for ", fontPath);
 	return false;
     }
+    return true;
+}
+
+// Called when a script wrote a different `font`. The native relayout
+// rebuilds the text with the stored font, falling back the same
+// way setup () does. If no face loads at all, the previous face is kept.
+bool CText::reloadFont () {
+    m_loadedFont = m_font;
+    FT_Face previous = m_ftFace;
+    std::vector<uint8_t> previousData = std::move (m_fontData);
+    m_fontData.clear ();
+    m_ftFace = nullptr;
+    if (!loadEmbeddedFont () && !loadSystemFont ()) {
+	m_ftFace = previous;
+	m_fontData = std::move (previousData);
+	return false;
+    }
+    if (previous != nullptr) FT_Done_Face (previous);
+    // Fallback choices were made against the previous primary face.
+    m_characterFaces.clear ();
+    FT_Set_Char_Size (m_ftFace, 0, m_lastCharacterSize26_6, 300, 300);
     return true;
 }
 
@@ -948,6 +970,7 @@ void CText::render () {
     const std::string currentText = m_text.text->value->getString ();
     const std::string renderedText = currentText.empty () ? std::string (" ") : currentText;
 
+    const bool fontChanged = m_font != m_loadedFont && reloadFont ();
     const long characterSize = computeCharacterSize26_6 ();
     const bool opaqueBackground = m_text.opaqueBackground->value->getBool ();
     const float rasterOpacity = std::clamp (m_text.color->value->getVec4 ().a
@@ -965,7 +988,8 @@ void CText::render () {
 	if (m_bundledEmojiFace)
 	    FT_Set_Char_Size (m_bundledEmojiFace, 0, m_lastCharacterSize26_6, 300, 300);
 	rebuildTextureFrom (renderedText);
-    } else if (renderedText != m_lastRenderedText || m_horizontalAlign != m_lastRasterHorizontalAlign
+    } else if (fontChanged || renderedText != m_lastRenderedText
+               || m_horizontalAlign != m_lastRasterHorizontalAlign
                || m_text.spacing->value->getVec2 () != m_lastSpacing
 	       || m_text.color->value->getVec3 () != m_lastRasterColor
 	       || m_text.backgroundColor->value->getVec3 () != m_lastRasterBackgroundColor

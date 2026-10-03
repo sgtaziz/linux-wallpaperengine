@@ -3,6 +3,8 @@
 #include "WallpaperEngine/Render/CObject.h"
 
 #include <memory>
+#include <string>
+#include <utility>
 
 namespace WallpaperEngine::Render::Wallpapers {
 class CScene;
@@ -32,6 +34,12 @@ public:
     bool disablesCursorPropagation () const { return m_disablePropagation; }
     void setSolid (bool solid) { m_solid = solid; }
     void setDisablePropagation (bool disabled) { m_disablePropagation = disabled; }
+    // The layer `name` host property (2.8.42: String, 
+    // setter) stores script writes in the field that the scene's
+    // name lookup compares. It starts as the
+    // authored name.
+    const std::string& getScriptName () const { return m_scriptName; }
+    void setScriptName (std::string name) { m_scriptName = std::move (name); }
 
 protected:
     void registerProperty (const std::string& name, DynamicValue& value);
@@ -39,6 +47,7 @@ protected:
 private:
     bool m_solid;
     bool m_disablePropagation;
+    std::string m_scriptName;
     std::shared_ptr<Lifetime> m_lifetime = std::make_shared<Lifetime> (Lifetime {this});
     std::map<std::string, PropertyEntry> m_properties;
 };
