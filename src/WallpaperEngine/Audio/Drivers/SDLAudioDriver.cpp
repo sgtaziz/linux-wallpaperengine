@@ -54,10 +54,8 @@ void audio_callback (void* userdata, uint8_t* streamData, int length) {
 		len1 = streamLength;
 	    }
 
-	    // mix the audio
-	    const int mixedVolume = std::clamp (
-	        static_cast<int> (driver->getApplicationContext ().state.audio.volume * buffer->stream->getMixerGain ()),
-	        0, SDL_MIX_MAXVOLUME
+	    const int mixedVolume = sdlMixVolume (
+	        driver->getApplicationContext ().state.audio.volume, buffer->stream->getMixerGain ()
 	    );
 	    SDL_MixAudioFormat (
 		streamDataPointer, &buffer->audio_buf[buffer->audio_buf_index], driver->getSpec ().format, len1,

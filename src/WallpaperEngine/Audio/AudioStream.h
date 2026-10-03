@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -93,8 +94,15 @@ public:
     void markReaderFinished ();
     [[nodiscard]] bool hasReaderFinished () const;
     [[nodiscard]] uint64_t getCompletedLoopCount () const;
+    /** Native AL_GAIN is vol^2 * gain clamped at 1; the clamp happens in the mixer after the master gain. */
     void setVolume (float volume);
     [[nodiscard]] float getMixerGain () const;
+    /** Decoder duration in seconds, when the container reports one. */
+    [[nodiscard]] std::optional<float> getDuration () const;
+    /** The source is mono and is upmixed to the stereo output. */
+    [[nodiscard]] bool isMonoSource () const;
+    /** Per-channel output level of a mono source (defaults to the native non-spatial level). */
+    void setMonoChannelGains (float left, float right);
     void setPaused (bool paused);
     [[nodiscard]] bool isPaused () const;
     [[nodiscard]] bool isPlaybackFinished () const;
@@ -179,6 +187,9 @@ private:
     bool m_loopBoundaryPending = false;
     std::atomic_uint64_t m_completedLoops { 0 };
     std::atomic<float> m_volume { 1.0f };
+    bool m_monoUpmix = false;
+    std::atomic<float> m_monoLeftGain { 1.0f };
+    std::atomic<float> m_monoRightGain { 1.0f };
     std::atomic_bool m_paused { false };
     std::atomic_bool m_playbackFinished { false };
     /** The codec context that contains the original audio format information */

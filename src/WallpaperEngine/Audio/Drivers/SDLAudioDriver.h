@@ -12,6 +12,18 @@
 
 namespace WallpaperEngine::Audio::Drivers {
 /**
+ * SDL mix volume for a stream: native AL_GAIN = min(1, vol^2 * gain), so the
+ * clamp follows the master gain. Non-finite or non-positive products (for
+ * example a zero master with an infinite vol^2) are silent; +inf saturates.
+ */
+inline int sdlMixVolume (int masterVolume, float mixerGain) {
+    const float product = static_cast<float> (masterVolume) * mixerGain;
+    if (!(product > 0.0f)) return 0;
+    if (!(product < static_cast<float> (SDL_MIX_MAXVOLUME))) return SDL_MIX_MAXVOLUME;
+    return static_cast<int> (product);
+}
+
+/**
  * Audio output buffers for streams being played under SDL
  */
 struct SDLAudioBuffer {

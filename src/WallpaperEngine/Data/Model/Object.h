@@ -227,16 +227,17 @@ public:
 };
 
 struct SoundData {
-    /** Native modes are pool, random, single; loop is a legacy Linux alias. */
+    /** Native modes are loop (the default), random and single. */
     std::optional<std::string> playbackmode;
     std::vector<std::string> sounds;
     UserSettingUniquePtr volume;
-    float minTime = 0.0f;
-    float maxTime = 0.0f;
+    /** Native sound constructor defaults: 1, 5, 1 and 1. */
+    float minTime = 1.0f;
+    float maxTime = 5.0f;
     bool startSilent = false;
     bool spatialization = false;
     float attenuation = 1.0f;
-    float minDistance = 0.0f;
+    float minDistance = 1.0f;
 };
 
 class Sound : public Object, public SoundData {

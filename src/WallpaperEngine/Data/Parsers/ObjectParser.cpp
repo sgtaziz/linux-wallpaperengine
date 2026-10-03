@@ -357,12 +357,12 @@ SoundUniquePtr ObjectParser::parseSound (const JSON& it, const Project& project,
 	    .playbackmode = it.optional<std::string> ("playbackmode"),
 	    .sounds = sounds,
 	    .volume = it.user ("volume", project.properties, 1.0f),
-	    .minTime = it.optional<float> ("mintime", 0.0f),
-	    .maxTime = it.optional<float> ("maxtime", 0.0f),
+	    .minTime = it.optional<float> ("mintime", 1.0f),
+	    .maxTime = it.optional<float> ("maxtime", 5.0f),
 	    .startSilent = it.optional<bool> ("startsilent", false),
 	    .spatialization = it.optional<bool> ("spatialization", false),
 	    .attenuation = it.optional<float> ("attenuation", 1.0f),
-	    .minDistance = it.optional<float> ("mindistance", 0.0f),
+	    .minDistance = it.optional<float> ("mindistance", 1.0f),
 	}
     );
 }

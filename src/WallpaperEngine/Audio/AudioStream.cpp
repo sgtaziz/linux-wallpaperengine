@@ -1,8 +1,12 @@
 #include "AudioStream.h"
+#include "WallpaperEngine/Audio/SoundSpatialization.h"
 #include "WallpaperEngine/Logging/Log.h"
 #include <cassert>
 #include <cmath>
+#include <cstring>
 #include <iostream>
+#include <limits>
+#include <type_traits>
 
 // maximum size of the queue to prevent reading too much data
 
@@ -312,6 +316,23 @@ void AudioStream::initialize () {
 	sLog.exception ("Cannot initialize swrctx for audio resampling");
     }
 
+#if FF_API_OLD_CHANNEL_LAYOUT
+    const int inputChannels = this->m_context->channels;
+#else
+    const int inputChannels = this->m_context->ch_layout.nb_channels;
+#endif
+    // A mono source is copied to both output channels at unity here; the
+    // native per-channel level is applied after conversion (see
+    // setMonoChannelGains). swr's default mono upmix would be -3 dB.
+    if (inputChannels == 1 && this->m_audioContext.getChannels () == 2) {
+	const double unity[2] = { 1.0, 1.0 };
+	if (swr_set_matrix (this->m_swrctx, unity, 1) < 0) {
+	    sLog.exception ("Cannot set the mono upmix matrix");
+	}
+	this->m_monoUpmix = true;
+	this->setMonoChannelGains (kNonSpatialMonoGains.left, kNonSpatialMonoGains.right);
+    }
+
     // initialize the context
     if (swr_init (this->m_swrctx) < 0) {
 	sLog.exception ("Failed to initialize the resampling context.");
@@ -478,13 +499,62 @@ bool AudioStream::hasReaderFinished () const { return this->m_readerFinished; }
 uint64_t AudioStream::getCompletedLoopCount () const { return this->m_completedLoops; }
 
 void AudioStream::setVolume (float volume) {
-    this->m_volume = std::isfinite (volume) ? std::clamp (volume, 0.0f, 1.0f) : 0.0f;
+    this->m_volume = std::isfinite (volume) ? std::max (volume, 0.0f) : 0.0f;
 }
 
 float AudioStream::getMixerGain () const {
     const float volume = this->m_volume;
     return volume * volume;
 }
+
+std::optional<float> AudioStream::getDuration () const {
+    if (this->m_formatContext == nullptr || this->m_audioStream == NO_AUDIO_STREAM) return std::nullopt;
+    const AVStream* stream = this->m_formatContext->streams[this->m_audioStream];
+    if (stream->duration != AV_NOPTS_VALUE && stream->duration > 0 && stream->time_base.den > 0)
+	return static_cast<float> (static_cast<double> (stream->duration) * av_q2d (stream->time_base));
+    if (this->m_formatContext->duration != AV_NOPTS_VALUE && this->m_formatContext->duration > 0)
+	return static_cast<float> (static_cast<double> (this->m_formatContext->duration) / AV_TIME_BASE);
+    return std::nullopt;
+}
+
+bool AudioStream::isMonoSource () const { return this->m_monoUpmix; }
+
+void AudioStream::setMonoChannelGains (float left, float right) {
+    this->m_monoLeftGain = std::isfinite (left) ? left : 0.0f;
+    this->m_monoRightGain = std::isfinite (right) ? right : 0.0f;
+}
+
+namespace {
+template <typename Sample> void scaleStereoFrames (uint8_t* data, int frames, float left, float right) {
+    for (int frame = 0; frame < frames; ++frame) {
+	for (int channel = 0; channel < 2; ++channel) {
+	    Sample sample;
+	    uint8_t* at = data + (static_cast<size_t> (frame) * 2 + channel) * sizeof (Sample);
+	    std::memcpy (&sample, at, sizeof (Sample));
+	    const double scaled = static_cast<double> (sample) * (channel == 0 ? left : right);
+	    if constexpr (std::is_floating_point_v<Sample>) {
+		sample = static_cast<Sample> (scaled);
+	    } else {
+		sample = static_cast<Sample> (std::clamp<double> (
+		    std::round (scaled), std::numeric_limits<Sample>::min (), std::numeric_limits<Sample>::max ()
+		));
+	    }
+	    std::memcpy (at, &sample, sizeof (Sample));
+	}
+    }
+}
+
+/** Packed stereo output only; the driver opens a packed device format. */
+void scaleStereoOutput (uint8_t* data, int frames, AVSampleFormat format, float left, float right) {
+    switch (format) {
+	case AV_SAMPLE_FMT_FLT: scaleStereoFrames<float> (data, frames, left, right); break;
+	case AV_SAMPLE_FMT_DBL: scaleStereoFrames<double> (data, frames, left, right); break;
+	case AV_SAMPLE_FMT_S16: scaleStereoFrames<int16_t> (data, frames, left, right); break;
+	case AV_SAMPLE_FMT_S32: scaleStereoFrames<int32_t> (data, frames, left, right); break;
+	default: break;
+    }
+}
+} // namespace
 
 void AudioStream::setPaused (bool paused) { this->m_paused = paused; }
 
@@ -518,6 +588,10 @@ int AudioStream::resampleAudio (uint8_t* out_buf, const int out_size, bool drain
     const int bytes = produced < 0 ? produced : av_samples_get_buffer_size (
 	&lineSize, outputChannels, produced, this->m_audioContext.getFormat (), 1
     );
+    if (bytes > 0 && this->m_monoUpmix) {
+	scaleStereoOutput (converted[0], produced, this->m_audioContext.getFormat (), this->m_monoLeftGain,
+	                   this->m_monoRightGain);
+    }
     if (bytes > 0) {
 	const int copied = std::min (bytes, out_size);
 	memcpy (out_buf, converted[0], copied);
