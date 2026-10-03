@@ -1588,11 +1588,15 @@ ParticleOperatorUniquePtr ObjectParser::parseParticleOperator (
 	    it.user ("audioprocessingfrequencyend", properties, 1)
 	);
     } else if (name == "controlpointattract") {
+	// orthographic defaults; omitted fields follow the scene projection.
 	return std::make_unique<ControlPointAttractOperator> (
+	    ControlPointAttractOperator::SceneDefaults {
+		!it.contains ("scale"), !it.contains ("threshold"), !it.contains ("deletethreshold")
+	    },
 	    it.optional ("controlpoint", 0),
 	    it.user (it.contains ("offset") ? "offset" : "origin", properties, glm::vec3 (0.0f)),
-	    it.user ("scale", properties, 100.0f), it.user ("threshold", properties, 1000.0f),
-	    it.optional<uint32_t> ("flags", 2u)
+	    it.user ("scale", properties, 512.0f), it.user ("threshold", properties, 512.0f),
+	    it.user ("deletethreshold", properties, 15.0f), it.optional<uint32_t> ("flags", 2u)
 	);
     } else if (name == "oscillatealpha") {
 	return std::make_unique<OscillateAlphaOperator> (
