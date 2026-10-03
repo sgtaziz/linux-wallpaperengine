@@ -3209,37 +3209,48 @@ OperatorFunc CParticle::createTurbulenceOperator (const TurbulenceOperator& op) 
     DynamicValue* phaseMaxValue = op.phaseMax->value.get ();
     DynamicValue* speedOverride = speedOverrideValue ();
     const auto* blend = op.blendEnvelope ? &*op.blendEnvelope : nullptr;
+    const auto& projection = getScene ().getScene ().camera.projection;
+    const auto sceneDefaults = ParticleCore::turbulenceDefaults (projection.isOrthogonal);
+    const auto useSceneDefaults = op.sceneDefaults;
+    // Factory binds speedmin and the speed span to the instance
+    // speed unless particle flag 0x10 is set.
+    const bool bindSpeed = (m_particle.flags & 0x10u) == 0;
 
     return [this, scaleValue, speedMinValue, speedMaxValue, timeScaleValue,
             maskValue, phaseMinValue, phaseMaxValue, speedOverride, blend,
-            audioOperator = &op, reportedUnbounded = false] (
+            sceneDefaults, useSceneDefaults, bindSpeed, audioOperator = &op, reportedUnbounded = false] (
                std::vector<ParticleInstance>& particles, uint32_t count,
                const std::vector<ControlPointData>&, float,
                ParticleCore::MovementTime time
            ) mutable {
         const auto settings = audioSettings (*audioOperator);
         const float audioGain = settings.mode != 0 ? sampleParticleAudio (*this, settings) : 1.0f;
-        const float speedGain = audioGain * speedOverride->getFloat ();
-        const float speedMin = speedMinValue->getFloat () * speedGain;
-        const float speedDelta = (speedMaxValue->getFloat () - speedMinValue->getFloat ()) * speedGain;
-        const float phaseMin = phaseMinValue->getFloat ();
-        const float phaseDelta = phaseMaxValue->getFloat () - phaseMin;
-        const float scale = scaleValue->getFloat ();
-        const float timeScale = timeScaleValue->getFloat ();
-        const glm::vec3 mask = maskValue->getVec3 ();
+        const float speedGain = audioGain * (bindSpeed ? speedOverride->getFloat () : 1.0f);
+        const float authoredSpeedMin = useSceneDefaults.speedMin ? sceneDefaults.speedMin : speedMinValue->getFloat ();
+        const float authoredSpeedMax = useSceneDefaults.speedMax ? sceneDefaults.speedMax : speedMaxValue->getFloat ();
+        const float speedMin = authoredSpeedMin * speedGain;
+        const float speedDelta = (authoredSpeedMax - authoredSpeedMin) * speedGain;
+        const float phaseDelta = phaseMaxValue->getFloat () - phaseMinValue->getFloat ();
+        const float scale = useSceneDefaults.scale ? sceneDefaults.scale : scaleValue->getFloat ();
+        const float timeScale = useSceneDefaults.timeScale ? sceneDefaults.timeScale : timeScaleValue->getFloat ();
+        const glm::vec3 mask = useSceneDefaults.mask ? sceneDefaults.mask : maskValue->getVec3 ();
         const float sceneTime = getScene ().getParticleSceneTime ();
         const auto envelope = operatorEnvelope (blend);
+        const bool world = (m_particle.flags & 1u) != 0;
+        const bool ortho = getScene ().getCamera ().isOrthogonal ();
+        const glm::vec2 canvas (getScene ().getWidth (), getScene ().getHeight ());
 
         for (uint32_t i = 0; i < count; ++i) {
             ParticleInstance& p = particles[i];
             if (!p.alive) continue;
             const float envelopeWeight = envelope && ParticleCore::usesBlendOpcode (*envelope)
                 ? ParticleCore::blendWeight (p.getLifetimePos (), *envelope) : 1.0f;
-            // The native SoA streams are authored XYZ; Linux simulates with
-            // reflected Y. Convert before simplex and reflect the final delta.
+            // The simplex field is sampled at the native SoA position (authored
+            // XYZ, canvas origin for world-space orthographic streams); Linux
+            // simulates with reflected Y, so the final delta is reflected back.
             const auto delta = Utils::nativeTurbulenceVelocityDelta (
-                ParticleCore::toAuthoredVector (p.position), p.oscillatorRandom,
-                phaseMin, phaseDelta, speedMin, speedDelta, scale, timeScale,
+                ParticleCore::nativeParticlePosition (p.position, world, ortho, canvas), p.oscillatorRandom,
+                phaseDelta, speedMin, speedDelta, scale, timeScale,
                 sceneTime, mask, time.damping, envelopeWeight);
             if (!delta) {
                 if (!reportedUnbounded) {

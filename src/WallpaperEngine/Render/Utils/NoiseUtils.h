@@ -236,16 +236,17 @@ inline std::optional<glm::vec3> nativeTurbulenceNoise (glm::vec3 coordinate, uin
 // One finite lane of opcode 0x24 after its audio and envelope inputs have
 // been resolved. The interpreter uses the same birth-random stream for phase
 // and speed, and its third (damped) clock argument for the XYZ mask gains.
+// The record stores phasemin, but opcodes 0x0e/0x24 read only its span.
 // This isolated helper does not choose the native scene clock or convert the
 // authored particle coordinate basis; the caller must supply those explicitly.
 inline std::optional<glm::vec3> nativeTurbulenceVelocityDelta (
-    glm::vec3 position, float birthRandom, float phaseMin, float phaseDelta,
+    glm::vec3 position, float birthRandom, float phaseDelta,
     float speedMin, float speedDelta, float scale, float timeScale, float sceneTime,
     glm::vec3 mask, float dampingClock, float envelope) {
     const uint32_t axisMask = (mask.x != 0.0f ? 1u : 0u)
         | (mask.y != 0.0f ? 2u : 0u) | (mask.z != 0.0f ? 4u : 0u);
     if (axisMask == 0) return glm::vec3 (0.0f);
-    const float phase = (birthRandom * phaseDelta + phaseMin) + timeScale * sceneTime;
+    const float phase = birthRandom * phaseDelta + timeScale * sceneTime;
     const float speed = (birthRandom * speedDelta + speedMin) * envelope;
     const glm::vec3 coordinate = (position + glm::vec3 (phase)) * scale;
     const auto noise = nativeTurbulenceNoise (coordinate, axisMask);

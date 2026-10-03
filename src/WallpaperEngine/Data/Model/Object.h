@@ -720,20 +720,29 @@ public:
 
 class TurbulenceOperator : public ParticleOperatorBase {
 public:
+    // Omitted fields take the projection-dependent defaults.
+    struct SceneDefaults {
+	bool scale;
+	bool speedMin;
+	bool speedMax;
+	bool timeScale;
+	bool mask;
+    };
     TurbulenceOperator (
-	UserSettingUniquePtr scale, UserSettingUniquePtr speedMin, UserSettingUniquePtr speedMax,
+	SceneDefaults sceneDefaults, UserSettingUniquePtr scale, UserSettingUniquePtr speedMin, UserSettingUniquePtr speedMax,
 	UserSettingUniquePtr timeScale, UserSettingUniquePtr mask, UserSettingUniquePtr phaseMin,
 	UserSettingUniquePtr phaseMax, UserSettingUniquePtr audioProcessingMode,
 	UserSettingUniquePtr audioProcessingBounds, UserSettingUniquePtr audioProcessingExponent,
 	UserSettingUniquePtr audioProcessingFrequencyStart, UserSettingUniquePtr audioProcessingFrequencyEnd
     ) :
-	scale (std::move (scale)), speedMin (std::move (speedMin)), speedMax (std::move (speedMax)),
-	timeScale (std::move (timeScale)), mask (std::move (mask)), phaseMin (std::move (phaseMin)),
+	sceneDefaults (sceneDefaults), scale (std::move (scale)), speedMin (std::move (speedMin)),
+	speedMax (std::move (speedMax)), timeScale (std::move (timeScale)), mask (std::move (mask)), phaseMin (std::move (phaseMin)),
 	phaseMax (std::move (phaseMax)), audioProcessingMode (std::move (audioProcessingMode)),
 	audioProcessingBounds (std::move (audioProcessingBounds)),
 	audioProcessingExponent (std::move (audioProcessingExponent)),
 	audioProcessingFrequencyStart (std::move (audioProcessingFrequencyStart)),
 	audioProcessingFrequencyEnd (std::move (audioProcessingFrequencyEnd)) { }
+    SceneDefaults sceneDefaults;
     UserSettingUniquePtr scale;
     UserSettingUniquePtr speedMin;
     UserSettingUniquePtr speedMax;

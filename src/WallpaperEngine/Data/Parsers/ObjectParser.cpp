@@ -1555,9 +1555,14 @@ ParticleOperatorUniquePtr ObjectParser::parseParticleOperator (
 	    it.user ("startvalue", properties, glm::vec3 (1.0f)), it.user ("endvalue", properties, glm::vec3 (1.0f))
 	);
     } else if (name == "turbulence") {
+	// orthographic defaults; omitted fields follow the scene projection.
 	return std::make_unique<TurbulenceOperator> (
-	    it.user ("scale", properties, 0.005f), it.user ("speedmin", properties, 500.0f),
-	    it.user ("speedmax", properties, 1000.0f), it.user ("timescale", properties, 0.01f),
+	    TurbulenceOperator::SceneDefaults {
+		!it.contains ("scale"), !it.contains ("speedmin"), !it.contains ("speedmax"),
+		!it.contains ("timescale"), !it.contains ("mask")
+	    },
+	    it.user ("scale", properties, 0.01f), it.user ("speedmin", properties, 500.0f),
+	    it.user ("speedmax", properties, 1000.0f), it.user ("timescale", properties, 20.0f),
 	    it.user ("mask", properties, glm::vec3 (1.0f, 1.0f, 0.0f)), it.user ("phasemin", properties, 0.0f),
 	    it.user ("phasemax", properties, 0.0f), it.user ("audioprocessingmode", properties, 0),
 	    it.user ("audioprocessingbounds", properties, glm::vec2 (0.0f, 1.0f)),
