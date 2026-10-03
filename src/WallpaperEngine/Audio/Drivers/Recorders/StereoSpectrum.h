@@ -58,6 +58,24 @@ public:
         return bands;
     }
 
+    struct ScriptBlocks {
+        const float* left;
+        const float* right;
+        const float* average;
+    };
+
+    // native hands native the start of one
+    // resolution's [left, right, combined] blocks (16, 32, else 64), and
+    // native copies them into left/right/average.
+    // average is the combined block, not the mean of the reduced channels.
+    [[nodiscard]] static ScriptBlocks scriptBlocks (const Bands& bands, uint32_t resolution) {
+        if (resolution == 16)
+            return {bands.audio16[0].data (), bands.audio16[1].data (), bands.combined16.data ()};
+        if (resolution == 32)
+            return {bands.audio32[0].data (), bands.audio32[1].data (), bands.combined32.data ()};
+        return {bands.audio64[0].data (), bands.audio64[1].data (), bands.combined64.data ()};
+    }
+
     // The host scene smooths each 64-band channel before producing its
     // 32/16-band views. maxDelta is the current Linux interpolation policy;
     // native temporal coefficients are still being recovered.

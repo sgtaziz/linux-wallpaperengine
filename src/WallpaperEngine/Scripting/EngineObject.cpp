@@ -5,6 +5,7 @@
 #include "WallpaperEngine/Logging/Log.h"
 #include "WallpaperEngine/Render/Wallpapers/CScene.h"
 
+#include <algorithm>
 #include <filesystem>
 #include <array>
 #include <atomic>
@@ -336,18 +337,9 @@ void EngineObject::tick () {
     const auto& spectrum = m_scene.getAudioSpectrum ();
     JSContext* ctx = m_engine.getContext ();
     for (const auto& registration : m_audioBuffers) {
-        const float* left = nullptr;
-        const float* right = nullptr;
-        if (registration.resolution == 16) {
-            left = spectrum.audio16[0].data ();
-            right = spectrum.audio16[1].data ();
-        } else if (registration.resolution == 32) {
-            left = spectrum.audio32[0].data ();
-            right = spectrum.audio32[1].data ();
-        } else {
-            left = spectrum.audio64[0].data ();
-            right = spectrum.audio64[1].data ();
-        }
+        const auto blocks = Audio::Drivers::Recorders::StereoSpectrum::scriptBlocks (
+            spectrum, registration.resolution);
+        const std::array<const float*, 3> sources {blocks.left, blocks.right, blocks.average};
         for (size_t channel = 0; channel < 3; ++channel) {
             size_t byteOffset = 0, byteLength = 0;
             JSValue buffer = JS_GetTypedArrayBuffer (ctx, registration.arrays[channel],
@@ -361,9 +353,7 @@ void EngineObject::tick () {
             if (bytes && byteLength == registration.resolution * sizeof (float) &&
                 byteOffset <= bufferLength && byteLength <= bufferLength - byteOffset) {
                 float* values = reinterpret_cast<float*> (bytes + byteOffset);
-                for (size_t i = 0; i < registration.resolution; ++i)
-                    values[i] = channel == 0 ? left[i] : channel == 1 ? right[i]
-                                 : (left[i] + right[i]) * 0.5f;
+                std::copy_n (sources[channel], registration.resolution, values);
             }
             JS_FreeValue (ctx, buffer);
         }
