@@ -1042,6 +1042,34 @@ TEST_CASE ("Native audio band hierarchy combines channels before pairwise maxima
     REQUIRE (bands.combined16[1] == 0.6f);
 }
 
+TEST_CASE ("Script audio average is the combined block, not the mean of reduced channels", "[audio][spectrum][script]") {
+    using WallpaperEngine::Audio::Drivers::Recorders::StereoSpectrum;
+    std::array<float, 64> left {};
+    std::array<float, 64> right {};
+    // Stereo peaks in different bins of one 16-band group: the reduced
+    // channels both read 1, but no single bin has a stereo mean above 0.5.
+    left[4] = 1.0f;
+    right[7] = 1.0f;
+    // Coincident peaks keep the mean of the channels.
+    left[63] = 0.25f;
+    right[63] = 0.75f;
+    const auto bands = StereoSpectrum::from64 (left, right);
+    for (const uint32_t resolution : {16u, 32u, 64u}) {
+        const auto blocks = StereoSpectrum::scriptBlocks (bands, resolution);
+        const size_t width = 64 / resolution;
+        REQUIRE (blocks.left[4 / width] == 1.0f);
+        REQUIRE (blocks.right[7 / width] == 1.0f);
+        REQUIRE (blocks.average[4 / width] == 0.5f);
+        REQUIRE (blocks.average[7 / width] == 0.5f);
+        REQUIRE (blocks.average[resolution - 1] == 0.5f);
+    }
+    const auto sixteen = StereoSpectrum::scriptBlocks (bands, 16);
+    REQUIRE ((sixteen.left[1] + sixteen.right[1]) * 0.5f == 1.0f);
+    REQUIRE (sixteen.left == bands.audio16[0].data ());
+    REQUIRE (sixteen.right == bands.audio16[1].data ());
+    REQUIRE (sixteen.average == bands.combined16.data ());
+}
+
 TEST_CASE ("Published spectrum reduces channels after temporal 64-bin smoothing", "[audio][spectrum]") {
     using WallpaperEngine::Audio::Drivers::Recorders::StereoSpectrum;
     std::array<float, 64> oldLeft {};
