@@ -34,7 +34,6 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
-#include <filesystem>
 #include <glm/gtc/constants.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <iomanip>
@@ -345,10 +344,10 @@ std::optional<ParticleCore::BlendEnvelope> operatorEnvelope (
 } // namespace
 
 CParticle::CParticle (Wallpapers::CScene& scene, const Particle& particle, uint32_t childDepth,
-                      std::vector<std::string> ancestry, CParticle* parentRuntime) :
+                      CParticle* parentRuntime) :
     CObject (scene, particle), CRenderable (scene, particle, particleMaterialOrEmpty (particle)),
     ScriptableObject (scene, particle), m_particle (particle), m_childDepth (childDepth),
-    m_childAncestry (std::move (ancestry)), m_parentParticleRuntime (parentRuntime),
+    m_parentParticleRuntime (parentRuntime),
     m_rng (scene.getParticleRandom ()) {
     if (!m_parentParticleRuntime)
         m_instancePatchWrites = std::make_unique<ParticleCore::InstancePatchWrites> (
@@ -363,8 +362,6 @@ CParticle::CParticle (Wallpapers::CScene& scene, const Particle& particle, uint3
         if (authoredAngle && authoredAngle->value)
             m_instanceControlPointAngleOverrides[index] = authoredAngle->value->getVec3 ();
     }
-    if (!particle.particleFile.empty ())
-	m_childAncestry.push_back (std::filesystem::path (particle.particleFile).lexically_normal ().generic_string ());
     for (const auto& binding : Scripting::scriptPropertyBindings (particle))
 	this->registerProperty (binding.name, binding.value);
     Scripting::forEachParticleScriptSetting (particle,
@@ -727,11 +724,9 @@ void CParticle::setup () {
         emitParticles (static_cast<int32_t> (std::min<uint32_t> (
             pending, static_cast<uint32_t> (std::numeric_limits<int32_t>::max ()))));
     }
-    if (m_childDepth < 64) {
+    if (ParticleCore::nativeNodeOwnsChildren (m_childDepth)) {
 	for (size_t i = 0; i < m_particle.children.size (); ++i)
 	    if (m_particle.children[i].type == "static") spawnChild (i, nullptr, false);
-    } else if (!m_particle.children.empty ()) {
-	sLog.error ("Particle child nesting exceeds Linux safety depth 64 for object ", m_particle.id);
     }
 
     warmup ();
@@ -1424,19 +1419,13 @@ void CParticle::advanceChildren (ParticleCore::TickClock clock) {
 }
 
 void CParticle::spawnChild (size_t descriptor, const ParticleInstance* parent, bool follow) {
-    if (m_childDepth >= 64 || descriptor >= m_particle.children.size ()) return;
+    if (!ParticleCore::nativeNodeOwnsChildren (m_childDepth) || descriptor >= m_particle.children.size ())
+        return;
     const auto& child = m_particle.children[descriptor];
     if (child.particleFile.empty ()) return;
-    const std::string asset = std::filesystem::path (child.particleFile).lexically_normal ().generic_string ();
-    if (std::find (m_childAncestry.begin (), m_childAncestry.end (), asset) != m_childAncestry.end ()) {
-	sLog.error ("Particle child asset cycle at ", asset, " for object ", m_particle.id);
-	return;
-    }
-    const size_t active = std::count_if (m_childNodes.begin (), m_childNodes.end (),
-        [descriptor] (const ChildNode& node) { return node.descriptor == descriptor; });
-    const size_t limit = child.type == "static" ? 1u
-        : static_cast<size_t> (std::max (0, child.maxCount));
-    if (active >= limit) return;
+    // Event caps belong to the dispatchers: native death dispatch may pass
+    // maxcount, births stop at it.
+    if (child.type == "static" && activeChildNodes (descriptor) != 0) return;
 
     try {
         ChildNode node;
@@ -1464,7 +1453,7 @@ void CParticle::spawnChild (size_t descriptor, const ParticleInstance* parent, b
             auto model = std::unique_ptr<Particle> (static_cast<Particle*> (parsed.release ()));
             node.model = std::move (model);
             node.runtime = std::make_unique<CParticle> (
-                getScene (), *node.model, m_childDepth + 1, m_childAncestry, this);
+                getScene (), *node.model, m_childDepth + 1, this);
         }
         node.descriptor = descriptor;
         node.parentBirthId = parent ? parent->birthId : 0;
@@ -1511,8 +1500,15 @@ void CParticle::spawnChild (size_t descriptor, const ParticleInstance* parent, b
     }
 }
 
+size_t CParticle::activeChildNodes (size_t descriptor) const {
+    return static_cast<size_t> (std::count_if (m_childNodes.begin (), m_childNodes.end (),
+        [descriptor] (const ChildNode& node) { return node.descriptor == descriptor; }));
+}
+
 void CParticle::processChildEvents (const std::vector<ParticleInstance>& expired,
                                     const std::vector<ParticleInstance>& born) {
+    // A node at native depth >= 10 has no event groups: no detach, draw or spawn.
+    if (!ParticleCore::nativeNodeOwnsChildren (m_childDepth)) return;
     for (const auto& particle : expired) {
         for (auto& node : m_childNodes) {
             if (node.follow && node.parentBirthId == particle.birthId) {
@@ -1529,29 +1525,36 @@ void CParticle::processChildEvents (const std::vector<ParticleInstance>& expired
         }
     }
 
-    const auto dispatch = [this] (const ParticleInstance& particle, size_t descriptor) {
-            const auto& child = m_particle.children[descriptor];
-            const size_t active = std::count_if (m_childNodes.begin (), m_childNodes.end (),
-                [descriptor] (const ChildNode& node) { return node.descriptor == descriptor; });
-            if (active >= static_cast<size_t> (std::max (0, child.maxCount))) return;
-            // Both native event branches draw for probability 0 and 1 too.
-            // All particle nodes consume the scene-owned MT stream. Native
-            // draw ordering in other initializer branches remains under audit.
-            const float draw = ParticleCore::nativeRandomUnit (m_rng);
-            if (!(draw <= child.probability)) return;
-            spawnChild (descriptor, &particle, child.type == "eventfollow");
-    };
-    for (const auto& particle : expired) {
+    // Both native event branches draw for probability 0 and 1 too. All
+    // particle nodes consume the scene-owned MT stream.
+    const auto draw = [this] { return ParticleCore::nativeRandomUnit (m_rng); };
+    const auto activeNodes = [this] (size_t descriptor) { return activeChildNodes (descriptor); };
+    if (!expired.empty ()) {
+        std::vector<ParticleCore::NativeDeathDescriptor> deaths;
         for (size_t descriptor = 0; descriptor < m_particle.children.size (); ++descriptor) {
-            if (m_particle.children[descriptor].type == "eventdeath") dispatch (particle, descriptor);
+            const auto& child = m_particle.children[descriptor];
+            if (child.type == "eventdeath")
+                deaths.push_back ({descriptor, child.probability,
+                                   static_cast<uint32_t> (std::max (0, child.maxCount))});
         }
+        ParticleCore::dispatchNativeDeathEvents (expired.size (), deaths, activeNodes, draw,
+            [this, &expired] (size_t index, size_t descriptor) {
+                spawnChild (descriptor, &expired[index], false);
+            });
     }
     // Native walks birth descriptors outermost, then the combined
     // birth IDs from the full emitter stage. This keeps authored ordering.
+    // Births alone never pass maxcount, so the per-birth check matches the
+    // native skip of full descriptors and its break at equality.
     for (size_t descriptor = 0; descriptor < m_particle.children.size (); ++descriptor) {
-        const auto& type = m_particle.children[descriptor].type;
-        if (!m_birthEventsEnabled || (type != "eventfollow" && type != "eventspawn")) continue;
-        for (const auto& particle : born) dispatch (particle, descriptor);
+        const auto& child = m_particle.children[descriptor];
+        if (!m_birthEventsEnabled || (child.type != "eventfollow" && child.type != "eventspawn")) continue;
+        const size_t limit = static_cast<size_t> (std::max (0, child.maxCount));
+        for (const auto& particle : born) {
+            if (activeNodes (descriptor) >= limit) break;
+            if (!(draw () <= child.probability)) continue;
+            spawnChild (descriptor, &particle, child.type == "eventfollow");
+        }
     }
 }
 
@@ -1955,8 +1958,6 @@ EmitterFunc CParticle::createImageEmitter (const ParticleEmitter& emitter, size_
     struct Cache {
         ParticleImageEmitterReadback reader;
         std::vector<ParticleCore::ImageEmitterSample> samples;
-        GLuint textureId = 0;
-        GLuint maskTextureId = 0;
         uint32_t width = 0, height = 0;
         float refreshElapsed = 0.0f;
         bool ready = false;
@@ -2032,24 +2033,23 @@ EmitterFunc CParticle::createImageEmitter (const ParticleEmitter& emitter, size_
         if (m_slotStreams && mask && !staticTexture (*mask))
             throw std::invalid_argument (
                 "Native model collision physical IMAGE emission requires a static opacity mask texture");
-        const GLuint textureId = source->getTextureID (0);
-        const GLuint maskTextureId = mask ? mask->getTextureID (0) : 0;
+        // Native keeps a prepared sample list until the source
+        // texture dimensions change; a new texture of the same size or a mask
+        // change does not resample.
         const uint32_t width = source->getRealWidth (), height = source->getRealHeight ();
-        if (textureId != cache->textureId || maskTextureId != cache->maskTextureId
-            || width != cache->width || height != cache->height) {
+        if (width != cache->width || height != cache->height) {
             cache->ready = false;
             cache->pendingActivation = false;
-            cache->textureId = textureId;
-            cache->maskTextureId = maskTextureId;
             cache->width = width;
             cache->height = height;
         }
         if ((emitter.flags & 0x20000u) != 0) {
+            // @: acc += dt; past 1 s keep fmodf(acc, 1)
+            // and invalidate unless the sample is still pending.
             cache->refreshElapsed += dt;
             if (cache->refreshElapsed > 1.0f) {
-                cache->ready = false;
-                cache->pendingActivation = false;
-                cache->refreshElapsed = 0.0f;
+                cache->refreshElapsed = std::fmod (cache->refreshElapsed, 1.0f);
+                if (!cache->pendingActivation) cache->ready = false;
             }
         }
         if (cache->pendingActivation) {

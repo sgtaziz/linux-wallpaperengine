@@ -116,7 +116,7 @@ class CParticle final : public CRenderable, public Scripting::ScriptableObject {
 
 public:
     CParticle (Wallpapers::CScene& scene, const Particle& particle, uint32_t childDepth = 0,
-               std::vector<std::string> ancestry = {}, CParticle* parentRuntime = nullptr);
+               CParticle* parentRuntime = nullptr);
     ~CParticle ();
 
     void setup () override;
@@ -214,6 +214,7 @@ protected:
     void buildRopePoints (const std::vector<ParticleInstance>& points, uint32_t count,
                            float nativeTrailLength = 0.0f);
     void spawnChild (size_t descriptor, const ParticleInstance* parent, bool follow);
+    [[nodiscard]] size_t activeChildNodes (size_t descriptor) const;
     void processChildEvents (const std::vector<ParticleInstance>& expired,
                              const std::vector<ParticleInstance>& born);
     void renderChildren ();
@@ -270,7 +271,6 @@ private:
     uint32_t m_nextParticleBirthId { 1 };
     ParticleCore::NativeSlotAllocation m_nativeSlots;
     uint32_t m_childDepth { 0 };
-    std::vector<std::string> m_childAncestry;
     CParticle* m_parentParticleRuntime { nullptr };
     // Native event consumers address the parent's allocated SoA slot, including
     // later slot reuse. Spatial event-follow remains tied to its birth identity.
