@@ -18,6 +18,8 @@ struct ShapedTextGlyph {
     int32_t yAdvance26_6;
     int32_t xOffset26_6;
     int32_t yOffset26_6;
+    /** HB_GLYPH_FLAG_UNSAFE_TO_BREAK: breaking before this glyph changes shaping. */
+    bool unsafeToBreak = false;
 };
 
 struct ShapedTextRun {
@@ -43,7 +45,8 @@ inline ShapedTextRun shapeTextRun (FT_Face face, std::span<const char32_t> codep
     for (unsigned index = 0; index < count; ++index) {
         result.glyphs.push_back ({info[index].codepoint, info[index].cluster,
                                  position[index].x_advance, position[index].y_advance,
-                                 position[index].x_offset, position[index].y_offset});
+                                 position[index].x_offset, position[index].y_offset,
+                                 (hb_glyph_info_get_glyph_flags (&info[index]) & HB_GLYPH_FLAG_UNSAFE_TO_BREAK) != 0});
     }
     hb_buffer_destroy (buffer);
     hb_font_destroy (font);

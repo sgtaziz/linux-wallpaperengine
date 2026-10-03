@@ -3,6 +3,7 @@
 #include "TextCodepoints.h"
 #include "TextShaping.h"
 #include "TextLayout.h"
+#include "TextRowLayout.h"
 
 #include <algorithm>
 #include <cmath>
@@ -338,8 +339,9 @@ FT_Face CText::faceForCodepoint (char32_t codepoint) {
     }
     if (charset) FcCharSetDestroy (charset);
     if (pattern) FcPatternDestroy (pattern);
+    // Every face lacks the scalar: native treats it as exhausted.
     if (FT_Get_Char_Index (selected, static_cast<FT_ULong> (codepoint)) == 0)
-        selected = m_ftFace;
+        selected = nullptr;
     m_characterFaces.emplace (codepoint, selected);
     return selected;
 }
@@ -526,8 +528,8 @@ long CText::computeCharacterSize26_6 () const {
 
 void CText::rebuildTextureFrom (const std::string& text) {
     // Measure actual ink as well as shaped advances so negative left bearings
-    // and right overhangs are not clipped. Shape contiguous font-face runs
-    // before both width decisions and rasterization.
+    // and right overhangs are not clipped. Rows follow native:
+    // face runs are shaped before width decisions and rasterization.
     const auto decoded = decodeTextCodepoints (text);
     std::vector<char32_t> normalized;
     normalized.reserve (decoded.size ());
@@ -540,211 +542,43 @@ void CText::rebuildTextureFrom (const std::string& text) {
     const float rowSpacing = std::isfinite (authoredSpacing.y) ? authoredSpacing.y : 0.0f;
     const float authoredMaxWidth = m_text.maxWidth->value->getFloat ();
     const bool limitWidth = m_text.limitWidth->value->getBool ();
-    struct FacedGlyph { FT_Face face; ShapedTextGlyph glyph; };
-    const auto shape = [this] (std::span<const char32_t> value) {
-        std::vector<FacedGlyph> result;
-        for (size_t start = 0; start < value.size ();) {
-            FT_Face face = faceForCodepoint (value[start]);
-            size_t end = start + 1;
-            while (end < value.size () && faceForCodepoint (value[end]) == face) ++end;
-            const ShapedTextRun shaped = shapeTextRow (face, value.subspan (start, end - start));
-            for (auto glyph : shaped.glyphs) {
-                glyph.cluster += static_cast<uint32_t> (start);
-                result.push_back ({face, glyph});
-            }
-            start = end;
-        }
-        return result;
-    };
-    std::vector<char32_t> wrapped;
-    if (limitWidth && std::isfinite (authoredMaxWidth) && authoredMaxWidth > 0.0f) {
-	wrapped.reserve (normalized.size ());
-	float rowWidth = 0.0f;
-	float pendingWidth = 0.0f;
-	std::vector<char32_t> pendingSpaces;
-	bool rowHasWord = false;
-	const auto measure = [&shape, letterSpacing] (std::span<const char32_t> value) {
-	    const auto shaped = shape (value);
-	    float width = 0.0f;
-	    for (const auto& glyph : shaped)
-		width += static_cast<float> (glyph.glyph.xAdvance26_6 >> 6) + letterSpacing;
-	    return width;
-	};
-	for (size_t index = 0; index < normalized.size ();) {
-	    const char32_t codepoint = normalized[index];
-	    if (codepoint == '\n') {
-		wrapped.insert (wrapped.end (), pendingSpaces.begin (), pendingSpaces.end ());
-		pendingSpaces.clear ();
-		pendingWidth = 0.0f;
-		wrapped.push_back ('\n');
-		rowWidth = 0.0f;
-		rowHasWord = false;
-		++index;
-		continue;
-	    }
-	    if (codepoint == ' ' || codepoint == '\t') {
-		pendingSpaces.push_back (codepoint);
-		pendingWidth = measure (pendingSpaces);
-		++index;
-		continue;
-	    }
-	    const size_t wordStart = index;
-	    while (index < normalized.size () && normalized[index] != '\n'
-		   && normalized[index] != ' ' && normalized[index] != '\t') {
-		++index;
-	    }
-	    const float wordWidth = measure (std::span<const char32_t> (
-	        normalized.data () + wordStart, index - wordStart));
-	    if (rowHasWord && rowWidth + pendingWidth + wordWidth > authoredMaxWidth) {
-		wrapped.push_back ('\n');
-		rowWidth = 0.0f;
-		pendingSpaces.clear ();
-		pendingWidth = 0.0f;
-	    } else {
-		wrapped.insert (wrapped.end (), pendingSpaces.begin (), pendingSpaces.end ());
-		rowWidth += pendingWidth;
-		pendingSpaces.clear ();
-		pendingWidth = 0.0f;
-	    }
-	    const auto word = std::span<const char32_t> (
-	        normalized.data () + wordStart, index - wordStart);
-	    if (wordWidth <= authoredMaxWidth) {
-		wrapped.insert (wrapped.end (), word.begin (), word.end ());
-		rowWidth += wordWidth;
-		rowHasWord = true;
-		continue;
-	    }
-	    // An authored width also constrains a word with no whitespace. The
-	    // native width branch can start another row after a non-space glyph.
-	    // Split only at shaped cluster boundaries so a ligature or combining cluster stays
-	    // intact, and measure each resulting run with the same shaping path used
-	    // for rasterization.
-	    std::vector<size_t> cuts {0, word.size ()};
-	    for (const auto& faced : shape (word))
-		if (faced.glyph.cluster > 0 && faced.glyph.cluster < word.size ())
-		    cuts.push_back (faced.glyph.cluster);
-	    std::sort (cuts.begin (), cuts.end ());
-	    cuts.erase (std::unique (cuts.begin (), cuts.end ()), cuts.end ());
-	    for (size_t start = 0; start < word.size ();) {
-		size_t best = start;
-		const auto firstCut = std::upper_bound (cuts.begin (), cuts.end (), start);
-		if (letterSpacing >= 0.0f) {
-		    // Search measured cluster prefixes without reshaping every prefix
-		    // of a long media title. Contextual shaping can make widths
-		    // nonmonotonic; the chosen prefix is checked to fit, but it may
-		    // break earlier than a complete scan in that case.
-		    size_t lo = static_cast<size_t> (firstCut - cuts.begin ());
-		    size_t hi = lo;
-		    size_t step = 1;
-		    const auto fits = [&] (size_t cut) {
-			return rowWidth + measure (word.subspan (start, cuts[cut] - start))
-			    <= authoredMaxWidth;
-		    };
-		    // Bracket the next break exponentially. A title thousands of
-		    // clusters long then only reshapes nearby prefixes on each row.
-		    while (hi < cuts.size () && fits (hi)) {
-			best = cuts[hi];
-			lo = hi + 1;
-			hi += std::min (step, cuts.size () - hi);
-			step = step > cuts.size () / 2 ? cuts.size () : step * 2;
-		    }
-		    while (lo < hi) {
-			const size_t mid = lo + (hi - lo) / 2;
-			if (fits (mid)) {
-			    best = cuts[mid];
-			    lo = mid + 1;
-			} else hi = mid;
-		    }
-		} else {
-		    // Negative authored spacing need not make prefix widths monotonic.
-		    for (auto it = firstCut; it != cuts.end (); ++it)
-			if (rowWidth + measure (word.subspan (start, *it - start)) <= authoredMaxWidth)
-			    best = *it;
-		}
-		if (best == start && rowWidth > 0.0f) {
-		    wrapped.push_back ('\n');
-		    rowWidth = 0.0f;
-		    continue;
-		}
-		if (best == start)
-		    best = *std::upper_bound (cuts.begin (), cuts.end (), start);
-		const auto segment = word.subspan (start, best - start);
-		wrapped.insert (wrapped.end (), segment.begin (), segment.end ());
-		rowWidth += measure (segment);
-		rowHasWord = true;
-		start = best;
-		if (start < word.size ()) {
-		    wrapped.push_back ('\n');
-		    rowWidth = 0.0f;
-		}
-	    }
-	}
-	wrapped.insert (wrapped.end (), pendingSpaces.begin (), pendingSpaces.end ());
-    } else {
-	wrapped = std::move (normalized);
-    }
-    // Native splits only segments followed by content. A terminal LF ends
-    // the last segment and does not create an additional blank layout row.
-    if (!wrapped.empty () && wrapped.back () == '\n') wrapped.pop_back ();
     const int authoredMaxRows = m_text.maxRows->value->getInt ();
     const bool limitRows = m_text.limitRows->value->getBool ();
     const bool limitUseEllipsis = m_text.limitUseEllipsis->value->getBool ();
-    std::vector<char32_t> codepoints;
-    codepoints.reserve (wrapped.size ());
-    int acceptedRows = 1;
-    for (size_t index = 0; index < wrapped.size (); ++index) {
-	const char32_t codepoint = wrapped[index];
-	if (codepoint == '\n') {
-	    if (limitRows && authoredMaxRows > 0 && acceptedRows >= authoredMaxRows) {
-		// The native row-limit path trims terminal whitespace on the
-		// retained row before discarding later rows.
-		while (!codepoints.empty () && (codepoints.back () == ' '
-		       || codepoints.back () == '\t')) codepoints.pop_back ();
-		if (limitUseEllipsis && (codepoints.empty () || codepoints.back () != 0x2026))
-		    codepoints.push_back (0x2026);
-		break;
-	    }
-	    codepoints.push_back ('\n');
-	    ++acceptedRows;
-	} else {
-	    codepoints.push_back (codepoint);
-	}
-    }
+    TextLayoutLimits limits;
+    if (limitWidth && std::isfinite (authoredMaxWidth) && authoredMaxWidth > 0.0f)
+        limits.maxWidth = authoredMaxWidth;
+    if (limitRows && authoredMaxRows > 0) limits.maxRows = authoredMaxRows;
+    limits.ellipsis = limitUseEllipsis;
+    limits.letterSpacing = letterSpacing;
+    limits.primary = m_ftFace;
+    const auto rows = layoutTextRows (normalized,
+        [this] (char32_t codepoint) { return faceForCodepoint (codepoint); }, limits);
     // Native adds authored Y spacing directly to the face line metric; it
     // does not clamp overlapping or reverse-order rows.
     const float lineHeight = static_cast<float> (m_ftFace->size->metrics.height >> 6) + rowSpacing;
-    int line = 0;
     int minInkX = 0, maxInkX = 0, minInkY = 0, maxInkY = 0;
     float maxAdvance = 0.0f;
     bool hasInk = false;
     struct PlacedGlyph { FT_Face face; FT_UInt index; float x; float baselineY; bool color = false; };
     std::vector<PlacedGlyph> glyphs;
-    glyphs.reserve (codepoints.size ());
     struct LayoutRow { size_t begin; size_t end; TextLayoutRange bounds; };
     std::vector<LayoutRow> layoutRows;
     float maxRowWidth = 0.0f;
-    std::vector<char32_t> row;
-    const auto flushRow = [&] {
-	const auto shaped = shape (row);
+    for (size_t line = 0; line < rows.size (); ++line) {
 	LayoutRow layoutRow {glyphs.size (), 0, {}};
 	float penX = 0.0f;
 	float penY = 0.0f;
-	for (const auto& faced : shaped) {
-	    const auto& glyph = faced.glyph;
-	    glyphs.push_back ({faced.face, glyph.glyphIndex,
+	for (const auto& laid : rows[line].glyphs) {
+	    const auto& glyph = laid.glyph;
+	    glyphs.push_back ({laid.face, glyph.glyphIndex,
 	        penX + static_cast<float> (glyph.xOffset26_6 >> 6),
-	        line * lineHeight - penY - static_cast<float> (glyph.yOffset26_6 >> 6)});
-	    FT_BBox bounds {};
-	    if (textGlyphPixelBounds (faced.face, glyph.glyphIndex, bounds)) {
-	        layoutRow.bounds.include (glyphs.back ().x + static_cast<float> (bounds.xMin),
-	                                  glyphs.back ().x + static_cast<float> (bounds.xMax));
-	    } else if (FT_Load_Glyph (faced.face, glyph.glyphIndex, FT_LOAD_RENDER | FT_LOAD_COLOR) == 0) {
-	        // Bitmap-only fallback faces have no outline CBox. Keep their
-	        // existing rendered bounds rather than dropping their layout.
-	        const auto slot = faced.face->glyph;
-	        layoutRow.bounds.include (glyphs.back ().x + slot->bitmap_left,
-	            glyphs.back ().x + slot->bitmap_left + slot->bitmap.width);
-	    }
+	        static_cast<float> (line) * lineHeight - penY - static_cast<float> (glyph.yOffset26_6 >> 6)});
+	    // Bitmap-only fallback faces have no outline CBox and keep their
+	    // rendered bounds rather than dropping their layout.
+	    float low = 0.0f, high = 0.0f;
+	    if (textGlyphHorizontalInk (laid.face, glyph.glyphIndex, low, high))
+	        layoutRow.bounds.include (glyphs.back ().x + low, glyphs.back ().x + high);
 	    penX += static_cast<float> (glyph.xAdvance26_6 >> 6) + letterSpacing;
 	    penY += static_cast<float> (glyph.yAdvance26_6 >> 6);
 	}
@@ -752,18 +586,7 @@ void CText::rebuildTextureFrom (const std::string& text) {
 	layoutRow.end = glyphs.size ();
 	maxRowWidth = std::max (maxRowWidth, layoutRow.bounds.width ());
 	layoutRows.push_back (layoutRow);
-	row.clear ();
-    };
-    for (size_t index = 0; index < codepoints.size (); ++index) {
-	const char32_t codepoint = codepoints[index];
-	if (codepoint == '\n') {
-	    flushRow ();
-	    ++line;
-	    continue;
-	}
-	row.push_back (codepoint);
     }
-    flushRow ();
     TextLayoutRange layoutBounds;
     for (const auto& layoutRow : layoutRows) {
         const float offset = textRowAlignmentOffset (layoutRow.bounds.width (), maxRowWidth,
@@ -802,7 +625,8 @@ void CText::rebuildTextureFrom (const std::string& text) {
     }
     const int originX = std::min (0, minInkX);
     const int width = std::max (1, std::max (static_cast<int> (std::ceil (maxAdvance)), maxInkX) - originX);
-    const int lineCount = line + 1;
+    // Every row record counts, including rows without glyphs.
+    const int lineCount = static_cast<int> (rows.size ());
     m_layoutRows = lineCount;
     m_layoutLineHeight = lineHeight;
     const int ascent = std::max (0, static_cast<int> (m_ftFace->size->metrics.ascender >> 6));
