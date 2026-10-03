@@ -6,6 +6,8 @@
 #include "WallpaperEngine/Scripting/ScriptEngine.h"
 #include "WallpaperEngine/Scripting/ScriptableObject.h"
 #include "WallpaperEngine/Scripting/TextureAnimationObject.h"
+#include "WallpaperEngine/Scripting/EffectThisObject.h"
+#include "WallpaperEngine/Scripting/PropertyAnimationThisObject.h"
 #include "WallpaperEngine/Render/Objects/CSound.h"
 #include "WallpaperEngine/Render/Objects/CImage.h"
 #include "WallpaperEngine/Render/Objects/CText.h"
@@ -18,6 +20,7 @@
 #include <iterator>
 #include <limits>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <string_view>
 
@@ -346,6 +349,73 @@ static JSValue layer_get_texture_animation (JSContext* ctx, JSValueConst thisVal
         layer, image->getTextureAnimation ());
 }
 
+// Native 2.8.42 IEffectLayer getEffect, on image and text
+// layers: an integer selects an effect by index; a non-empty string selects
+// the last effect with exactly that name. Any other argument (including a
+// fractional or NaN number), or no match, returns null.
+static JSValue layer_get_effect (JSContext* ctx, JSValueConst thisValue, int argc, JSValueConst* argv) {
+    auto* container = scriptableContainer (thisValue);
+    auto* layer = container && container->lifetime ? container->lifetime->object : nullptr;
+    const auto* effects = WallpaperEngine::Scripting::layerEffects (layer);
+    if (!effects) return JS_ThrowTypeError (ctx, "getEffect requires an image or text layer");
+    std::optional<size_t> index;
+    if (argc > 0 && JS_IsNumber (argv[0])) {
+        double requested = 0.0;
+        if (JS_ToFloat64 (ctx, &requested, argv[0]) < 0) return JS_EXCEPTION;
+        if (std::isfinite (requested) && std::trunc (requested) == requested && requested >= 0.0
+            && requested < static_cast<double> (effects->size ()))
+            index = static_cast<size_t> (requested);
+    } else if (argc > 0 && JS_IsString (argv[0])) {
+        size_t length = 0;
+        const char* chars = JS_ToCStringLen (ctx, &length, argv[0]);
+        if (!chars) return JS_EXCEPTION;
+        const std::string_view requested (chars, length);
+        if (!requested.empty ())
+            for (size_t i = 0; i < effects->size (); ++i)
+                if ((*effects)[i] && (*effects)[i]->name == requested) index = i;
+        JS_FreeCString (ctx, chars);
+    }
+    if (!index) return JS_NULL;
+    return WallpaperEngine::Scripting::createEffectThisObject (ctx, thisValue, *index);
+}
+
+static JSValue layer_get_effect_count (JSContext* ctx, JSValueConst thisValue, int, JSValueConst*) {
+    auto* container = scriptableContainer (thisValue);
+    auto* layer = container && container->lifetime ? container->lifetime->object : nullptr;
+    const auto* effects = WallpaperEngine::Scripting::layerEffects (layer);
+    if (!effects) return JS_ThrowTypeError (ctx, "getEffectCount requires an image or text layer");
+    return JS_NewInt64 (ctx, static_cast<int64_t> (effects->size ()));
+}
+
+// Native IObject.getAnimation: a non-empty
+// name selects this object's timeline animation with that name. Without
+// one, the running script's own property animation name is used. A missing
+// animation is undefined.
+static JSValue layer_get_animation (JSContext* ctx, JSValueConst thisValue, int argc, JSValueConst* argv) {
+    auto* container = scriptableContainer (thisValue);
+    auto* layer = container && container->lifetime ? container->lifetime->object : nullptr;
+    if (!layer) return JS_UNDEFINED;
+    std::string name;
+    if (argc > 0 && JS_IsString (argv[0])) {
+        size_t length = 0;
+        const char* chars = JS_ToCStringLen (ctx, &length, argv[0]);
+        if (!chars) return JS_EXCEPTION;
+        name.assign (chars, length);
+        JS_FreeCString (ctx, chars);
+    }
+    if (name.empty ()) {
+        // Timer callbacks keep the scheduling script's property as their context.
+        const auto running = container->adapter.getEngine ().currentScriptProperty ();
+        if (!running.value || !running.value->getAnimation ()) return JS_UNDEFINED;
+        if (running.object == layer)
+            return WallpaperEngine::Scripting::createPropertyAnimationObject (ctx, thisValue, *running.value);
+        name = running.value->getAnimation ()->name;
+    }
+    auto* value = WallpaperEngine::Scripting::findObjectAnimation (*layer, name);
+    if (!value) return JS_UNDEFINED;
+    return WallpaperEngine::Scripting::createPropertyAnimationObject (ctx, thisValue, *value);
+}
+
 // Native SceneScript Mat4 stores its column-major elements in `m`; authored
 // scripts read indices 12 and 13 for the layer's current world translation.
 // Use the same resolved hierarchy as scene rendering, including attachments,
@@ -407,6 +477,13 @@ JSValue scriptableobject_property_get (JSContext* ctx, JSValueConst obj_val, JSA
     if (std::string_view (name) == "getTextureAnimation"
         && dynamic_cast<WallpaperEngine::Render::Objects::CImage*> (container->lifetime->object))
         return JS_NewCFunction (ctx, layer_get_texture_animation, name, 0);
+    if (std::string_view (name) == "getAnimation")
+        return JS_NewCFunction (ctx, layer_get_animation, name, 1);
+    if (WallpaperEngine::Scripting::layerEffects (container->lifetime->object)) {
+        if (std::string_view (name) == "getEffect") return JS_NewCFunction (ctx, layer_get_effect, name, 1);
+        if (std::string_view (name) == "getEffectCount")
+            return JS_NewCFunction (ctx, layer_get_effect_count, name, 0);
+    }
     if (auto* text = dynamic_cast<WallpaperEngine::Render::Objects::CText*> (
             container->lifetime->object)) {
         const std::string_view field (name);

@@ -2,9 +2,11 @@
 
 #include "WallpaperEngine/Data/Model/DynamicValue.h"
 #include "WallpaperEngine/Scripting/Adapters/ScriptableObjectAdapter.h"
+#include "WallpaperEngine/Scripting/ScriptableObject.h"
 
 #include <cstdint>
 #include <cmath>
+#include <ranges>
 
 using namespace WallpaperEngine::Scripting;
 using WallpaperEngine::Data::Model::DynamicValue;
@@ -12,7 +14,7 @@ using WallpaperEngine::Data::Model::PropertyAnimation;
 
 namespace {
 PropertyAnimation* resolve (JSContext* context, JSValue* data) {
-    if (!Adapters::ScriptableObjectAdapter::resolve (data[0])) {
+    if (!WallpaperEngine::Scripting::Adapters::ScriptableObjectAdapter::resolve (data[0])) {
         JS_ThrowTypeError (context, "Property animation is no longer available");
         return nullptr;
     }
@@ -51,17 +53,9 @@ JSValue animationMethod (JSContext* context, JSValueConst, int argc, JSValueCons
     }
 }
 
-JSValue getAnimation (JSContext* context, JSValueConst, int argc, JSValueConst* argv,
-                      int, JSValue* data) {
+JSValue animationObject (JSContext* context, JSValue* data) {
     auto* animation = resolve (context, data);
     if (!animation) return JS_EXCEPTION;
-    if (argc > 0 && !JS_IsUndefined (argv[0])) {
-        const char* requested = JS_ToCString (context, argv[0]);
-        if (!requested) return JS_EXCEPTION;
-        const bool matches = animation->name == requested;
-        JS_FreeCString (context, requested);
-        if (!matches) return JS_UNDEFINED;
-    }
     JSValue result = JS_NewObject (context);
     if (JS_IsException (result)) return result;
     JSValue captured[] { JS_DupValue (context, data[0]), JS_DupValue (context, data[1]) };
@@ -102,11 +96,48 @@ JSValue getAnimation (JSContext* context, JSValueConst, int argc, JSValueConst* 
     JS_FreeAtom (context, rateAtom);
     return result;
 }
+
+JSValue getAnimation (JSContext* context, JSValueConst, int argc, JSValueConst* argv,
+                      int, JSValue* data) {
+    auto* animation = resolve (context, data);
+    if (!animation) return JS_EXCEPTION;
+    if (argc > 0 && !JS_IsUndefined (argv[0])) {
+        const char* requested = JS_ToCString (context, argv[0]);
+        if (!requested) return JS_EXCEPTION;
+        const bool matches = animation->name == requested;
+        JS_FreeCString (context, requested);
+        if (!matches) return JS_UNDEFINED;
+    }
+    return animationObject (context, data);
+}
+}
+
+JSValue WallpaperEngine::Scripting::createPropertyAnimationObject (
+    JSContext* context, JSValueConst layer, DynamicValue& value) {
+    JSValue data[] { JS_DupValue (context, layer),
+                     JS_NewInt64 (context, static_cast<int64_t> (reinterpret_cast<intptr_t> (&value))) };
+    JSValue result = animationObject (context, data);
+    JS_FreeValue (context, data[0]);
+    JS_FreeValue (context, data[1]);
+    return result;
+}
+
+DynamicValue* WallpaperEngine::Scripting::findObjectAnimation (
+    const ScriptableObject& object, const std::string& name) {
+    for (const auto& entry : object.getProperties () | std::views::values) {
+        const auto* animation = entry.value.getAnimation ();
+        if (animation && animation->name == name) return &entry.value;
+    }
+    return nullptr;
 }
 
 void WallpaperEngine::Scripting::attachPropertyAnimation (
     JSContext* context, JSValueConst owner, JSValueConst layer, DynamicValue& value) {
     if (!value.getAnimation ()) return;
+    // A layer property's owner is the shared layer wrapper; its
+    // getAnimation resolves per object and per running script instead.
+    if (JS_IsObject (owner) && JS_IsObject (layer) && JS_VALUE_GET_PTR (owner) == JS_VALUE_GET_PTR (layer))
+        return;
     JSValue captured[] { JS_DupValue (context, layer),
                          JS_NewInt64 (context, static_cast<int64_t> (reinterpret_cast<intptr_t> (&value))) };
     JS_DefinePropertyValueStr (context, owner, "getAnimation",

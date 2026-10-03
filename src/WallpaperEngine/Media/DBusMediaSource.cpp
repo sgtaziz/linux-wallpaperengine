@@ -153,6 +153,7 @@ void DBusMediaSource::parseMetadata (DBusMessageIter& variant) {
     updated.title.clear ();
     updated.artist.clear ();
     updated.album.clear ();
+    updated.albumArtist.clear ();
     updated.url.reset ();
     updated.thumbnailAvailable = false;
     updated.artwork.reset ();
@@ -187,6 +188,18 @@ void DBusMediaSource::parseMetadata (DBusMessageIter& variant) {
 
 		updated.artist = artist ?: "";
 	    }
+	} else if (keyStr == "xesam:albumArtist"
+	           && dbus_message_iter_get_arg_type (&value) == DBUS_TYPE_ARRAY) {
+	    DBusMessageIter arr;
+
+	    dbus_message_iter_recurse (&value, &arr);
+
+	    if (dbus_message_iter_get_arg_type (&arr) == DBUS_TYPE_STRING) {
+		const char* albumArtist = nullptr;
+		dbus_message_iter_get_basic (&arr, &albumArtist);
+
+		updated.albumArtist = albumArtist ?: "";
+	    }
 	} else if (keyStr == "xesam:album") {
 	    const char* album = nullptr;
 	    dbus_message_iter_get_basic (&value, &album);
@@ -210,7 +223,8 @@ void DBusMediaSource::parseMetadata (DBusMessageIter& variant) {
     if (updated.url) updated.artwork = m_artworkCache.load (*updated.url);
     updated.thumbnailAvailable = updated.artwork != nullptr;
     const bool metadataUpdate = updated.title != m_mediaInfo.title || updated.artist != m_mediaInfo.artist
-        || updated.album != m_mediaInfo.album || updated.duration != m_mediaInfo.duration;
+        || updated.album != m_mediaInfo.album || updated.albumArtist != m_mediaInfo.albumArtist
+        || updated.duration != m_mediaInfo.duration;
     const bool albumUpdate = updated.url != m_mediaInfo.url
         || updated.artwork != m_mediaInfo.artwork;
     m_mediaInfo = std::move (updated);
@@ -285,7 +299,7 @@ void DBusMediaSource::update () {
         m_currentPlayer.reset ();
         m_selectedOwner.reset ();
         m_mediaInfo = {.playbackState = Stopped, .title = "", .artist = "", .album = "",
-                       .url = std::nullopt, .thumbnailAvailable = false, .artwork = nullptr,
+                       .albumArtist = "", .url = std::nullopt, .thumbnailAvailable = false, .artwork = nullptr,
                        .duration = 0.0, .position = 0.0, .available = false};
         performUpdate ();
         m_nextUpdate = std::chrono::steady_clock::now () + m_updateInterval;
@@ -536,6 +550,7 @@ void DBusMediaSource::performUpdate () {
 	m_mediaInfo.title.clear ();
 	m_mediaInfo.artist.clear ();
 	m_mediaInfo.album.clear ();
+	m_mediaInfo.albumArtist.clear ();
 	m_mediaInfo.url.reset ();
 	m_mediaInfo.thumbnailAvailable = false;
 	m_mediaInfo.artwork.reset ();

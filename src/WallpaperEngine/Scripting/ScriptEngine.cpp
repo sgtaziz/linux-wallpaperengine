@@ -8,6 +8,7 @@
 #include "WallpaperEngine/Data/Model/Property.h"
 #include "Modules/MathModule.h"
 #include "Modules/ScriptModule.h"
+#include "Modules/ScriptModuleAssets.h"
 #include "MediaEventPayloads.h"
 #include "ScriptPropertiesObject.h"
 #include "ScriptableObject.h"
@@ -24,6 +25,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cerrno>
 #include <chrono>
 #include <cmath>
@@ -79,16 +81,23 @@ void scriptengine_dump (JSContext* ctx, JSValueConst obj) {
 }
 
 JSModuleDef* scriptengine_module_loader (JSContext* ctx, const char* module, void* opaque) {
-    const auto* scriptEngine = static_cast<ScriptEngine*> (opaque);
+    auto* scriptEngine = static_cast<ScriptEngine*> (opaque);
 
-    const auto& modules = scriptEngine->getModules ();
-    const auto it = modules.find (module);
+    // Names arrive lowercased by normalizeScriptModuleName, so the built-in
+    // WEMath/WEColor modules match any import casing.
+    const std::string_view requested (module);
+    for (const auto& [name, definition] : scriptEngine->getModules ())
+        if (std::ranges::equal (name, requested, [] (char left, char right) {
+                return std::tolower (static_cast<unsigned char> (left))
+                    == std::tolower (static_cast<unsigned char> (right));
+            }))
+            return definition->getDefinition ();
 
-    if (it == modules.end ()) {
-	return nullptr;
-    }
-
-    return it->second->getDefinition ();
+    // Any other import resolves like native: through the asset
+    // filesystem at scripts/jsmodules/<lowercase name>.js (e.g. WEVector).
+    // A failure leaves a pending exception that the importing script's
+    // compile/evaluate path reports.
+    return scriptEngine->getModuleAssets ().load (ctx, module);
 }
 
 JSValue ScriptEngine::dynamicToJs (DynamicValue& value, bool detached, bool angleProperty, bool rgbColorProperty) const {
@@ -219,6 +228,33 @@ static void jsToDynamicValue (JSContext* ctx, JSValue val, DynamicValue& source,
     }
 }
 
+ScriptEngine::ScriptProperty ScriptEngine::currentScriptProperty () const {
+    if (m_runningModule) return {&m_runningModule->object, &m_runningModule->value};
+    if (m_engineObject)
+        return {m_engineObject->getTimers ().activeOwner (), m_engineObject->getTimers ().activeValue ()};
+    return {};
+}
+
+JSValue ScriptEngine::userPropertiesValue () const {
+    // Native baseclasses.js _Internal.convertUserProperties: each project
+    // property becomes its current value, with a color as a detached Vec3.
+    JSValue result = JS_NewObject (m_context);
+    if (JS_IsException (result)) return result;
+    for (const auto& [name, property] : m_scene.getScene ().project.properties) {
+        JSValue field;
+        if (dynamic_cast<Data::Model::PropertyColor*> (property.get ())) {
+            DynamicValue color (property->getVec3 ());
+            field = m_adapters.vec3->instantiate (color, true);
+        } else field = dynamicToJs (*property);
+        if (JS_IsException (field)
+            || JS_SetPropertyStr (m_context, result, name.c_str (), field) < 0) {
+            JS_FreeValue (m_context, result);
+            return JS_EXCEPTION;
+        }
+    }
+    return result;
+}
+
 static bool acceptsRgbColorResult (const std::string& key) {
     // A particle's instance color may be connected to a project color (Vec4),
     // while its script and renderer both use RGB Vec3. Keep the stored alpha.
@@ -280,8 +316,11 @@ ScriptEngine::ScriptEngine (Wallpapers::CScene& scene, Media::MediaSource& media
 
     this->m_modules.emplace (wemath->getName (), std::move (wemath));
     this->m_modules.emplace (wecolor->getName (), std::move (wecolor));
+    this->m_moduleAssets = std::make_unique<Modules::ScriptModuleAssets> ([&scene] (const std::string& path) {
+        return scene.getScene ().project.assetLocator->readString (path);
+    });
 
-    JS_SetModuleLoaderFunc (this->m_runtime, nullptr, scriptengine_module_loader, this);
+    JS_SetModuleLoaderFunc (this->m_runtime, Modules::normalizeScriptModuleName, scriptengine_module_loader, this);
     // setup scene objects and other things
     this->installBuiltins ();
     // add engine to the global
@@ -465,7 +504,10 @@ void ScriptEngine::dispatchCursorEvent (const ScriptableObject& object, const ch
         JS_SetPropertyStr (m_context, payload, "localPosition", vectorValue (local));
         JS_SetPropertyStr (m_context, payload, "hitBox", JS_NULL);
         JSValue args[] = {payload};
+        std::optional<UserCommandScope> userCommands;
+        if (UserCommandScope::allows (event)) userCommands.emplace (m_context);
         JSValue result = call (module.module, 1, args, event);
+        userCommands.reset ();
         if (JS_IsException (result))
             logJSException (m_context, (std::string ("cursor.") + event + ":" + key).c_str ());
         JS_FreeValue (m_context, result);
@@ -973,18 +1015,10 @@ void ScriptEngine::tick () {
 	    // loads. Several authored scripts initialize their frame state here,
 	    // after init(value) has captured the initial layer value.
 	    if (JS_IsUndefined (initialUserProperties)) {
-	        initialUserProperties = JS_NewObject (m_context);
-	        for (const auto& [name, property] : m_scene.getScene ().project.properties) {
-	            JSValue field;
-	            if (dynamic_cast<Data::Model::PropertyColor*> (property.get ())) {
-	                DynamicValue color (property->getVec3 ());
-	                field = m_adapters.vec3->instantiate (color, true);
-	            } else field = dynamicToJs (*property);
-	            if (JS_IsException (field) || JS_SetPropertyStr (
-	                    m_context, initialUserProperties, name.c_str (), field) < 0) {
-	                logJSException (m_context, "tick.userProperties");
-	                break;
-	            }
+	        initialUserProperties = userPropertiesValue ();
+	        if (JS_IsException (initialUserProperties)) {
+	            logJSException (m_context, "tick.userProperties");
+	            initialUserProperties = JS_NewObject (m_context);
 	        }
 	    }
 	    JSValue userArgs[] = {JS_DupValue (m_context, initialUserProperties)};
@@ -1067,7 +1101,8 @@ void ScriptEngine::notifyMediaUpdate (const Media::MediaSource::MediaInfo& media
     const auto& previous = m_lastMediaInfo;
     const bool initial = !previous.has_value ();
     const bool propertiesChanged = initial || previous->title != media.title
-        || previous->artist != media.artist || previous->album != media.album;
+        || previous->artist != media.artist || previous->album != media.album
+        || previous->albumArtist != media.albumArtist;
     const bool playbackChanged = initial || previous->playbackState != media.playbackState;
     const bool timelineChanged = initial || previous->position != media.position
         || previous->duration != media.duration;

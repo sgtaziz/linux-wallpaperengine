@@ -4,18 +4,31 @@
 #include "WallpaperEngine/Data/Model/Object.h"
 #include "WallpaperEngine/Render/Objects/CImage.h"
 #include "WallpaperEngine/Scripting/Adapters/ScriptableObjectAdapter.h"
+#include "WallpaperEngine/Scripting/ScriptableObject.h"
 
 #include <limits>
 
 using namespace WallpaperEngine::Scripting;
 using WallpaperEngine::Render::Objects::CImage;
 
+const std::vector<WallpaperEngine::Data::Model::ImageEffectUniquePtr>*
+WallpaperEngine::Scripting::layerEffects (const ScriptableObject* layer) {
+    // Native 2.8.42 image and text layers share the IEffectLayer base
+    if (!layer) return nullptr;
+    const auto& object = layer->getObject ();
+    if (object.is<WallpaperEngine::Data::Model::Image> ())
+        return &object.as<WallpaperEngine::Data::Model::Image> ()->effects;
+    if (object.is<WallpaperEngine::Data::Model::Text> ())
+        return &object.as<WallpaperEngine::Data::Model::Text> ()->effects;
+    return nullptr;
+}
+
 namespace {
 const WallpaperEngine::Data::Model::ImageEffect* effectAt (JSValueConst layer, int index) {
-    const auto* image = dynamic_cast<const CImage*> (
+    const auto* effects = WallpaperEngine::Scripting::layerEffects (
         WallpaperEngine::Scripting::Adapters::ScriptableObjectAdapter::resolve (layer));
-    if (!image || index < 0 || static_cast<size_t> (index) >= image->getImage ().effects.size ()) return nullptr;
-    return image->getImage ().effects[static_cast<size_t> (index)].get ();
+    if (!effects || index < 0 || static_cast<size_t> (index) >= effects->size ()) return nullptr;
+    return (*effects)[static_cast<size_t> (index)].get ();
 }
 
 JSValue visibleGet (JSContext* context, JSValueConst, int, JSValueConst*, int index, JSValue* data) {
