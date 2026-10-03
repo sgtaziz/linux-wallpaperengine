@@ -538,11 +538,12 @@ inline glm::vec3 localControlPointPosition (glm::vec3 authoredOffset) {
 
 // Native operator 0x0a uses a linear radial envelope inside the full authored
 // threshold. Its default flag bit 1 limits an inward impulse to the remaining
-// distance, avoiding a one-step overshoot at the control point.
+// distance, avoiding a one-step overshoot at the control point. Opcode 0x20
+// weights the capped impulse by the blend envelope.
 inline glm::vec3 controlPointAttractVelocityDelta (glm::vec3 particle,
                                                    glm::vec3 center, float scale,
                                                    float threshold, MovementTime time,
-                                                   uint32_t flags) {
+                                                   uint32_t flags, float envelopeWeight = 1.0f) {
     const glm::vec3 radial = particle - center;
     const float distance = glm::length (radial);
     if (!(distance > 0.0f && distance < threshold) || !std::isfinite (distance)
@@ -551,7 +552,37 @@ inline glm::vec3 controlPointAttractVelocityDelta (glm::vec3 particle,
         return {};
     float impulse = (1.0f - distance / threshold) * scale * time.damping;
     if ((flags & 2u) != 0u && distance < impulse) impulse = distance;
+    impulse *= envelopeWeight;
     return -radial * (impulse / distance);
+}
+
+// inserts omitted scale/threshold/deletethreshold from the same
+// scene-context bit as the vortex defaults.
+struct ControlPointAttractDefaults {
+    float scale;
+    float threshold;
+    float deleteThreshold;
+};
+
+inline ControlPointAttractDefaults controlPointAttractDefaults (bool isOrthogonal) {
+    return isOrthogonal
+        ? ControlPointAttractDefaults { 512.0f, 512.0f, 15.0f }
+        : ControlPointAttractDefaults { 20.0f, 5.0f, 0.5f };
+}
+
+// Flag bit 0 clamps the control point onto this step's
+// previous-to-current position segment and expires the particle (age =
+// lifetime) when the squared distance is within deletethreshold squared.
+inline bool controlPointAttractDeletes (glm::vec3 previous, glm::vec3 current,
+                                        glm::vec3 center, float deleteThreshold) {
+    const glm::vec3 segment = current - previous;
+    const float length = glm::length (segment);
+    const glm::vec3 direction = length > 0.0f ? segment / length : segment;
+    float along = glm::dot (center - previous, direction);
+    if (!(along >= 0.0f)) along = 0.0f;
+    if (!(along <= length)) along = length;
+    const glm::vec3 offset = center - (previous + direction * along);
+    return !(deleteThreshold * deleteThreshold < glm::dot (offset, offset));
 }
 
 inline glm::vec3 instanceControlPointPosition (glm::vec3 authoredOffset,

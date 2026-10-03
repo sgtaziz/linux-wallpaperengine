@@ -828,6 +828,71 @@ TEST_CASE ("Native control-point attraction uses full-radius falloff and default
                                                 {0.2f, 0.05f}, 2u).x == Catch::Approx (-2.0f));
 }
 
+TEST_CASE ("Control-point attraction envelope weights the capped impulse", "[particle][controlpoint][attract]") {
+    // opcode 0x20 multiplies the envelope after the flag-2 cap.
+    const glm::vec3 center (10.0f, 20.0f, 0.0f);
+    const glm::vec3 near (11.0f, 20.0f, 0.0f);
+    REQUIRE (controlPointAttractVelocityDelta (near, center, 100.0f, 50.0f,
+                                                {0.1f, 0.1f}, 2u, 0.5f).x == Catch::Approx (-0.5f));
+    REQUIRE (controlPointAttractVelocityDelta (near, center, 100.0f, 50.0f,
+                                                {0.1f, 0.1f}, 0u, 0.5f).x == Catch::Approx (-4.9f));
+}
+
+TEST_CASE ("Control-point attraction flag 1 deletes along the step segment", "[particle][controlpoint][attract]") {
+    // Original 2.8.42 via interpreter (w10
+    // controlpointattract oracle delete-flag1/3, deletethreshold 4): the
+    // closest point of previous->current to the control point is tested.
+    const glm::vec3 c (10.0f, 20.0f, 0.0f);
+    const float threshold = 4.0f;
+    REQUIRE (controlPointAttractDeletes (c + glm::vec3 (-5, 0, 0), c + glm::vec3 (5, 0, 0), c, threshold));
+    REQUIRE (controlPointAttractDeletes (c + glm::vec3 (-5, 3, 0), c + glm::vec3 (5, 3, 0), c, threshold));
+    REQUIRE_FALSE (controlPointAttractDeletes (c + glm::vec3 (-5, 4.5f, 0), c + glm::vec3 (5, 4.5f, 0), c, threshold));
+    REQUIRE (controlPointAttractDeletes (c + glm::vec3 (2, 0, 0), c + glm::vec3 (2, 0, 0), c, threshold));
+    REQUIRE_FALSE (controlPointAttractDeletes (c + glm::vec3 (40, 0, 0), c + glm::vec3 (30, 0, 0), c, threshold));
+    REQUIRE_FALSE (controlPointAttractDeletes (c + glm::vec3 (-3, -3, -1), c + glm::vec3 (-3, -3, 1), c, threshold));
+    REQUIRE (controlPointAttractDeletes (c + glm::vec3 (1, 1, 1), c + glm::vec3 (1, 1, 1), c, threshold));
+    REQUIRE (controlPointAttractDeletes (c, c, c, threshold));
+}
+
+TEST_CASE ("Control-point attraction parser defaults follow the native projection branch",
+           "[particle][controlpoint][attract][parser]") {
+    using WallpaperEngine::Data::Parsers::ObjectParser;
+    using WallpaperEngine::Data::Model::Particle;
+    using WallpaperEngine::Data::Model::ControlPointAttractOperator;
+    using WallpaperEngine::Data::Model::Project;
+    using WallpaperEngine::Data::JSON::JSON;
+    Project project {};
+    const auto data = JSON::parse (R"({"id":1,"name":"attract","particle":{"operator":[
+        {"name":"controlpointattract","controlpoint":1},
+        {"name":"controlpointattract","scale":-500,"threshold":64,"deletethreshold":4,"flags":1}]}})");
+    const auto object = ObjectParser::parse (data, project);
+    const auto* particle = dynamic_cast<const Particle*> (object.get ());
+    REQUIRE (particle != nullptr);
+    REQUIRE (particle->operators.size () == 2);
+    const auto* omitted = particle->operators[0]->as<ControlPointAttractOperator> ();
+    const auto* authored = particle->operators[1]->as<ControlPointAttractOperator> ();
+    REQUIRE (omitted != nullptr);
+    REQUIRE (authored != nullptr);
+    REQUIRE ((omitted->sceneDefaults.scale && omitted->sceneDefaults.threshold
+              && omitted->sceneDefaults.deleteThreshold));
+    REQUIRE (omitted->flags == 2u);
+    REQUIRE_FALSE ((authored->sceneDefaults.scale || authored->sceneDefaults.threshold
+                    || authored->sceneDefaults.deleteThreshold));
+    REQUIRE (authored->deleteThreshold->value->getFloat () == 4.0f);
+    REQUIRE (authored->flags == 1u);
+    // orthographic 512 / 512 / 15, perspective 20 / 5 / 0.5.
+    const auto ortho = controlPointAttractDefaults (true);
+    REQUIRE (ortho.scale == 512.0f);
+    REQUIRE (ortho.threshold == 512.0f);
+    REQUIRE (ortho.deleteThreshold == 15.0f);
+    const auto perspective = controlPointAttractDefaults (false);
+    REQUIRE (perspective.scale == 20.0f);
+    REQUIRE (perspective.threshold == 5.0f);
+    REQUIRE (perspective.deleteThreshold == 0.5f);
+    REQUIRE (omitted->threshold->value->getFloat () == ortho.threshold);
+    REQUIRE (omitted->scale->value->getFloat () == ortho.scale);
+}
+
 TEST_CASE ("Shared particle RGB gain follows native birth gates", "[particle][instance][color]") {
     const glm::vec3 tint (0.25f, 0.5f, 1.0f);
     const glm::vec3 preset (0.75f, 0.75f, 0.75f);

@@ -2823,9 +2823,16 @@ OperatorFunc CParticle::createMovementOperator (const MovementOperator& op) {
     DynamicValue* dragValue = op.drag->value.get ();
     DynamicValue* gravityValue = op.gravity->value.get ();
     DynamicValue* speedOverride = speedOverrideValue ();
+    // Quad collision and control-point attraction flag bit 0 request the
+    // previous-position streams.
     const bool capturePrevious = std::any_of (m_particle.operators.begin (), m_particle.operators.end (),
-        [] (const auto& record) { return record && record->template is<CollisionOperator> ()
-            && record->template as<CollisionOperator> ()->kind == CollisionOperator::Kind::Quad; });
+        [] (const auto& record) {
+            if (!record) return false;
+            if (record->template is<CollisionOperator> ())
+                return record->template as<CollisionOperator> ()->kind == CollisionOperator::Kind::Quad;
+            return record->template is<ControlPointAttractOperator> ()
+                && (record->template as<ControlPointAttractOperator> ()->flags & 1u) != 0;
+        });
 
     return [dragValue, gravityValue, speedOverride, capturePrevious, nativeSlots = m_slotStreams.has_value ()] (
 	       std::vector<ParticleInstance>& particles, uint32_t count, const std::vector<ControlPointData>&, float,
@@ -3401,29 +3408,41 @@ OperatorFunc CParticle::createVortexOperator (const VortexOperator& op) {
 }
 
 OperatorFunc CParticle::createControlPointAttractOperator (const ControlPointAttractOperator& op) {
-    int controlPoint = op.controlPoint;
+    // Builder stores an index that is not below 7 as 7.
+    const int controlPoint = ParticleCore::vortexControlPointIndex (op.controlPoint);
     const uint32_t flags = op.flags;
-    DynamicValue* originValue = op.origin->value.get ();
     DynamicValue* scaleValue = op.scale->value.get ();
     DynamicValue* thresholdValue = op.threshold->value.get ();
+    DynamicValue* deleteThresholdValue = op.deleteThreshold->value.get ();
     DynamicValue* speedOverride = speedOverrideValue ();
+    const auto* blend = op.blendEnvelope ? &*op.blendEnvelope : nullptr;
+    const auto& projection = getScene ().getScene ().camera.projection;
+    const auto sceneDefaults = ParticleCore::controlPointAttractDefaults (projection.isOrthogonal);
+    const auto useSceneDefaults = op.sceneDefaults;
+    // The 0x24 binding scales the record scale by the instance speed unless
+    // particle flag 0x10 is set.
+    const bool bindSpeed = (m_particle.flags & 0x10u) == 0;
 
-    return [controlPoint, flags, originValue, scaleValue, thresholdValue, speedOverride] (
+    return [controlPoint, flags, scaleValue, thresholdValue, deleteThresholdValue, speedOverride, blend,
+	    sceneDefaults, useSceneDefaults, bindSpeed] (
 	       std::vector<ParticleInstance>& particles, uint32_t count,
 	       const std::vector<ControlPointData>& controlPoints, float,
 	       ParticleCore::MovementTime time
 	   ) {
-	// Get dynamic values
-	glm::vec3 origin = originValue->getVec3 ();
-	float scale = scaleValue->getFloat ();
-	float threshold = thresholdValue->getFloat ();
+	const float scale = (useSceneDefaults.scale ? sceneDefaults.scale : scaleValue->getFloat ())
+	    * (bindSpeed ? speedOverride->getFloat () : 1.0f);
+	const float threshold = useSceneDefaults.threshold ? sceneDefaults.threshold : thresholdValue->getFloat ();
+	const float deleteThreshold = useSceneDefaults.deleteThreshold
+	    ? sceneDefaults.deleteThreshold : deleteThresholdValue->getFloat ();
+	const auto envelope = operatorEnvelope (blend);
 
-	// Get control point position
-	if (controlPoint < 0 || controlPoint >= static_cast<int> (controlPoints.size ())) {
+	if (controlPoint >= static_cast<int> (controlPoints.size ())) {
 	    return;
 	}
 
-	glm::vec3 center = controlPoints[controlPoint].position + origin;
+	// Native opcode 0x0a reads only the control-point translation; the
+	// authored offset/origin in the record is unused.
+	const glm::vec3 center = controlPoints[controlPoint].position;
 
 	// Native opcode 0x0a applies linear radial falloff, and its
 	// default flag 2 caps an inward impulse before crossing the control point.
@@ -3431,7 +3450,16 @@ OperatorFunc CParticle::createControlPointAttractOperator (const ControlPointAtt
 	    auto& p = particles[i];
 	    if (!p.alive) continue;
 	    p.velocity += ParticleCore::controlPointAttractVelocityDelta (
-		p.position, center, scale * speedOverride->getFloat (), threshold, time, flags);
+		p.position, center, scale, threshold, time, flags,
+		envelope && ParticleCore::usesBlendOpcode (*envelope)
+		    ? ParticleCore::blendWeight (p.getLifetimePos (), *envelope) : 1.0f);
+	}
+	if ((flags & 1u) == 0) return;
+	for (uint32_t i = 0; i < count; i++) {
+	    auto& p = particles[i];
+	    if (!p.alive) continue;
+	    if (ParticleCore::controlPointAttractDeletes (p.previousPosition, p.position, center, deleteThreshold))
+		p.age = p.lifetime;
 	}
     };
 }

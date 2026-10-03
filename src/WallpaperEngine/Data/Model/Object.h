@@ -801,17 +801,27 @@ public:
 
 class ControlPointAttractOperator : public ParticleOperatorBase {
 public:
+    // Omitted fields take the projection-dependent defaults.
+    struct SceneDefaults {
+	bool scale;
+	bool threshold;
+	bool deleteThreshold;
+    };
     ControlPointAttractOperator (
-	int controlPoint, UserSettingUniquePtr origin, UserSettingUniquePtr scale, UserSettingUniquePtr threshold,
-	uint32_t flags
+	SceneDefaults sceneDefaults, int controlPoint, UserSettingUniquePtr origin, UserSettingUniquePtr scale,
+	UserSettingUniquePtr threshold, UserSettingUniquePtr deleteThreshold, uint32_t flags
     ) :
-	controlPoint (controlPoint), origin (std::move (origin)), scale (std::move (scale)),
-	threshold (std::move (threshold)), flags (flags) { }
+	sceneDefaults (sceneDefaults), controlPoint (controlPoint), origin (std::move (origin)),
+	scale (std::move (scale)), threshold (std::move (threshold)),
+	deleteThreshold (std::move (deleteThreshold)), flags (flags) { }
+    SceneDefaults sceneDefaults;
     int controlPoint;
+    // Authored offset/origin; the native record stores it but opcode 0x0a never reads it.
     UserSettingUniquePtr origin;
     UserSettingUniquePtr scale;
     UserSettingUniquePtr threshold;
-    uint32_t flags;
+    UserSettingUniquePtr deleteThreshold;
+    uint32_t flags; // 1 = delete inside deletethreshold, 2 = cap inward impulse at the distance
 };
 
 class OscillateAlphaOperator : public ParticleOperatorBase {
