@@ -11,6 +11,7 @@
 #include "Modules/ScriptModuleAssets.h"
 #include "MediaEventPayloads.h"
 #include "ScriptPropertiesObject.h"
+#include "SceneScriptGlobals.h"
 #include "ScriptableObject.h"
 #include "TextureAnimationObject.h"
 #include "WallpaperEngine/Audio/AudioContext.h"
@@ -324,24 +325,14 @@ ScriptEngine::ScriptEngine (Wallpapers::CScene& scene, Media::MediaSource& media
     // setup scene objects and other things
     this->installBuiltins ();
     // add engine to the global
-    JS_DefinePropertyValueStr (
-	this->m_context, this->m_globalThis, "engine", this->m_engineObject->getInstance (), JS_PROP_ENUMERABLE
-    );
-    JS_DefinePropertyValueStr (
-	this->m_context, this->m_globalThis, "input", this->m_inputObject->getInstance (), JS_PROP_ENUMERABLE
-    );
-    JS_DefinePropertyValueStr (
-	this->m_context, this->m_globalThis, "localStorage", this->m_localStorageObject->instance (), JS_PROP_ENUMERABLE
-    );
-    JS_DefinePropertyValueStr (
-	this->m_context, this->m_globalThis, "thisScene", this->m_sceneObject->getInstance (), JS_PROP_ENUMERABLE
-    );
-    JS_DefinePropertyValueStr (
-	this->m_context, this->m_globalThis, "console", this->m_consoleObject->getInstance (), JS_PROP_ENUMERABLE
-    );
-    JS_DefinePropertyValueStr (
-	this->m_context, this->m_globalThis, "shared", JS_NewObject (this->m_context), JS_PROP_ENUMERABLE
-    );
+    defineSceneScriptValue (this->m_context, this->m_globalThis, "engine", this->m_engineObject->getInstance ());
+    defineSceneScriptValue (this->m_context, this->m_globalThis, "input", this->m_inputObject->getInstance ());
+    defineSceneScriptValue (this->m_context, this->m_globalThis, "localStorage", this->m_localStorageObject->instance ());
+    defineSceneScriptValue (this->m_context, this->m_globalThis, "thisScene", this->m_sceneObject->getInstance ());
+    defineSceneScriptValue (this->m_context, this->m_globalThis, "console", this->m_consoleObject->getInstance ());
+    // Native 2.8.42 accepts a top-level `shared = {...}` (installed 2938612768
+    // /objects/78 runs without error in native), so it is writable too.
+    defineSceneScriptValue (this->m_context, this->m_globalThis, "shared", JS_NewObject (this->m_context));
 }
 
 ScriptEngine::~ScriptEngine () {
