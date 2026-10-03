@@ -180,10 +180,11 @@ struct FixedRendererBasis {
 inline FixedRendererBasis fixedRendererBasis (glm::vec3 axis) {
     // Factory: the authored axis becomes the renderer's right
     // vector. Its up vector is Y projected off that axis, except the
-    // singular +/-Y case where the factory chooses -Z.
+    // singular +/-Y case where the factory chooses -Z. A zero or absent
+    // axis is replaced by (0, 1, 0).
     const float length = glm::length (axis);
     axis = length > 0.0f && std::isfinite (length)
-        ? axis / length : glm::vec3 (0.0f, 0.0f, 1.0f);
+        ? axis / length : glm::vec3 (0.0f, 1.0f, 0.0f);
     if (axis.x == 0.0f && axis.z == 0.0f)
         return {axis, glm::vec3 (0.0f, 0.0f, -1.0f)};
     const glm::vec3 up = glm::vec3 (0.0f, 1.0f, 0.0f) - axis.y * axis;

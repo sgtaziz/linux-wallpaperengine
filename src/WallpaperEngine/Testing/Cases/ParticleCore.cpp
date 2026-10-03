@@ -1134,9 +1134,13 @@ TEST_CASE ("Fixed particle renderer axes follow native factory basis", "[particl
     const auto singular = fixedRendererBasis ({0.0f, 1.0f, 0.0f});
     REQUIRE (singular.right.y == 1.0f);
     REQUIRE (singular.up.z == -1.0f);
+    // @ stores (0, 1, 0) for a zero/absent axis; the
+    // native upright default-axis sprite renders as the explicit axis-Y one.
     const auto defaultAxis = fixedRendererBasis ({0.0f, 0.0f, 0.0f});
-    REQUIRE (defaultAxis.right.z == 1.0f);
-    REQUIRE (defaultAxis.up.y == 1.0f);
+    REQUIRE (defaultAxis.right == singular.right);
+    REQUIRE (defaultAxis.up == singular.up);
+    REQUIRE (defaultAxis.right.y == 1.0f);
+    REQUIRE (defaultAxis.up.z == -1.0f);
     // Nonuniform scale survives the native M^T M path; a 90-degree rotation
     // cancels only when renderer flag bit 0 is clear.
     glm::mat3 rotatedScale (1.0f);
@@ -1160,6 +1164,18 @@ TEST_CASE ("Upright renderer projects view-right against authored or fixed up", 
     REQUIRE (tilted->right.y == Catch::Approx (0.2860388f));
     REQUIRE (tilted->right.z == Catch::Approx (-0.09534626f));
     REQUIRE (tilted->up.y == Catch::Approx (-0.904534f));
+    // W12 native capture: an absent axis renders the same square upright
+    // sprite as axis "0 1 0"; its up stays in the screen plane.
+    const auto defaultUpright = uprightRendererLocalBasis ({0.0f, 0.0f, 0.0f},
+        glm::mat3 (1.0f), {-1.0f, 0.0f, 0.0f}, false);
+    const auto axisUpright = uprightRendererLocalBasis ({0.0f, 1.0f, 0.0f},
+        glm::mat3 (1.0f), {-1.0f, 0.0f, 0.0f}, false);
+    REQUIRE (defaultUpright);
+    REQUIRE (axisUpright);
+    REQUIRE (defaultUpright->right == axisUpright->right);
+    REQUIRE (defaultUpright->up == axisUpright->up);
+    REQUIRE (defaultUpright->up.z == 0.0f);
+    REQUIRE (std::abs (defaultUpright->up.y) == 1.0f);
     const auto worldUp = uprightRendererLocalBasis ({0.3f, 0.9f, 0.3f},
         glm::mat3 (1.0f), {-1.0f, 0.0f, 0.0f}, true);
     REQUIRE (worldUp);
