@@ -5,6 +5,7 @@
 #include "WallpaperEngine/Audio/AudioStream.h"
 #include "WallpaperEngine/Audio/ParticleAudioResponse.h"
 #include "WallpaperEngine/Audio/SoundPlaybackPolicy.h"
+#include "WallpaperEngine/Audio/SoundSpatialization.h"
 #include "WallpaperEngine/Audio/Drivers/Detectors/AudioPlayingDetector.h"
 #include "WallpaperEngine/Audio/Drivers/Recorders/PlaybackRecorder.h"
 #include "WallpaperEngine/Audio/Drivers/Recorders/CaptureWorker.h"
@@ -89,6 +90,112 @@ struct DummyAudioEnvironment {
         if (previous) SDL_setenv ("SDL_AUDIODRIVER", previous->c_str (), 1);
         else unsetenv ("SDL_AUDIODRIVER");
     }
+};
+
+/** 48 kHz PCM16 WAV with an arbitrary channel count and sample function. */
+struct PcmWav {
+    std::filesystem::path path;
+
+    template <typename Sample>
+    PcmWav (const std::string& name, uint16_t channels, uint32_t frames, Sample&& sample) :
+        path (std::filesystem::temp_directory_path ()
+              / ("wallpaperengine-sound-" + name + "-" + std::to_string (SDL_GetTicks64 ()) + ".wav")) {
+        std::ofstream output (path, std::ios::binary);
+        const uint32_t bytes = frames * channels * 2;
+        output.write ("RIFF", 4);
+        write32 (output, 36 + bytes);
+        output.write ("WAVEfmt ", 8);
+        write32 (output, 16);
+        write16 (output, 1);
+        write16 (output, channels);
+        write32 (output, 48000);
+        write32 (output, 48000 * channels * 2);
+        write16 (output, channels * 2);
+        write16 (output, 16);
+        output.write ("data", 4);
+        write32 (output, bytes);
+        for (uint32_t frame = 0; frame < frames; ++frame)
+            for (uint16_t channel = 0; channel < channels; ++channel)
+                write16 (output, static_cast<uint16_t> (static_cast<int16_t> (sample (frame, channel))));
+    }
+    ~PcmWav () { std::filesystem::remove (path); }
+};
+
+/** An SDL dummy-device driver and context for decoder and mixer tests. */
+struct AudioRig {
+    DummyAudioEnvironment environment;
+    char program[11] = "audio-test";
+    char* argv[1] = { program };
+    WallpaperEngine::Application::ApplicationContext application { 1, argv };
+    WallpaperEngine::Render::Drivers::Detectors::FullScreenDetector fullscreen { application };
+    WallpaperEngine::Audio::Drivers::Detectors::AudioPlayingDetector detector { application, fullscreen };
+    WallpaperEngine::Audio::Drivers::Recorders::PlaybackRecorder recorder;
+    WallpaperEngine::Audio::Drivers::SDLAudioDriver driver { application, detector, recorder };
+    WallpaperEngine::Audio::AudioContext context { driver };
+
+    explicit AudioRig (int masterVolume = 128) {
+        application.state.general.keepRunning = true;
+        application.state.audio.volume = masterVolume;
+    }
+};
+
+/** Decodes interleaved float frames until @p samples values are available. */
+std::vector<float> decodeSamples (WallpaperEngine::Audio::AudioStream& stream, size_t samples) {
+    std::vector<float> output;
+    std::array<uint8_t, 1024> chunk {};
+    for (int attempt = 0; attempt < 5000 && output.size () < samples; ++attempt) {
+        const int decoded = stream.decodeFrame (chunk.data (), static_cast<int> (chunk.size ()));
+        if (decoded <= 0) {
+            if (stream.isPlaybackFinished ()) break;
+            SDL_Delay (1);
+            continue;
+        }
+        const size_t count = static_cast<size_t> (decoded) / sizeof (float);
+        const size_t start = output.size ();
+        output.resize (start + count);
+        std::memcpy (output.data () + start, chunk.data (), count * sizeof (float));
+    }
+    return output;
+}
+
+float peakOfChannel (const std::vector<float>& interleaved, size_t channel) {
+    float peak = 0.0f;
+    for (size_t index = channel; index < interleaved.size (); index += 2)
+        peak = std::max (peak, std::abs (interleaved[index]));
+    return peak;
+}
+
+/** Records the controller's decoder requests. */
+struct FakeClipPlayer final : WallpaperEngine::Audio::SoundClipPlayer {
+    struct Start {
+        size_t index;
+        bool repeat;
+        float volume;
+    };
+    std::vector<Start> starts;
+    bool active = false;
+    bool finished = false;
+    bool paused = false;
+    float volume = -1.0f;
+    std::optional<float> duration = 0.5f;
+
+    bool failStarts = false;
+
+    bool startClip (size_t index, bool repeat, float startVolume) override {
+        starts.push_back ({ index, repeat, startVolume });
+        if (failStarts) return false;
+        active = true;
+        finished = false;
+        paused = false;
+        volume = startVolume;
+        return true;
+    }
+    void releaseClip () override { active = false; }
+    [[nodiscard]] bool hasClip () const override { return active; }
+    [[nodiscard]] bool clipFinished () const override { return finished; }
+    void setClipPaused (bool clipPaused) override { paused = clipPaused; }
+    void setClipVolume (float clipVolume) override { volume = clipVolume; }
+    [[nodiscard]] std::optional<float> clipDuration () const override { return duration; }
 };
 } // namespace
 
@@ -213,17 +320,6 @@ TEST_CASE ("Driver notices finite audio after a partial final mix", "[audio][lif
     stream.reset ();
     REQUIRE (heardPcm);
     REQUIRE (finished);
-
-    using Policy = WallpaperEngine::Audio::SoundPlaybackPolicy;
-    Policy policy ("pool", false, 0.0f, 0.0f);
-    policy.clipStarted ();
-    policy.pause ();
-    REQUIRE_FALSE (policy.canConsumeCompletion ());
-    REQUIRE (policy.state () == Policy::State::Paused);
-    policy.resume ();
-    REQUIRE (policy.canConsumeCompletion ());
-    policy.clipFinished (0.0f);
-    REQUIRE (policy.ready ());
 }
 
 TEST_CASE ("Decoded PCM survives smaller output buffers", "[audio][decode]") {
@@ -365,44 +461,419 @@ TEST_CASE ("Sound object retains authored playback settings", "[audio][parser]")
     REQUIRE (oneSound->sounds == std::vector<std::string> { "one.wav" });
 }
 
-TEST_CASE ("Sound playback modes preserve start and interval gates", "[audio][schedule]") {
+TEST_CASE ("Sound object defaults follow the native constructor", "[audio][parser]") {
+    using WallpaperEngine::Data::JSON::parseAuthoringJson;
+    using WallpaperEngine::Data::Model::Project;
+    using WallpaperEngine::Data::Model::Sound;
+    using WallpaperEngine::Data::Parsers::ObjectParser;
+    Project project {};
+    // Native: mintime 1, maxtime 5, mindistance 1, attenuation 1.
+    const auto object = ObjectParser::parse (
+        parseAuthoringJson (R"({ "id": 3, "name": "bare", "sound": ["a.wav"] })", "sound.json"), project);
+    const auto* sound = dynamic_cast<const Sound*> (object.get ());
+    REQUIRE (sound != nullptr);
+    REQUIRE_FALSE (sound->playbackmode.has_value ());
+    REQUIRE (sound->minTime == 1.0f);
+    REQUIRE (sound->maxTime == 5.0f);
+    REQUIRE (sound->minDistance == 1.0f);
+    REQUIRE (sound->attenuation == 1.0f);
+    REQUIRE_FALSE (sound->spatialization);
+    REQUIRE_FALSE (sound->startSilent);
+}
+
+TEST_CASE ("Random sound schedule runs from clip start and gates play", "[audio][schedule]") {
     using Policy = WallpaperEngine::Audio::SoundPlaybackPolicy;
-    Policy pool ("pool", false, 1.0f, 3.0f);
-    REQUIRE (pool.ready ());
-    pool.pause ();
-    REQUIRE_FALSE (pool.ready ());
-    pool.resume ();
-    REQUIRE (pool.ready ());
-    pool.clipStarted ();
-    REQUIRE (pool.state () == Policy::State::Playing);
-    pool.clipFinished (0.5f);
-    REQUIRE (pool.ready ());
+    using Action = Policy::Action;
+    // c03: 0.5 s clip, fixed 1.0 s wait -> 1.5 s period from clip start.
+    Policy random ("random", true, 1.0f, 1.0f, 1);
+    REQUIRE (random.initialize (true) == Action::None);
+    REQUIRE_FALSE (random.isPlaying ());
+    REQUIRE (random.play (true) == Action::StartNew);
+    random.clipStarted (0.5f, 0.3f);
+    REQUIRE (random.timer () == 1.5f);
+    REQUIRE (random.isPlaying ());
+    REQUIRE (random.advance (0.4f, true) == Action::None);
+    REQUIRE (random.play (true) == Action::None);
+    REQUIRE (random.clipEnded (true) == Action::None);
+    REQUIRE (random.advance (0.4f, true) == Action::None);
+    // In the wait: play() is ignored and isPlaying stays true.
+    REQUIRE (random.play (true) == Action::None);
+    REQUIRE (random.isPlaying ());
+    REQUIRE (random.advance (0.65f, true) == Action::None);
+    REQUIRE (random.advance (0.1f, true) == Action::StartNew);
 
-    Policy random ("random", false, 1.0f, 3.0f);
-    random.clipStarted ();
-    random.clipFinished (0.5f);
-    REQUIRE (random.state () == Policy::State::Waiting);
-    random.advance (0.75f);
-    random.pause ();
-    random.advance (10.0f);
-    REQUIRE (random.state () == Policy::State::PausedWaiting);
-    random.resume ();
-    random.advance (1.0f);
-    REQUIRE_FALSE (random.ready ());
-    random.advance (0.25f);
-    REQUIRE (random.ready ());
+    // The interval is min + u * (max - min), added to the clip duration.
+    Policy ranged ("random", false, 0.5f, 2.0f, 1);
+    REQUIRE (ranged.initialize (true) == Action::StartNew);
+    ranged.clipStarted (0.25f, 0.5f);
+    REQUIRE (ranged.timer () == 1.5f);
 
-    Policy single ("single", false, 0.0f, 0.0f);
-    single.clipStarted ();
-    single.clipFinished (0.0f);
-    REQUIRE (single.state () == Policy::State::Stopped);
-    single.play ();
-    REQUIRE (single.ready ());
+    // c16: the timer is frozen while vol^2 is zero.
+    Policy muted ("random", false, 1.0f, 1.0f, 1);
+    REQUIRE (muted.initialize (true) == Action::StartNew);
+    muted.clipStarted (0.5f, 0.0f);
+    REQUIRE (muted.advance (0.3f, true) == Action::None);
+    REQUIRE (muted.advance (5.0f, false) == Action::None);
+    REQUIRE (std::abs (muted.timer () - 1.2f) < 1e-5f);
+    REQUIRE (muted.isPlaying ());
+    REQUIRE (muted.advance (1.2f, true) == Action::StartNew);
 
-    Policy silent ("pool", true, 0.0f, 0.0f);
-    REQUIRE (silent.state () == Policy::State::Stopped);
-    silent.play ();
-    REQUIRE (silent.ready ());
+    // Paused and stopped layers report not playing.
+    muted.clipStarted (0.5f, 0.0f);
+    REQUIRE (muted.pause ());
+    REQUIRE_FALSE (muted.isPlaying ());
+    REQUIRE (muted.advance (10.0f, true) == Action::None);
+    REQUIRE (muted.timer () == 1.5f);
+    muted.stop ();
+    REQUIRE_FALSE (muted.isPlaying ());
+    REQUIRE (muted.timer () == 0.0f);
+    REQUIRE (muted.play (true) == Action::StartNew);
+}
+
+TEST_CASE ("Random pause in the wait replays the clip without rescheduling", "[audio][schedule]") {
+    using Policy = WallpaperEngine::Audio::SoundPlaybackPolicy;
+    // c07: 2 s wait; pause at 1.2 s (after the clip ended), play at 2.0 s.
+    FakeClipPlayer player;
+    player.duration = 0.5f;
+    WallpaperEngine::Audio::SoundLayerController layer (Policy ("random", true, 2.0f, 2.0f, 2), 2, player, 7);
+    layer.initialize (1.0f);
+    REQUIRE (player.starts.empty ());
+    layer.play (1.0f);
+    REQUIRE (player.starts.size () == 1);
+    const size_t first = player.starts[0].index;
+    layer.tick (0.6f, 1.0f);
+    player.finished = true;
+    layer.tick (0.3f, 1.0f);
+    REQUIRE_FALSE (player.hasClip ());
+    layer.pause ();
+    const float frozen = layer.policy ().timer ();
+    layer.tick (0.8f, 1.0f);
+    REQUIRE (layer.policy ().timer () == frozen);
+    layer.play (1.0f);
+    REQUIRE (player.starts.size () == 2);
+    REQUIRE (player.starts[1].index == first);
+    REQUIRE (player.hasClip ());
+    REQUIRE (layer.policy ().timer () == frozen);
+    REQUIRE (layer.isPlaying ());
+    // The original schedule continues from the remaining wait.
+    layer.tick (frozen - 0.01f, 1.0f);
+    REQUIRE (player.starts.size () == 2);
+    layer.tick (0.02f, 1.0f);
+    REQUIRE (player.starts.size () == 3);
+}
+
+TEST_CASE ("A failed replay of a paused voice leaves the layer stopped", "[audio][schedule]") {
+    using Policy = WallpaperEngine::Audio::SoundPlaybackPolicy;
+    FakeClipPlayer player;
+    WallpaperEngine::Audio::SoundLayerController layer (Policy ("random", false, 1.0f, 1.0f, 2), 2, player, 9);
+    layer.initialize (1.0f);
+    REQUIRE (player.starts.size () == 1);
+    const size_t first = player.starts[0].index;
+    player.finished = true;
+    layer.tick (0.6f, 1.0f);
+    REQUIRE_FALSE (player.hasClip ());
+    layer.pause ();
+    // The finished clip's file can no longer be decoded when play() replays it.
+    player.failStarts = true;
+    layer.play (1.0f);
+    REQUIRE (player.starts.size () == 2);
+    REQUIRE (player.starts[1].index == first);
+    REQUIRE_FALSE (player.hasClip ());
+    REQUIRE_FALSE (layer.isPlaying ());
+    REQUIRE (layer.policy ().stopped ());
+    REQUIRE (layer.policy ().voice () == Policy::Voice::None);
+    REQUIRE (layer.policy ().timer () == 0.0f);
+    // A later play() starts the remaining usable clip.
+    player.failStarts = false;
+    layer.play (1.0f);
+    REQUIRE (player.starts.size () == 3);
+    REQUIRE (player.starts[2].index != first);
+    REQUIRE (layer.isPlaying ());
+}
+
+TEST_CASE ("Loop and single play restart from the beginning", "[audio][schedule]") {
+    using Policy = WallpaperEngine::Audio::SoundPlaybackPolicy;
+    for (const char* mode : { "loop", "single" }) {
+        CAPTURE (mode);
+        FakeClipPlayer player;
+        WallpaperEngine::Audio::SoundLayerController layer (Policy (mode, true, 1.0f, 5.0f, 1), 1, player, 3);
+        layer.initialize (1.0f);
+        layer.play (1.0f);
+        REQUIRE (player.starts.size () == 1);
+        layer.tick (0.5f, 1.0f);
+        // c05: a repeated play() stops the voice and starts a new decoder.
+        layer.play (1.0f);
+        REQUIRE (player.starts.size () == 2);
+        REQUIRE (player.active);
+        REQUIRE (layer.isPlaying ());
+    }
+
+    // c06/c08: play() on a paused single resumes in place; after a natural
+    // end, pause + play replays the same clip; the next play() repicks.
+    FakeClipPlayer player;
+    player.duration = 0.5f;
+    WallpaperEngine::Audio::SoundLayerController single (Policy ("single", true, 1.0f, 5.0f, 2), 2, player, 11);
+    single.initialize (1.0f);
+    single.play (1.0f);
+    single.tick (0.2f, 1.0f);
+    single.pause ();
+    REQUIRE (player.paused);
+    single.play (1.0f);
+    REQUIRE (player.starts.size () == 1);
+    REQUIRE_FALSE (player.paused);
+    single.tick (0.4f, 1.0f);
+    REQUIRE_FALSE (single.isPlaying ());
+    player.finished = true;
+    single.tick (0.1f, 1.0f);
+    single.pause ();
+    single.play (1.0f);
+    REQUIRE (player.starts.size () == 2);
+    REQUIRE (player.starts[1].index == player.starts[0].index);
+    single.play (1.0f);
+    REQUIRE (player.starts.size () == 3);
+}
+
+TEST_CASE ("Single-file loops repeat inside the decoder", "[audio][schedule]") {
+    using Policy = WallpaperEngine::Audio::SoundPlaybackPolicy;
+    FakeClipPlayer one;
+    WallpaperEngine::Audio::SoundLayerController loop (Policy ("loop", false, 1.0f, 5.0f, 1), 1, one, 5);
+    loop.initialize (1.0f);
+    REQUIRE (one.starts.size () == 1);
+    REQUIRE (one.starts[0].repeat);
+    for (int frame = 0; frame < 600; ++frame) loop.tick (1.0f / 30.0f, 1.0f);
+    REQUIRE (one.starts.size () == 1);
+    REQUIRE (loop.isPlaying ());
+
+    // c02: several files stay EOF-driven and repick at each clip end.
+    FakeClipPlayer two;
+    WallpaperEngine::Audio::SoundLayerController pool (Policy ("loop", false, 1.0f, 5.0f, 2), 2, two, 5);
+    pool.initialize (1.0f);
+    REQUIRE (two.starts.size () == 1);
+    REQUIRE_FALSE (two.starts[0].repeat);
+    two.finished = true;
+    pool.tick (1.0f / 30.0f, 1.0f);
+    REQUIRE (two.starts.size () == 2);
+    REQUIRE_FALSE (two.starts[1].repeat);
+}
+
+TEST_CASE ("Silent sound layers start on a later volume raise", "[audio][schedule]") {
+    using Policy = WallpaperEngine::Audio::SoundPlaybackPolicy;
+    // c10: volume 0 at start, raised to 1 by a script at 2.2 s.
+    for (const char* mode : { "loop", "random" }) {
+        CAPTURE (mode);
+        FakeClipPlayer player;
+        WallpaperEngine::Audio::SoundLayerController layer (Policy (mode, false, 1.0f, 1.0f, 1), 1, player, 1);
+        layer.initialize (0.0f);
+        float now = 0.0f;
+        for (; now < 2.2f; now += 1.0f / 30.0f) layer.tick (1.0f / 30.0f, 0.0f);
+        REQUIRE (player.starts.empty ());
+        layer.tick (1.0f / 30.0f, 1.0f);
+        REQUIRE (player.starts.size () == 1);
+        REQUIRE (player.starts[0].volume == 1.0f);
+        layer.tick (1.0f / 30.0f, 1.0f);
+        REQUIRE (player.starts.size () == 1);
+    }
+
+    // Single mode never starts on a volume change; play() does.
+    FakeClipPlayer player;
+    WallpaperEngine::Audio::SoundLayerController single (Policy ("single", false, 1.0f, 5.0f, 1), 1, player, 1);
+    single.initialize (0.0f);
+    single.tick (0.1f, 1.0f);
+    single.tick (0.1f, 0.5f);
+    REQUIRE (player.starts.empty ());
+    single.play (0.5f);
+    REQUIRE (player.starts.size () == 1);
+
+    // play() at zero volume loads nothing but clears startsilent.
+    FakeClipPlayer silent;
+    WallpaperEngine::Audio::SoundLayerController quiet (Policy ("loop", true, 1.0f, 5.0f, 1), 1, silent, 1);
+    quiet.initialize (0.0f);
+    quiet.tick (0.1f, 1.0f);
+    REQUIRE (silent.starts.empty ());
+    quiet.tick (0.1f, 0.0f);
+    quiet.play (0.0f);
+    REQUIRE (silent.starts.empty ());
+    REQUIRE_FALSE (quiet.policy ().startSilent ());
+    quiet.tick (0.1f, 1.0f);
+    REQUIRE (silent.starts.size () == 1);
+
+    // A live voice is not restarted by later volume changes.
+    quiet.tick (0.1f, 0.0f);
+    quiet.tick (0.1f, 1.0f);
+    REQUIRE (silent.starts.size () == 1);
+}
+
+TEST_CASE ("Sound decoder reports the clip duration", "[audio][decode]") {
+    AudioRig rig;
+    PcmWav wav ("duration", 2, 24000, [] (uint32_t, uint16_t) { return 0; });
+    WallpaperEngine::Audio::AudioStream stream (rig.context, wav.path.string ());
+    REQUIRE (stream.getDuration ().has_value ());
+    REQUIRE (std::abs (*stream.getDuration () - 0.5f) < 1e-4f);
+    stream.stop ();
+}
+
+TEST_CASE ("Looped clips wrap without inserted silence", "[audio][decode]") {
+    AudioRig rig;
+    // c01: an exact-period stereo sine; 100 periods of 480 Hz per 0.2 s.
+    constexpr uint32_t frames = 9600;
+    constexpr float amplitude = 0.25f;
+    const auto sine = [] (uint32_t frame) {
+        return std::sin (2.0 * std::numbers::pi * 480.0 * frame / 48000.0);
+    };
+    PcmWav wav ("loop", 2, frames, [&] (uint32_t frame, uint16_t) {
+        return static_cast<int> (std::lround (sine (frame) * amplitude * 32767.0));
+    });
+    WallpaperEngine::Audio::AudioStream stream (rig.context, wav.path.string (), true);
+    REQUIRE (stream.isInitialized ());
+    const auto samples = decodeSamples (stream, frames * 2 * 3);
+    stream.stop ();
+    REQUIRE (samples.size () >= frames * 2 * 3);
+    REQUIRE (stream.getCompletedLoopCount () >= 2);
+    float worst = 0.0f;
+    for (size_t frame = 0; frame < frames * 3; ++frame) {
+        const float expected = static_cast<float> (sine (frame % frames) * amplitude);
+        worst = std::max ({ worst, std::abs (samples[frame * 2] - expected),
+                            std::abs (samples[frame * 2 + 1] - expected) });
+    }
+    REQUIRE (worst < 1e-3f);
+}
+
+TEST_CASE ("Non-spatial mono clips play at the native routing level", "[audio][decode]") {
+    AudioRig rig;
+    // c12: mono = 0.5957 x the stereo per-channel level, no crossfeed.
+    const auto tone = [] (uint32_t frame, uint16_t) {
+        return static_cast<int> (std::lround (std::sin (2.0 * std::numbers::pi * frame / 48.0) * 16000.0));
+    };
+    PcmWav mono ("mono", 1, 9600, tone);
+    PcmWav stereo ("stereo", 2, 9600, tone);
+    PcmWav leftOnly ("left", 2, 9600, [&] (uint32_t frame, uint16_t channel) {
+        return channel == 0 ? tone (frame, 0) : 0;
+    });
+    WallpaperEngine::Audio::AudioStream monoStream (rig.context, mono.path.string (), true);
+    WallpaperEngine::Audio::AudioStream stereoStream (rig.context, stereo.path.string ());
+    WallpaperEngine::Audio::AudioStream leftStream (rig.context, leftOnly.path.string ());
+    REQUIRE (monoStream.isMonoSource ());
+    REQUIRE_FALSE (stereoStream.isMonoSource ());
+    // Two loops, so the routing must survive the decoder reset.
+    const auto monoSamples = decodeSamples (monoStream, 9600 * 2 * 2);
+    const auto stereoSamples = decodeSamples (stereoStream, 9600 * 2);
+    const auto leftSamples = decodeSamples (leftStream, 9600 * 2);
+    REQUIRE (monoSamples.size () >= 9600 * 2 * 2);
+    const std::vector<float> secondLoop (monoSamples.begin () + 9600 * 2, monoSamples.begin () + 9600 * 4);
+    const float reference = peakOfChannel (stereoSamples, 0);
+    REQUIRE (reference > 0.4f);
+    REQUIRE (std::abs (peakOfChannel (monoSamples, 0) / reference - 0.5957f) < 1e-3f);
+    REQUIRE (std::abs (peakOfChannel (monoSamples, 1) / reference - 0.5957f) < 1e-3f);
+    REQUIRE (std::abs (peakOfChannel (secondLoop, 0) / reference - 0.5957f) < 1e-3f);
+    REQUIRE (std::abs (peakOfChannel (stereoSamples, 1) - reference) < 1e-4f);
+    REQUIRE (peakOfChannel (leftSamples, 1) == 0.0f);
+
+    // Spatial routing replaces the per-channel level of later output.
+    monoStream.setMonoChannelGains (0.2f, 0.0f);
+    const auto panned = decodeSamples (monoStream, 9600 * 2 * 2);
+    const std::vector<float> pannedTail (panned.end () - 9600 * 2, panned.end ());
+    REQUIRE (std::abs (peakOfChannel (pannedTail, 0) / reference - 0.2f) < 1e-3f);
+    REQUIRE (peakOfChannel (pannedTail, 1) == 0.0f);
+    monoStream.stop ();
+    stereoStream.stop ();
+    leftStream.stop ();
+}
+
+TEST_CASE ("Sound gain clamps after the master gain", "[audio][mixer]") {
+    // c09: native AL_GAIN = min(1, vol^2 * G); Linux G is --volume / 128.
+    const auto mixedPeak = [] (int master, float volume) {
+        AudioRig rig (master);
+        PcmWav wav ("gain", 2, 48000, [] (uint32_t frame, uint16_t) {
+            return static_cast<int> (std::lround (std::sin (2.0 * std::numbers::pi * frame / 48.0) * 8000.0));
+        });
+        WallpaperEngine::Audio::AudioStream stream (rig.context, wav.path.string ());
+        stream.setVolume (volume);
+        const int id = rig.driver.addStream (&stream);
+        std::array<float, 2048> mix {};
+        float peak = 0.0f;
+        for (int attempt = 0; attempt < 200 && peak == 0.0f; ++attempt) {
+            audio_callback (&rig.driver, reinterpret_cast<uint8_t*> (mix.data ()), sizeof (mix));
+            for (const float sample : mix) peak = std::max (peak, std::abs (sample));
+            if (peak == 0.0f) SDL_Delay (1);
+        }
+        stream.stop ();
+        rig.driver.removeStream (id);
+        return peak;
+    };
+    REQUIRE (mixedPeak (128, 1.0f) > 0.2f);
+    const float half = mixedPeak (64, 1.0f);
+    REQUIRE (std::abs (mixedPeak (64, 2.0f) / half - 2.0f) < 0.02f);
+    REQUIRE (std::abs (mixedPeak (128, 2.0f) / mixedPeak (128, 1.0f) - 1.0f) < 0.01f);
+    REQUIRE (std::abs (mixedPeak (128, 0.5f) / mixedPeak (128, 1.0f) - 0.25f) < 0.01f);
+}
+
+TEST_CASE ("Sound mix volume stays defined for extreme gains", "[audio][mixer]") {
+    using WallpaperEngine::Audio::Drivers::sdlMixVolume;
+    constexpr float inf = std::numeric_limits<float>::infinity ();
+    REQUIRE (sdlMixVolume (64, 1.0f) == 64);
+    REQUIRE (sdlMixVolume (64, 4.0f) == SDL_MIX_MAXVOLUME);
+    REQUIRE (sdlMixVolume (128, 0.25f) == 32);
+    REQUIRE (sdlMixVolume (128, inf) == SDL_MIX_MAXVOLUME);
+    // A zero master with an unbounded vol^2 is 0 * inf = NaN: silent, not UB.
+    REQUIRE (sdlMixVolume (0, inf) == 0);
+    REQUIRE (sdlMixVolume (128, std::numeric_limits<float>::quiet_NaN ()) == 0);
+    REQUIRE (sdlMixVolume (0, 1.0f) == 0);
+
+    AudioRig rig;
+    PcmWav wav ("extreme", 2, 4800, [] (uint32_t, uint16_t) { return 1000; });
+    WallpaperEngine::Audio::AudioStream stream (rig.context, wav.path.string ());
+    stream.setVolume (std::numeric_limits<float>::max ());
+    REQUIRE (std::isinf (stream.getMixerGain ()));
+    REQUIRE (sdlMixVolume (0, stream.getMixerGain ()) == 0);
+    REQUIRE (sdlMixVolume (15, stream.getMixerGain ()) == SDL_MIX_MAXVOLUME);
+    stream.stop ();
+}
+
+TEST_CASE ("Spatialized mono gains follow the recovered native law", "[audio][spatial]") {
+    using namespace WallpaperEngine::Audio;
+    const auto db = [] (const MonoChannelGains& gains) { return 20.0f * std::log10 (gains.left / gains.right); };
+    const auto amplitude = [] (const MonoChannelGains& gains) {
+        return std::sqrt (gains.left * gains.left + gains.right * gains.right);
+    };
+    // c13/c14: 1280x720 orthographic scene, authored eye 0 0 0 looking at -z.
+    const auto flat = soundListenerForCamera ({ 0, 0, 0 }, { 0, 0, -1 }, { 0, 1, 0 }, true, 1280, 720);
+    REQUIRE (flat.position == glm::vec3 (640, 360, 2000));
+    REQUIRE (std::abs (db (spatialMonoGains ({ 160, 360, 0 }, flat, 1, 1)) - 5.12f) < 0.02f);
+    REQUIRE (std::abs (db (spatialMonoGains ({ 1120, 360, 0 }, flat, 1, 1)) + 5.12f) < 0.02f);
+    REQUIRE (std::abs (db (spatialMonoGains ({ -480, 360, 0 }, flat, 1, 1)) - 11.68f) < 0.02f);
+    const auto upper = spatialMonoGains ({ 640, 700, 0 }, flat, 1, 1);
+    REQUIRE (std::abs (db (upper)) < 1e-4f);
+    const auto reference = spatialMonoGains ({ -480, 360, 0 }, flat, 1, 1);
+    const auto near = spatialMonoGains ({ -480, 360, 0 }, flat, 0.1f, 1);
+    const auto steep = spatialMonoGains ({ -480, 360, 0 }, flat, 0.1f, 2);
+    const auto raised = spatialMonoGains ({ -480, 360, 250 }, flat, 0.1f, 1);
+    REQUIRE (std::abs (amplitude (near) / amplitude (reference) - 0.1f) < 1e-4f);
+    REQUIRE (std::abs (amplitude (steep) / amplitude (reference) - 0.05263f) < 1e-4f);
+    REQUIRE (std::abs (inverseDistanceClampedGain (0.5f, 0.1f, 1.0f) - 0.2f) < 1e-6f);
+    REQUIRE (std::abs (db (raised) - 13.24f) < 0.02f);
+
+    // c15: perspective scene, eye 0 0 10 looking at the origin; world units.
+    const auto deep = soundListenerForCamera ({ 0, 0, 10 }, { 0, 0, 0 }, { 0, 1, 0 }, false, 1920, 1080);
+    const auto p3 = spatialMonoGains ({ 0, 0, 8 }, deep, 1, 1);
+    const auto p4 = spatialMonoGains ({ 0, 0, 6 }, deep, 1, 1);
+    const auto p1 = spatialMonoGains ({ -5, 0, 10 }, deep, 1, 1);
+    const auto p2 = spatialMonoGains ({ 5, 0, 10 }, deep, 1, 1);
+    const auto p5 = spatialMonoGains ({ 0, 0, 12 }, deep, 1, 1);
+    REQUIRE (std::abs (p4.left - 0.25f * (0.5f - 0.0957f)) < 1e-5f);
+    REQUIRE (std::abs (amplitude (p4) / amplitude (p3) - 0.5f) < 1e-4f);
+    REQUIRE (std::abs (p1.left - 0.2f) < 1e-5f);
+    REQUIRE (std::abs (p1.right) < 1e-6f);
+    REQUIRE (std::abs (p2.left) < 1e-6f);
+    REQUIRE (std::abs (amplitude (p1) / amplitude (p3) - 0.700f) < 0.005f);
+    REQUIRE (std::abs (amplitude (p5) / amplitude (p3) - 1.473f) < 0.005f);
+
+    // The orthographic listener follows the scene camera eye.
+    const auto moved = soundListenerForCamera ({ 100, -50, 3 }, { 100, -50, -1 }, { 0, 1, 0 }, true, 1280, 720);
+    REQUIRE (moved.position == glm::vec3 (740, 310, 2000));
+    // A source vector of zero length sits at the non-spatial default.
+    const auto onTop = spatialMonoGains ({ 0, 0, 600 }, flat, 1, 1);
+    REQUIRE (onTop.left == kNonSpatialMonoGains.left);
+    REQUIRE (onTop.right == kNonSpatialMonoGains.right);
 }
 
 TEST_CASE ("Clip selection skips missing and invalid files without retrying forever", "[audio][schedule]") {
@@ -433,21 +904,21 @@ TEST_CASE ("Clip selection skips missing and invalid files without retrying fore
 	    return false;
 	}
     };
-    const bool invalidOnly = WallpaperEngine::Audio::startOneOf (2, failed, rng, tryStart);
-    const bool reachedValid = WallpaperEngine::Audio::startOneOf (paths.size (), failed, rng, tryStart);
+    const auto invalidOnly = WallpaperEngine::Audio::startOneOf (2, failed, rng, tryStart);
+    const auto reachedValid = WallpaperEngine::Audio::startOneOf (paths.size (), failed, rng, tryStart);
     const bool failedOnlyOnce = attempts == 3 && failed.contains (0) && failed.contains (1);
     const auto oldAttempts = attempts;
-    const bool stillValid = WallpaperEngine::Audio::startOneOf (paths.size (), failed, rng, tryStart);
+    const auto stillValid = WallpaperEngine::Audio::startOneOf (paths.size (), failed, rng, tryStart);
     std::filesystem::remove (invalid);
-    REQUIRE_FALSE (invalidOnly);
-    REQUIRE (reachedValid);
+    REQUIRE_FALSE (invalidOnly.has_value ());
+    REQUIRE (reachedValid == std::optional<size_t> { 2 });
     REQUIRE (failedOnlyOnce);
-    REQUIRE (stillValid);
+    REQUIRE (stillValid == std::optional<size_t> { 2 });
     REQUIRE (attempts == oldAttempts + 1);
 
     failed.insert (2);
     const auto beforeExhausted = attempts;
-    REQUIRE_FALSE (WallpaperEngine::Audio::startOneOf (paths.size (), failed, rng, tryStart));
+    REQUIRE_FALSE (WallpaperEngine::Audio::startOneOf (paths.size (), failed, rng, tryStart).has_value ());
     REQUIRE (attempts == beforeExhausted);
 }
 

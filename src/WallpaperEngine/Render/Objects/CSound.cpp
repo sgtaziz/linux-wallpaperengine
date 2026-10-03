@@ -2,22 +2,34 @@
 
 #include "CSound.h"
 
+#include "WallpaperEngine/Audio/SoundSpatialization.h"
 #include "WallpaperEngine/FileSystem/Container.h"
 #include "WallpaperEngine/Logging/Log.h"
+#include "WallpaperEngine/Render/Camera.h"
+#include "WallpaperEngine/Render/Wallpapers/SceneTransform.h"
+
+#include <random>
 
 using namespace WallpaperEngine::Render::Objects;
 
 CSound::CSound (Wallpapers::CScene& scene, const Sound& sound) :
     CObject (scene, sound), ScriptableObject (scene, sound), m_sound (sound),
-    m_policy (sound.playbackmode.value_or ("pool"), sound.startSilent, sound.minTime, sound.maxTime) {
+    m_controller (
+	Audio::SoundPlaybackPolicy (sound.playbackmode.value_or ("loop"), sound.startSilent, sound.minTime,
+	                            sound.maxTime, sound.sounds.size ()),
+	sound.sounds.size (), *this, std::random_device {} ()
+    ) {
     if (sound.volume) this->registerProperty ("volume", *sound.volume->value);
-    if (this->getContext ().getApp ().getContext ().settings.audio.enabled && m_policy.ready ())
-	this->startSelectedClip ();
+    if (this->audioEnabled ()) m_controller.initialize (this->currentVolume ());
 }
 
-CSound::~CSound () { this->releaseActiveClip (); }
+CSound::~CSound () { this->releaseClip (); }
 
-void CSound::releaseActiveClip () {
+bool CSound::audioEnabled () const { return this->getContext ().getApp ().getContext ().settings.audio.enabled; }
+
+float CSound::currentVolume () const { return m_sound.volume ? m_sound.volume->value->getFloat () : 1.0f; }
+
+void CSound::releaseClip () {
     if (!m_stream) return;
     m_stream->stop ();
     if (m_streamId) this->getScene ().getAudioContext ().removeStream (*m_streamId);
@@ -25,90 +37,88 @@ void CSound::releaseActiveClip () {
     m_stream.reset ();
 }
 
-void CSound::startSelectedClip () {
-    if (!m_policy.ready () || m_sound.sounds.empty ()) return;
-    const bool started = Audio::startOneOf (m_sound.sounds.size (), m_unavailableClips, m_rng, [&](size_t index) {
-	try {
-	    auto stream = std::make_unique<Audio::AudioStream> (
-		this->getScene ().getAudioContext (), this->getAssetLocator ().read (m_sound.sounds[index])
-	    );
-	    if (!stream->isInitialized ()) {
-		sLog.error ("Sound layer ", this->getId (), " cannot initialize decoder for ", m_sound.sounds[index]);
-		return false;
-	    }
-	    if (m_sound.volume) stream->setVolume (m_sound.volume->value->getFloat ());
-	    const int id = this->getScene ().getAudioContext ().addStream (stream.get ());
-	    m_streamId = id;
-	    m_stream = std::move (stream);
-	    return true;
-	} catch (const std::exception& error) {
-	    sLog.error ("Sound layer ", this->getId (), " cannot play ", m_sound.sounds[index], ": ", error.what ());
+bool CSound::startClip (size_t index, bool repeat, float volume) {
+    this->releaseClip ();
+    try {
+	auto stream = std::make_unique<Audio::AudioStream> (
+	    this->getScene ().getAudioContext (), this->getAssetLocator ().read (m_sound.sounds[index]), repeat
+	);
+	if (!stream->isInitialized ()) {
+	    sLog.error ("Sound layer ", this->getId (), " cannot initialize decoder for ", m_sound.sounds[index]);
 	    return false;
 	}
-    });
-    if (started) m_policy.clipStarted ();
-    else m_policy.stop ();
+	stream->setVolume (volume);
+	this->updateMonoRouting (*stream);
+	m_streamId = this->getScene ().getAudioContext ().addStream (stream.get ());
+	m_stream = std::move (stream);
+	return true;
+    } catch (const std::exception& error) {
+	sLog.error ("Sound layer ", this->getId (), " cannot play ", m_sound.sounds[index], ": ", error.what ());
+	return false;
+    }
+}
+
+bool CSound::hasClip () const { return m_stream != nullptr; }
+
+bool CSound::clipFinished () const {
+    return !m_streamId || this->getScene ().getAudioContext ().isStreamFinished (*m_streamId);
+}
+
+void CSound::setClipPaused (bool paused) {
+    if (m_stream) m_stream->setPaused (paused);
+}
+
+void CSound::setClipVolume (float volume) {
+    if (m_stream) m_stream->setVolume (volume);
+}
+
+std::optional<float> CSound::clipDuration () const {
+    return m_stream ? m_stream->getDuration () : std::nullopt;
+}
+
+void CSound::updateMonoRouting (Audio::AudioStream& stream) const {
+    if (!stream.isMonoSource ()) return;
+    if (!m_sound.spatialization) {
+	stream.setMonoChannelGains (Audio::kNonSpatialMonoGains.left, Audio::kNonSpatialMonoGains.right);
+	return;
+    }
+    glm::vec3 origin;
+    try {
+	origin = Wallpapers::resolveSceneTransform (m_sound, [this] (int parentId) -> const Object* {
+	    const auto* parent = this->getScene ().getObject (parentId);
+	    return parent ? &parent->getObject () : nullptr;
+	}).origin;
+    } catch (const std::exception&) {
+	origin = m_sound.origin->value->getVec3 ();
+    }
+    const auto& camera = this->getScene ().getCamera ();
+    const auto listener = Audio::soundListenerForCamera (
+	camera.getEye (), camera.getCenter (), camera.getUp (), camera.isOrthogonal (), camera.getWidth (),
+	camera.getHeight ()
+    );
+    const auto gains = Audio::spatialMonoGains (origin, listener, m_sound.minDistance, m_sound.attenuation);
+    stream.setMonoChannelGains (gains.left, gains.right);
 }
 
 void CSound::tick (float sceneDelta) {
-    if (!this->getContext ().getApp ().getContext ().settings.audio.enabled) return;
-    if (m_stream && m_sound.volume) m_stream->setVolume (m_sound.volume->value->getFloat ());
-    m_policy.advance (sceneDelta);
-    if (m_streamId && m_policy.canConsumeCompletion ()
-	&& this->getScene ().getAudioContext ().isStreamFinished (*m_streamId)) {
-	this->releaseActiveClip ();
-	const float randomUnit = std::generate_canonical<float, 24> (m_rng);
-	m_policy.clipFinished (randomUnit);
-    }
-    if (m_policy.ready ()) this->startSelectedClip ();
+    if (!this->audioEnabled ()) return;
+    m_controller.tick (sceneDelta, this->currentVolume ());
+    // Native moves spatialized voices every frame.
+    if (m_stream && m_sound.spatialization) this->updateMonoRouting (*m_stream);
 }
 
 void CSound::play () {
-    if (!this->getContext ().getApp ().getContext ().settings.audio.enabled) return;
-    // SceneScript runs before the sound tick. A clip can finish between ticks;
-    // a user play at that boundary must not be mistaken for repeated play.
-    if (m_streamId && m_policy.canConsumeCompletion ()
-	&& this->getScene ().getAudioContext ().isStreamFinished (*m_streamId)) {
-	this->releaseActiveClip ();
-	m_policy.stop ();
-    }
-    // Native play dispatch resumes a paused layer. A random-mode interval has
-    // no stream, but its remaining wait must survive that resume as well.
-    if (m_policy.state () == Audio::SoundPlaybackPolicy::State::PausedWaiting) {
-        m_policy.resume ();
-        return;
-    }
-    if (m_policy.state () == Audio::SoundPlaybackPolicy::State::PausedReady) {
-        m_policy.resume ();
-        if (m_policy.ready ()) this->startSelectedClip ();
-        return;
-    }
-    // Leave an already running stream in place.
-    if (m_stream && m_policy.state () == Audio::SoundPlaybackPolicy::State::Playing) return;
-    if (m_stream && m_policy.state () == Audio::SoundPlaybackPolicy::State::Paused) {
-        m_policy.resume ();
-        m_stream->setPaused (false);
-        return;
-    }
-    this->releaseActiveClip ();
-    m_policy.play ();
-    this->startSelectedClip ();
+    if (this->audioEnabled ()) m_controller.play (this->currentVolume ());
 }
-void CSound::pause () {
-    m_policy.pause ();
-    if (m_stream) m_stream->setPaused (true);
-}
+
+void CSound::pause () { m_controller.pause (); }
+
 void CSound::resume () {
-    m_policy.resume ();
-    if (m_stream) m_stream->setPaused (false);
+    if (this->audioEnabled ()) m_controller.resume (this->currentVolume ());
 }
-void CSound::stop () {
-    this->releaseActiveClip ();
-    m_policy.stop ();
-}
-bool CSound::isPlaying () const {
-    return m_stream && m_streamId && m_policy.state () == Audio::SoundPlaybackPolicy::State::Playing
-	&& !this->getScene ().getAudioContext ().isStreamFinished (*m_streamId);
-}
+
+void CSound::stop () { m_controller.stop (); }
+
+bool CSound::isPlaying () const { return m_controller.isPlaying (); }
 
 void CSound::render () { }
