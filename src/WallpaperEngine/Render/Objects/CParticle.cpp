@@ -1742,9 +1742,9 @@ EmitterFunc CParticle::createBoxEmitter (const ParticleEmitter& emitter, size_t 
 	    auto activeSchedule = schedule;
 	    // Native emitter descriptors multiply production by the shared scene
 	    // instance count, unless the preset's bit 0x20 suppresses that binding.
-	    activeSchedule.rate = ParticleCore::effectiveRate (
-	        schedule.rate, (m_particle.flags & 0x20u) != 0
-	            ? 1.0f : countOverrideValue ()->getFloat ());
+	    // Count patches rebind rate (op2) and maxtoemitperperiod (op1).
+	    ParticleCore::applyInstanceCount (activeSchedule, schedule,
+	        countOverrideValue ()->getFloat (), m_particle.flags);
 	    if (emitter.audioProcessingMode != 0) {
 		activeSchedule.rate = ParticleCore::effectiveRate (
 		    activeSchedule.rate, sampleParticleAudio (*this, audioSettings (emitter)));
@@ -1807,7 +1807,7 @@ EmitterFunc CParticle::createBoxEmitter (const ParticleEmitter& emitter, size_t 
         ParticleCore::initializeEmitterBirth (
             p, instanceBirthRgbGain (), alphaOverrideValue ()->getFloat (),
             20.0f * ((m_particle.flags & 0x80u) != 0 ? 1.0f : sizeOverrideValue ()->getFloat ()),
-            lifetimeOverrideValue ()->getFloat (), ParticleCore::nativeRandomUnit (m_rng),
+            ParticleCore::nativeRandomUnit (m_rng),
             m_slotStreams.has_value (), m_particle.animationMode == "randomframe");
 
 		// Native passes this emitter's selected CP upper 3x3 to
@@ -1825,7 +1825,6 @@ EmitterFunc CParticle::createBoxEmitter (const ParticleEmitter& emitter, size_t 
 
 EmitterFunc CParticle::createSphereEmitter (const ParticleEmitter& emitter, size_t index) {
     float rate = emitter.rate;
-    float lifetime = lifetimeOverrideValue ()->getFloat ();
     // Factory reads scene orthogonalprojection bit 0x400, not
     // the particle's own perspective-render flag.
     const float distanceMax = !emitter.distanceMaxAuthored
@@ -1847,13 +1846,13 @@ EmitterFunc CParticle::createSphereEmitter (const ParticleEmitter& emitter, size
 
     const ParticleCore::EmitterScheduleConfig schedule = ParticleCore::scheduleConfig (emitter, rate);
 
-    return [this, emitter, transformedEmitterOrigin, controlPointIndex, lifetime, distanceMax, schedule, index,
+    return [this, emitter, transformedEmitterOrigin, controlPointIndex, distanceMax, schedule, index,
 	    state = ParticleCore::initialState (schedule)]
 	(std::vector<ParticleInstance>& particles, uint32_t& count, float dt) mutable {
 	auto activeSchedule = schedule;
-	activeSchedule.rate = ParticleCore::effectiveRate (
-	    schedule.rate, (m_particle.flags & 0x20u) != 0
-	        ? 1.0f : countOverrideValue ()->getFloat ());
+	// Count patches rebind rate (op2) and maxtoemitperperiod (op1).
+	ParticleCore::applyInstanceCount (activeSchedule, schedule,
+	    countOverrideValue ()->getFloat (), m_particle.flags);
 	if (emitter.audioProcessingMode != 0) {
 	    activeSchedule.rate = ParticleCore::effectiveRate (
 		activeSchedule.rate, sampleParticleAudio (*this, audioSettings (emitter)));
@@ -1926,7 +1925,7 @@ EmitterFunc CParticle::createSphereEmitter (const ParticleEmitter& emitter, size
         ParticleCore::initializeEmitterBirth (
             p, instanceBirthRgbGain (), alphaOverrideValue ()->getFloat (),
             20.0f * ((m_particle.flags & 0x80u) != 0 ? 1.0f : sizeOverrideValue ()->getFloat ()),
-            lifetime, ParticleCore::nativeRandomUnit (m_rng), m_slotStreams.has_value (),
+            ParticleCore::nativeRandomUnit (m_rng), m_slotStreams.has_value (),
             m_particle.animationMode == "randomframe");
 
 	    m_birthInitializerBasis = birthTransform.basis;
@@ -1970,9 +1969,9 @@ EmitterFunc CParticle::createImageEmitter (const ParticleEmitter& emitter, size_
             state = ParticleCore::initialState (schedule)]
         (std::vector<ParticleInstance>& particles, uint32_t& count, float dt) mutable {
         auto activeSchedule = schedule;
-        activeSchedule.rate = ParticleCore::effectiveRate (
-            schedule.rate, (m_particle.flags & 0x20u) != 0
-                ? 1.0f : countOverrideValue ()->getFloat ());
+        // Count patches rebind rate (op2) and maxtoemitperperiod (op1).
+        ParticleCore::applyInstanceCount (activeSchedule, schedule,
+            countOverrideValue ()->getFloat (), m_particle.flags);
         if (emitter.audioProcessingMode != 0) {
             activeSchedule.rate = ParticleCore::effectiveRate (
                 activeSchedule.rate, sampleParticleAudio (*this, audioSettings (emitter)));
@@ -2139,7 +2138,7 @@ EmitterFunc CParticle::createImageEmitter (const ParticleEmitter& emitter, size_
             ParticleCore::initializeEmitterBirth (
                 particle, birthColor, alphaOverrideValue ()->getFloat (),
                 20.0f * ((m_particle.flags & 0x80u) != 0 ? 1.0f : sizeOverrideValue ()->getFloat ()),
-                lifetimeOverrideValue ()->getFloat (), ParticleCore::nativeRandomUnit (m_rng),
+                ParticleCore::nativeRandomUnit (m_rng),
                 m_slotStreams.has_value (), m_particle.animationMode == "randomframe");
             if (emitted == 0 && traceParticleChildren (*this))
                 sLog.out ("Particle image emitter birth: particle=", getId (),
@@ -2391,14 +2390,15 @@ InitializerFunc CParticle::createRemapInitialValueInitializer (const RemapInitia
 InitializerFunc CParticle::createColorRandomInitializer (const ColorRandomInitializer& init) {
     DynamicValue* minValue = init.min->value.get ();
     DynamicValue* maxValue = init.max->value.get ();
-    return [this, minValue, maxValue] (ParticleInstance& p) {
+    const bool composes = ParticleCore::followsSameInitializer (m_particle.initializers, init);
+    return [this, minValue, maxValue, composes] (ParticleInstance& p) {
 	const glm::vec3 min = instanceTintedColorEndpoint (minValue->getVec3 ());
 	const glm::vec3 max = instanceTintedColorEndpoint (maxValue->getVec3 ());
 	// Native initializer opcode 3 draws one scalar and uses it for all RGB
 	// channels. Independent per-channel draws also shift
 	// every later initializer's RNG stream, including map-sequence speed.
 	p.color = ParticleCore::colorRandomSample (m_rng, min, max)
-	    * instanceBirthRgbGain ();
+	    * (composes ? p.initial.color : instanceBirthRgbGain ());
 	p.initial.color = p.color;
     };
 }
@@ -2408,8 +2408,9 @@ InitializerFunc CParticle::createSizeRandomInitializer (const SizeRandomInitiali
     DynamicValue* maxValue = init.max->value.get ();
     DynamicValue* exponentValue = init.exponent->value.get ();
     DynamicValue* sizeOverride = sizeOverrideValue ();
+    const bool composes = ParticleCore::followsSameInitializer (m_particle.initializers, init);
 
-    return [this, minValue, maxValue, exponentValue, sizeOverride] (ParticleInstance& p) {
+    return [this, minValue, maxValue, exponentValue, sizeOverride, composes] (ParticleInstance& p) {
 	float t = WallpaperEngine::Maths::randomFloat (m_rng, 0.0f, 1.0f);
 	float exponent = exponentValue->getFloat ();
 	float min = minValue->getFloat ();
@@ -2419,7 +2420,7 @@ InitializerFunc CParticle::createSizeRandomInitializer (const SizeRandomInitiali
 	float adjustedT = std::pow (t, exponent);
 	const float sample = (min + adjustedT * (max - min))
 	    * ((m_particle.flags & 0x80u) != 0 ? 1.0f : sizeOverride->getFloat ());
-	p.size = m_slotStreams ? p.initial.size * sample : sample / 2.0f;
+	p.size = m_slotStreams || composes ? p.initial.size * sample : sample / 2.0f;
 	p.initial.size = p.size;
     };
 }
@@ -2429,12 +2430,14 @@ InitializerFunc CParticle::createAlphaRandomInitializer (const AlphaRandomInitia
     DynamicValue* maxValue = init.max->value.get ();
     DynamicValue* exponentValue = init.exponent->value.get ();
     DynamicValue* alphaOverride = alphaOverrideValue ();
+    const bool composes = ParticleCore::followsSameInitializer (m_particle.initializers, init);
 
-    return [this, minValue, maxValue, exponentValue, alphaOverride] (ParticleInstance& p) {
+    return [this, minValue, maxValue, exponentValue, alphaOverride, composes] (ParticleInstance& p) {
 	const float min = minValue->getFloat ();
 	const float max = maxValue->getFloat ();
 	const float exponent = exponentValue->getFloat ();
-	const float instanceAlpha = m_slotStreams ? p.initial.alpha : alphaOverride->getFloat ();
+	const float instanceAlpha = m_slotStreams || composes
+	    ? p.initial.alpha : alphaOverride->getFloat ();
 	// Keep the established linear draw bit-for-bit when the authored exponent
 	// is omitted. A shaped draw consumes the same single MT word.
 	p.alpha = exponent == 1.0f
@@ -2449,12 +2452,15 @@ InitializerFunc CParticle::createAlphaRandomInitializer (const AlphaRandomInitia
 InitializerFunc CParticle::createLifetimeRandomInitializer (const LifetimeRandomInitializer& init) {
     DynamicValue* minValue = init.min->value.get ();
     DynamicValue* maxValue = init.max->value.get ();
+    DynamicValue* exponentValue = init.exponent->value.get ();
     DynamicValue* lifetimeOverride = lifetimeOverrideValue ();
 
-    return [this, minValue, maxValue, lifetimeOverride] (ParticleInstance& p) {
-	p.lifetime = WallpaperEngine::Maths::randomFloat (m_rng, minValue->getFloat (), maxValue->getFloat ())
-	    * lifetimeOverride->getFloat ();
-	if (m_slotStreams && p.lifetime <= 0.001f) p.lifetime = 0.001f;
+    return [this, minValue, maxValue, exponentValue, lifetimeOverride] (ParticleInstance& p) {
+	// Instance lifetime patches only this record (op6, gate 0x40); the
+	// 0.001 floor is unconditional, so an authored zero still expires.
+	p.lifetime = ParticleCore::lifetimeRandomSample (
+	    ParticleCore::nativeRandomUnit (m_rng), minValue->getFloat (), maxValue->getFloat (),
+	    exponentValue->getFloat (), lifetimeOverride->getFloat (), m_particle.flags);
 	p.initial.lifetime = p.lifetime;
     };
 }
@@ -2462,11 +2468,13 @@ InitializerFunc CParticle::createLifetimeRandomInitializer (const LifetimeRandom
 InitializerFunc CParticle::createVelocityRandomInitializer (const VelocityRandomInitializer& init) {
     DynamicValue* minValue = init.min->value.get ();
     DynamicValue* maxValue = init.max->value.get ();
+    DynamicValue* exponentValue = init.exponent->value.get ();
     DynamicValue* speedOverride = speedOverrideValue ();
 
-    return [this, minValue, maxValue, speedOverride] (ParticleInstance& p) {
-	glm::vec3 vel = WallpaperEngine::Maths::randomVec3 (m_rng, minValue->getVec3 (), maxValue->getVec3 ())
-	    * speedOverride->getFloat ();
+    return [this, minValue, maxValue, exponentValue, speedOverride] (ParticleInstance& p) {
+	const glm::vec3 vel = ParticleCore::velocityRandomSample (
+	    m_rng, minValue->getVec3 (), maxValue->getVec3 (), exponentValue->getFloat (),
+	    ParticleCore::instanceSpeedGain (speedOverride->getFloat (), m_particle.flags));
 	// Native initializer opcode 7 transforms the sampled vector through the
 	// emitter-selected control point's upper 3x3.
 	// Emitters set this basis before running their initializer stream. Reflect
@@ -2478,10 +2486,11 @@ InitializerFunc CParticle::createVelocityRandomInitializer (const VelocityRandom
 InitializerFunc CParticle::createRotationRandomInitializer (const RotationRandomInitializer& init) {
     DynamicValue* minValue = init.min->value.get ();
     DynamicValue* maxValue = init.max->value.get ();
+    DynamicValue* exponentValue = init.exponent->value.get ();
 
-    return [this, minValue, maxValue] (ParticleInstance& p) {
-	const glm::vec3 sample = WallpaperEngine::Maths::randomVec3 (
-	    m_rng, minValue->getVec3 (), maxValue->getVec3 ());
+    return [this, minValue, maxValue, exponentValue] (ParticleInstance& p) {
+	const glm::vec3 sample = ParticleCore::angularRandomSample (
+	    m_rng, minValue->getVec3 (), maxValue->getVec3 (), exponentValue->getFloat (), 1.0f);
 	for (int axis = 0; axis < 3; ++axis) {
 	    ParticleCore::addAngularSample (p.rotation[axis], sample[axis]);
 	}
@@ -2492,22 +2501,14 @@ InitializerFunc CParticle::createAngularVelocityRandomInitializer (const Angular
     DynamicValue* minValue = init.min->value.get ();
     DynamicValue* maxValue = init.max->value.get ();
     DynamicValue* exponentValue = init.exponent->value.get ();
+    DynamicValue* speedOverride = speedOverrideValue ();
 
-    return [this, minValue, maxValue, exponentValue] (ParticleInstance& p) {
-	glm::vec3 minVec = minValue->getVec3 ();
-	glm::vec3 maxVec = maxValue->getVec3 ();
-	float exponent = exponentValue->getFloat ();
-
-	// Apply exponent bias to random distribution
-	// exponent = 1: uniform distribution
-	// exponent -> 0: bias towards max
-	// exponent >= 2: bias towards min
-	glm::vec3 result;
-	for (int i = 0; i < 3; i++) {
-	    float t = WallpaperEngine::Maths::randomFloat (m_rng, 0.0f, 1.0f);
-	    t = std::pow (t, exponent);
-	    result[i] = minVec[i] + t * (maxVec[i] - minVec[i]);
-	}
+    return [this, minValue, maxValue, exponentValue, speedOverride] (ParticleInstance& p) {
+	// Factory binds min/span to instance speed
+	// (patch op10) unless preset flag 0x10 omits the descriptor.
+	const glm::vec3 result = ParticleCore::angularRandomSample (
+	    m_rng, minValue->getVec3 (), maxValue->getVec3 (), exponentValue->getFloat (),
+	    ParticleCore::instanceSpeedGain (speedOverride->getFloat (), m_particle.flags));
 
 	for (int axis = 0; axis < 3; ++axis) {
 	    ParticleCore::addAngularSample (p.angularVelocity[axis], result[axis]);
@@ -2630,7 +2631,9 @@ CParticle::createMapSequenceAroundControlPointInitializer (const MapSequenceArou
             [this] (float min, float max) { return WallpaperEngine::Maths::randomFloat (m_rng, min, max); });
         const glm::vec3 addedVelocity = orbit.tangent * speed.x
             + orbit.radial * speed.y + orbit.axis * speed.z;
-        p.velocity += addedVelocity * speedOverride->getFloat ();
+        // Its op10 speed patch is omitted under flag 0x10.
+        p.velocity += addedVelocity
+            * ParticleCore::instanceSpeedGain (speedOverride->getFloat (), m_particle.flags);
     };
 }
 
@@ -2801,11 +2804,14 @@ OperatorFunc CParticle::createMovementOperator (const MovementOperator& op) {
                 && (record->template as<ControlPointAttractOperator> ()->flags & 1u) != 0;
         });
 
-    return [dragValue, gravityValue, speedOverride, capturePrevious, nativeSlots = m_slotStreams.has_value ()] (
+    const uint32_t particleFlags = m_particle.flags;
+    return [dragValue, gravityValue, speedOverride, capturePrevious, particleFlags,
+            nativeSlots = m_slotStreams.has_value ()] (
 	       std::vector<ParticleInstance>& particles, uint32_t count, const std::vector<ControlPointData>&, float,
 	       ParticleCore::MovementTime time
 	   ) {
-	float speed = speedOverride->getFloat ();
+	// Gravity patch op8 is omitted under preset flag 0x10.
+	const float speed = ParticleCore::instanceSpeedGain (speedOverride->getFloat (), particleFlags);
 	float drag = dragValue->getFloat ();
 	glm::vec3 gravity = gravityValue->getVec3 ();
 	// Flip gravity Y for centered space
@@ -2952,13 +2958,18 @@ OperatorFunc CParticle::createCollisionOperator (const CollisionOperator& op) {
 OperatorFunc CParticle::createAngularMovementOperator (const AngularMovementOperator& op) {
     DynamicValue* dragValue = op.drag->value.get ();
     DynamicValue* forceValue = op.force->value.get ();
+    DynamicValue* speedOverride = speedOverrideValue ();
+    const uint32_t particleFlags = m_particle.flags;
 
-    return [dragValue, forceValue] (
+    return [dragValue, forceValue, speedOverride, particleFlags] (
 	       std::vector<ParticleInstance>& particles, uint32_t count, const std::vector<ControlPointData>&, float,
 	       ParticleCore::MovementTime time
 	   ) {
 	float drag = dragValue->getFloat ();
-	glm::vec3 force = forceValue->getVec3 ();
+	// Factory binds the force vector to instance
+	// speed (patch op9), unless preset flag 0x10 omits the descriptor.
+	const glm::vec3 force = forceValue->getVec3 ()
+	    * ParticleCore::instanceSpeedGain (speedOverride->getFloat (), particleFlags);
 
 	for (uint32_t i = 0; i < count; i++) {
 	    auto& p = particles[i];
@@ -3375,8 +3386,10 @@ OperatorFunc CParticle::createVortexOperator (const VortexOperator& op) {
 	    }
 
 	    // Apply tangential velocity (spinning)
+	    // Both vortex factories gate their speed patch on 0x10.
 	    p.velocity += tangent * speed * (v2 ? time.damping : 1.0f)
-		* speedOverride->getFloat () * envelopeWeight;
+		* ParticleCore::instanceSpeedGain (speedOverride->getFloat (), m_particle.flags)
+		* envelopeWeight;
 
 	    // Apply radial force (ring pull)
 	    p.velocity += radialForce * time.integration * envelopeWeight;

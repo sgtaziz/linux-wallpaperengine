@@ -31,11 +31,12 @@ struct EmitterBirthTransform {
 // velocity. Raw physical streams start with lifetime 1 and size .5; authored
 // initializers subsequently apply the instance multipliers. Reused slots must
 // also receive the new previous position and sequence seed before execution.
+// Lifetime 1 is independent of instance lifetime, which only
+// patches lifetimerandom records, so the ordinary path shares it.
 template <typename Particle>
 inline void initializeEmitterBirth (
     Particle& particle, const glm::vec3& rgbGain, float alphaGain,
-    float ordinarySize, float ordinaryLifetime, float birthRandom,
-    bool physicalStreams, bool randomFrame) {
+    float ordinarySize, float birthRandom, bool physicalStreams, bool randomFrame) {
     particle.acceleration = glm::vec3 (0.0f);
     particle.rotation = glm::vec3 (0.0f);
     particle.angularVelocity = glm::vec3 (0.0f);
@@ -43,7 +44,7 @@ inline void initializeEmitterBirth (
     particle.color = rgbGain;
     particle.alpha = alphaGain;
     particle.size = physicalStreams ? 0.5f : ordinarySize;
-    particle.lifetime = physicalStreams ? 1.0f : ordinaryLifetime;
+    particle.lifetime = 1.0f;
     particle.age = 0.0f;
     particle.oscillatorRandom = birthRandom;
     particle.alive = true;
@@ -1327,6 +1328,86 @@ inline float alphaRandomExponentSample (float unit, float min, float max, float 
     return (min + std::pow (unit, exponent) * (max - min)) * instanceAlpha;
 }
 
+// opcodes 2/3/6 multiply the size/RGB/alpha baseline streams, so a
+// repeated record composes with the earlier one. The ordinary Linux path seeds
+// those streams with display defaults that the first record replaces with the
+// value native multiplication of the raw default produces; later records of
+// the same kind must multiply the baseline instead.
+template <typename Initializer, typename Records>
+bool followsSameInitializer (const Records& records, const Initializer& initializer) {
+    for (const auto& record : records) {
+        if (record && record->template is<Initializer> ())
+            return record->template as<Initializer> () != &initializer;
+    }
+    return false;
+}
+
+// Native initializer lanes consume one MT word
+// each and call powf only when the record exponent is not exactly one.
+inline float initializerLaneUnit (float unit, float exponent) {
+    return exponent == 1.0f ? unit : std::pow (unit, exponent);
+}
+
+// Factory packs initializer bounds as min and span. Patch opcodes 6
+// and 10 rebind both from a shared instance value as gain*min and
+// gain*max - gain*min. A gated patch leaves the authored max - min span.
+struct InitializerRange {
+    float min;
+    float span;
+};
+
+inline InitializerRange patchedInitializerRange (float min, float max, float gain) {
+    const float patchedMin = gain * min;
+    return { patchedMin, gain * max - patchedMin };
+}
+
+inline float initializerLaneValue (float unit, float exponent, InitializerRange range) {
+    return initializerLaneUnit (unit, exponent) * range.span + range.min;
+}
+
+// Particle preset flag 0x10 omits every instance-speed patch descriptor in
+// (velocity/angular-velocity random,
+// movement, angular movement, vortex 5085/5334 and
+// map sequence 2449).
+inline float instanceSpeedGain (float instanceSpeed, uint32_t particleFlags) {
+    return (particleFlags & 0x10u) != 0u ? 1.0f : instanceSpeed;
+}
+
+// Opcode 1 after the 0x40-gated lifetime patch
+// lifetime results at or below 0.001 become 0.001.
+// NaN compares false and is left as native leaves it.
+inline float lifetimeRandomSample (float unit, float min, float max, float exponent,
+                                   float instanceLifetime, uint32_t particleFlags) {
+    const float gain = (particleFlags & 0x40u) != 0u ? 1.0f : instanceLifetime;
+    const float lifetime = initializerLaneValue (unit, exponent,
+        patchedInitializerRange (min, max, gain));
+    return lifetime <= 0.001f ? 0.001f : lifetime;
+}
+
+// Opcode 7 draws Z, then Y, then X, before the selected
+// control point's basis is applied by the caller.
+inline glm::vec3 velocityRandomSample (std::mt19937& rng, const glm::vec3& min,
+                                       const glm::vec3& max, float exponent, float speedGain) {
+    glm::vec3 result (0.0f);
+    for (int axis = 2; axis >= 0; --axis) {
+        result[axis] = initializerLaneValue (nativeRandomUnit (rng), exponent,
+            patchedInitializerRange (min[axis], max[axis], speedGain));
+    }
+    return result;
+}
+
+// Opcodes 10 (rotation, unpatched) and 12 (angular velocity, speed patch op10
+// ) draw X, Y, Z with one shared record exponent.
+inline glm::vec3 angularRandomSample (std::mt19937& rng, const glm::vec3& min,
+                                      const glm::vec3& max, float exponent, float gain) {
+    glm::vec3 result (0.0f);
+    for (int axis = 0; axis < 3; ++axis) {
+        result[axis] = initializerLaneValue (nativeRandomUnit (rng), exponent,
+            patchedInitializerRange (min[axis], max[axis], gain));
+    }
+    return result;
+}
+
 // Native opcode-6 patches both authored turbulent-birth speed bounds from
 // the shared root instance. Particle flag 0x10 suppresses this patch.
 inline glm::vec2 turbulentBirthSpeedRange (float min, float max, float instanceSpeed,
@@ -1706,6 +1787,28 @@ inline float effectiveRate (float authored, float overrideRate) {
     const double product = static_cast<double> (authored) * overrideRate;
     return static_cast<float> (std::min (product,
         static_cast<double> (std::numeric_limits<float>::max ())));
+}
+
+// Every emitter factory pairs its
+// rate patch with patch op1 on maxtoemitperperiod. stores
+// (int)(int64)((float)authored * count): cvttss2si truncates, and NaN or an
+// out-of-range product yields 0x8000000000000000, whose low word is zero.
+inline uint32_t instanceMaxPerPeriod (uint32_t authored, float count) {
+    const float product = static_cast<float> (authored) * count;
+    if (!(product > -9.223372e18f && product < 9.223372e18f)) return 0u;
+    return static_cast<uint32_t> (static_cast<int64_t> (product));
+}
+
+// Preset flag 0x20 omits both count patch descriptors.
+inline void applyInstanceCount (EmitterScheduleConfig& active, const EmitterScheduleConfig& authored,
+                                float count, uint32_t particleFlags) {
+    if ((particleFlags & 0x20u) != 0u) {
+        active.rate = effectiveRate (authored.rate, 1.0f);
+        active.maxPerPeriod = authored.maxPerPeriod;
+        return;
+    }
+    active.rate = effectiveRate (authored.rate, count);
+    active.maxPerPeriod = instanceMaxPerPeriod (authored.maxPerPeriod, count);
 }
 
 template <typename RandomFloat>

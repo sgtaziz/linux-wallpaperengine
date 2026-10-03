@@ -384,26 +384,29 @@ public:
 
 class LifetimeRandomInitializer : public ParticleInitializerBase {
 public:
-    LifetimeRandomInitializer (UserSettingUniquePtr min, UserSettingUniquePtr max) :
-	min (std::move (min)), max (std::move (max)) { }
+    LifetimeRandomInitializer (UserSettingUniquePtr min, UserSettingUniquePtr max, UserSettingUniquePtr exponent) :
+	min (std::move (min)), max (std::move (max)), exponent (std::move (exponent)) { }
     UserSettingUniquePtr min;
     UserSettingUniquePtr max;
+    UserSettingUniquePtr exponent;
 };
 
 class VelocityRandomInitializer : public ParticleInitializerBase {
 public:
-    VelocityRandomInitializer (UserSettingUniquePtr min, UserSettingUniquePtr max) :
-	min (std::move (min)), max (std::move (max)) { }
+    VelocityRandomInitializer (UserSettingUniquePtr min, UserSettingUniquePtr max, UserSettingUniquePtr exponent) :
+	min (std::move (min)), max (std::move (max)), exponent (std::move (exponent)) { }
     UserSettingUniquePtr min;
     UserSettingUniquePtr max;
+    UserSettingUniquePtr exponent;
 };
 
 class RotationRandomInitializer : public ParticleInitializerBase {
 public:
-    RotationRandomInitializer (UserSettingUniquePtr min, UserSettingUniquePtr max) :
-	min (std::move (min)), max (std::move (max)) { }
+    RotationRandomInitializer (UserSettingUniquePtr min, UserSettingUniquePtr max, UserSettingUniquePtr exponent) :
+	min (std::move (min)), max (std::move (max)), exponent (std::move (exponent)) { }
     UserSettingUniquePtr min;
     UserSettingUniquePtr max;
+    UserSettingUniquePtr exponent;
 };
 
 class AngularVelocityRandomInitializer : public ParticleInitializerBase {
