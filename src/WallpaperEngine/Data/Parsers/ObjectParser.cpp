@@ -1177,17 +1177,22 @@ ParticleInitializerUniquePtr ObjectParser::parseParticleInitializer (
 	    it.user ("exponent", properties, 1.0f)
 	);
     } else if (name == "lifetimerandom") {
+	// Factory reads "exponent" for opcodes 1,
+	// 7 and 10; shapes each lane.
 	return std::make_unique<LifetimeRandomInitializer> (
-	    it.user ("min", properties, 0.0f), it.user ("max", properties, 1.0f)
+	    it.user ("min", properties, 0.0f), it.user ("max", properties, 1.0f),
+	    it.user ("exponent", properties, 1.0f)
 	);
     } else if (name == "velocityrandom") {
 	return std::make_unique<VelocityRandomInitializer> (
-	    it.user ("min", properties, glm::vec3 (-32.0f)), it.user ("max", properties, glm::vec3 (32.0f))
+	    it.user ("min", properties, glm::vec3 (-32.0f)), it.user ("max", properties, glm::vec3 (32.0f)),
+	    it.user ("exponent", properties, 1.0f)
 	);
     } else if (name == "rotationrandom") {
 	return std::make_unique<RotationRandomInitializer> (
 	    it.user ("min", properties, glm::vec3 (0.0f)),
-	    it.user ("max", properties, glm::vec3 (0.0f, 0.0f, glm::two_pi<float> ()))
+	    it.user ("max", properties, glm::vec3 (0.0f, 0.0f, glm::two_pi<float> ())),
+	    it.user ("exponent", properties, 1.0f)
 	);
     } else if (name == "angularvelocityrandom") {
 	return std::make_unique<AngularVelocityRandomInitializer> (

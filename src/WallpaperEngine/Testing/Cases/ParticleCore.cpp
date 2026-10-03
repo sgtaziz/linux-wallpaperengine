@@ -55,7 +55,7 @@ TEST_CASE ("Emitter birth defaults match the original machine entry on reused ph
         particle.color = particle.initial.color = glm::vec3 (99);
         particle.alpha = particle.initial.alpha = particle.size = particle.initial.size = 99;
         particle.lifetime = particle.initial.lifetime = particle.age = particle.sequenceFraction = 99;
-        initializeEmitterBirth (particle, {.2f, .3f, .4f}, .6f, 160, 8,
+        initializeEmitterBirth (particle, {.2f, .3f, .4f}, .6f, 160,
                                 originalBirthRandom, true, randomFrame);
         REQUIRE (particle.age == 0);
         REQUIRE (particle.lifetime == 1);
@@ -76,12 +76,14 @@ TEST_CASE ("Emitter birth defaults match the original machine entry on reused ph
         REQUIRE (particle.poolSlot == slot);
         REQUIRE (particle.birthId == 45);
     }
+    // writes lifetime 1 for every birth; instance lifetime only
+    // patches lifetimerandom records, so the ordinary path has no other default.
     ParticleInstance ordinary;
-    initializeEmitterBirth (ordinary, {1, 1, 1}, 1, 160, 8, .25f, false, false);
+    initializeEmitterBirth (ordinary, {1, 1, 1}, 1, 160, .25f, false, false);
     REQUIRE (ordinary.size == 160);
     REQUIRE (ordinary.initial.size == 160);
-    REQUIRE (ordinary.lifetime == 8);
-    REQUIRE (ordinary.initial.lifetime == 8);
+    REQUIRE (ordinary.lifetime == 1);
+    REQUIRE (ordinary.initial.lifetime == 1);
 }
 
 TEST_CASE ("Physical IMAGE births retain selected-pixel gain independently of initialized baselines",
@@ -94,7 +96,7 @@ TEST_CASE ("Physical IMAGE births retain selected-pixel gain independently of in
     // Opcode3 restores the runtime gain afterward; this birth retains its own
     // selected-pixel gain in current streams until operator baseline restore.
     const glm::vec3 selectedGain (.2f, .3f, .4f);
-    initializeEmitterBirth (particle, selectedGain, .6f, 160, 8, .25f, true, false);
+    initializeEmitterBirth (particle, selectedGain, .6f, 160, .25f, true, false);
     particle.color = particle.initial.color = selectedGain * glm::vec3 (.5f, .25f, .75f);
     particle.alpha = particle.initial.alpha = .3f;
     particle.size = particle.initial.size = 4;
@@ -429,7 +431,7 @@ TEST_CASE ("Native physical streams retain holes and padded tail across restore 
         REQUIRE (index == 4);
         REQUIRE (p.position.x == 108.0f); // Reuse occurs before birth overwrite.
         p.position.x = 204.0f;
-        initializeEmitterBirth (p, {.2f, .3f, .4f}, .6f, 160, 8,
+        initializeEmitterBirth (p, {.2f, .3f, .4f}, .6f, 160,
                                 .040101409f, true, true);
         p.lifetime = p.initial.lifetime = 2.0f;
     }) == 4);
