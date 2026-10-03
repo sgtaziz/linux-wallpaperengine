@@ -1195,19 +1195,28 @@ inline float oscillatorMultiplier (float age, float random, float frequencyMin,
     return blendedMultiplier (scale, normalizedAge, envelope);
 }
 
-// Position opcode 0x1d adds an extra random full-turn phase, then takes the
-// cosine difference between the current age and one operator step earlier.
-inline float positionOscillationDelta (float age, float step, float random,
-                                       float frequencyMin, float frequencyMax,
-                                       float phaseMin, float phaseMax,
-                                       float scaleMin, float scaleMax,
-                                       float instanceSpeed, float envelopeWeight = 1.0f) {
-    const float frequency = (frequencyMin + random * (frequencyMax - frequencyMin)) * instanceSpeed;
-    const float phase = phaseMin + random * (phaseMax - phaseMin)
-                        + random * 6.2831855f;
-    const float scale = scaleMin + random * (scaleMax - scaleMin);
-    const float angle = (age + phase) * frequency;
-    return (std::cos (angle) - std::cos (angle - step * frequency)) * scale * envelopeWeight;
+// inserts an omitted oscillateposition scalemax as 10 in
+// orthographic scenes and 0.5 in perspective scenes.
+inline float oscillatePositionScaleMaxDefault (bool isOrthogonal) {
+    return isOrthogonal ? 10.0f : 0.5f;
+}
+
+// Position opcodes 0x07/0x1d add the
+// sine difference between the current age and one integration step earlier.
+// Only the y lane adds the extra random full-turn phase. The result is an
+// authored-frame delta; 0x1d multiplies the scale by the envelope weight.
+inline glm::vec3 positionOscillationDelta (float age, float step, float random,
+                                           float frequencyMin, float frequencyMax,
+                                           float phaseMin, float phaseMax,
+                                           float scaleMin, float scaleMax, glm::vec3 mask,
+                                           float envelopeWeight = 1.0f) {
+    const float frequency = random * (frequencyMax - frequencyMin) + frequencyMin;
+    const float phase = (random * (phaseMax - phaseMin) + phaseMin) + age;
+    const float scale = (random * (scaleMax - scaleMin) + scaleMin) * envelopeWeight;
+    const float planar = std::sin (phase * frequency) - std::sin ((phase - step) * frequency);
+    const float vertical = random * 6.2831855f + phase;
+    const float lifted = std::sin (vertical * frequency) - std::sin ((vertical - step) * frequency);
+    return { (planar * scale) * mask.x, (lifted * mask.y) * scale, (planar * scale) * mask.z };
 }
 
 // Interpreter restores size from stream 0x4f on every invocation

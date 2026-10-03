@@ -863,11 +863,11 @@ public:
     OscillatePositionOperator (
 	UserSettingUniquePtr frequencyMin, UserSettingUniquePtr frequencyMax, UserSettingUniquePtr scaleMin,
 	UserSettingUniquePtr scaleMax, UserSettingUniquePtr phaseMin, UserSettingUniquePtr phaseMax,
-	UserSettingUniquePtr mask
+	UserSettingUniquePtr mask, bool scaleMaxSceneDefault
     ) :
 	frequencyMin (std::move (frequencyMin)), frequencyMax (std::move (frequencyMax)),
 	scaleMin (std::move (scaleMin)), scaleMax (std::move (scaleMax)), phaseMin (std::move (phaseMin)),
-	phaseMax (std::move (phaseMax)), mask (std::move (mask)) { }
+	phaseMax (std::move (phaseMax)), mask (std::move (mask)), scaleMaxSceneDefault (scaleMaxSceneDefault) { }
     UserSettingUniquePtr frequencyMin;
     UserSettingUniquePtr frequencyMax;
     UserSettingUniquePtr scaleMin;
@@ -875,6 +875,7 @@ public:
     UserSettingUniquePtr phaseMin;
     UserSettingUniquePtr phaseMax;
     UserSettingUniquePtr mask;
+    bool scaleMaxSceneDefault;
 };
 
 using ParticleOperatorUniquePtr = std::unique_ptr<ParticleOperatorBase>;

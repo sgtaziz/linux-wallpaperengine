@@ -1354,35 +1354,31 @@ TEST_CASE ("Two-pass particle dispatch restores streams before each oscillator l
     REQUIRE (std::abs (size - 2.0f * first) < 0.000001f);
 }
 
-TEST_CASE ("Position oscillator uses shared birth random and cosine step difference", "[particle][oscillator][position]") {
-    for (float random : { 0.0f, 0.5f, 1.0f }) {
-        const float frequency = 2.0f + random * 2.0f;
-        const float phase = 0.4f + random * 0.2f + random * 6.2831855f;
-        const float scale = 0.75f + random * 0.5f;
-        const float angle = (0.25f + phase) * frequency;
-        const float expected = (std::cos (angle) - std::cos (angle - 0.1f * frequency)) * scale;
-        const float actual = positionOscillationDelta (
-            0.25f, 0.1f, random, 2.0f, 4.0f, 0.4f, 0.6f, 0.75f, 1.25f, 1.0f);
-        REQUIRE (std::abs (actual - expected) < 0.000001f);
-    }
-    REQUIRE (positionOscillationDelta (0.25f, 0.0f, 0.5f,
-                                      2.0f, 4.0f, 0.4f, 0.6f, 0.75f, 1.25f, 1.0f) == 0.0f);
-    for (float speed : { 0.5f, 2.0f }) {
-        const float frequency = 3.0f * speed;
-        const float phase = 0.5f + 0.5f * 6.2831855f;
-        const float angle = (0.25f + phase) * frequency;
-        const float expected = std::cos (angle) - std::cos (angle - 0.1f * frequency);
-        const float actual = positionOscillationDelta (
-            0.25f, 0.1f, 0.5f, 2.0f, 4.0f, 0.4f, 0.6f, 1.0f, 1.0f, speed);
-        REQUIRE (std::abs (actual - expected) < 0.000001f);
-    }
-    const float base = positionOscillationDelta (
-        0.25f, 0.1f, 0.5f, 2.0f, 4.0f, 0.4f, 0.6f, 1.0f, 1.0f, 1.0f);
+TEST_CASE ("Position oscillator matches native sine step difference", "[particle][oscillator][position]") {
+    // Original 2.8.42 interpreter outputs (w10 oscillateposition
+    // oracle, step 1/30): authored-frame position deltas. Only y adds r*2pi.
+    const float step = 1.0f / 30.0f;
+    const glm::vec3 oddMask { 0.5f, 2.0f, -1.0f };
+    const auto near = [] (glm::vec3 actual, glm::vec3 expected) {
+        return glm::all (glm::lessThan (glm::abs (actual - expected), glm::vec3 (0.00002f)));
+    };
+    REQUIRE (near (positionOscillationDelta (0.0333333f, step, 0.25f, 0.5f, 1.5f, 0.25f, 0.75f, 4.0f, 6.0f, oddMask),
+                   { 0.0538406372f, 0.022228241f, -0.107678413f }));
+    REQUIRE (near (positionOscillationDelta (7.75f, step, 0.876543224f, 0.5f, 1.5f, 0.25f, 0.75f, 4.0f, 6.0f, oddMask),
+                   { 0.0742034912f, 0.50037384f, -0.148418665f }));
+    REQUIRE (near (positionOscillationDelta (13.0f, step, 0.6f, 0.5f, 1.5f, 0.25f, 0.75f, 4.0f, 6.0f, oddMask),
+                   { -0.0649414062f, 0.374856949f, 0.129889488f }));
+    // Opcode 0x1d scales by the envelope weight; native rcpps leaves a small residual.
     const BlendEnvelope overlapping { 0.0f, 0.8f, 0.2f, 1.0f };
-    const float weighted = positionOscillationDelta (
-        0.25f, 0.1f, 0.5f, 2.0f, 4.0f, 0.4f, 0.6f, 1.0f, 1.0f, 1.0f,
-        blendWeight (0.5f, overlapping));
-    REQUIRE (std::abs (weighted - base * 0.390625f) < 0.000001f);
+    const glm::vec3 weighted = positionOscillationDelta (
+        13.0f, step, 0.6f, 1.0f, 5.0f, 0.0f, 6.28318548f, 0.0f, 10.0f, glm::vec3 (1.0f),
+        blendWeight (13.0f / 20.0f, overlapping));
+    REQUIRE (glm::all (glm::lessThan (glm::abs (weighted - glm::vec3 (0.221389771f, 0.190348148f, 0.221387148f)),
+                                      glm::vec3 (0.0002f))));
+    REQUIRE (positionOscillationDelta (0.25f, 0.0f, 0.5f, 2.0f, 4.0f, 0.4f, 0.6f, 0.75f, 1.25f,
+                                       glm::vec3 (1.0f)) == glm::vec3 (0.0f));
+    REQUIRE (oscillatePositionScaleMaxDefault (true) == 10.0f);
+    REQUIRE (oscillatePositionScaleMaxDefault (false) == 0.5f);
 }
 
 TEST_CASE ("Alpha and size oscillator parser defaults match native factory", "[particle][oscillator][parser]") {
@@ -1409,6 +1405,31 @@ TEST_CASE ("Alpha and size oscillator parser defaults match native factory", "[p
     REQUIRE (size->frequencyMax->value->getFloat () == 10.0f);
     REQUIRE (std::abs (size->scaleMin->value->getFloat () - 0.8f) < 0.000001f);
     REQUIRE (std::abs (size->scaleMax->value->getFloat () - 1.2f) < 0.000001f);
+}
+
+TEST_CASE ("Position oscillator parser defaults match native factory", "[particle][oscillator][parser]") {
+    using WallpaperEngine::Data::Parsers::ObjectParser;
+    using WallpaperEngine::Data::Model::Particle;
+    using WallpaperEngine::Data::Model::OscillatePositionOperator;
+    using WallpaperEngine::Data::Model::Project;
+    using WallpaperEngine::Data::JSON::JSON;
+    Project project {};
+    const auto data = JSON::parse (R"({"id":1,"name":"osc","particle":{"operator":[
+        {"name":"oscillateposition"},{"name":"oscillateposition","scalemax":4}]}})");
+    const auto object = ObjectParser::parse (data, project);
+    const auto* particle = dynamic_cast<const Particle*> (object.get ());
+    REQUIRE (particle != nullptr);
+    REQUIRE (particle->operators.size () == 2);
+    const auto* omitted = particle->operators[0]->as<OscillatePositionOperator> ();
+    const auto* authored = particle->operators[1]->as<OscillatePositionOperator> ();
+    REQUIRE (omitted != nullptr);
+    REQUIRE (authored != nullptr);
+    // frequency 1..5; omitted scalemax follows the scene projection.
+    REQUIRE (omitted->frequencyMin->value->getFloat () == 1.0f);
+    REQUIRE (omitted->frequencyMax->value->getFloat () == 5.0f);
+    REQUIRE (omitted->scaleMaxSceneDefault);
+    REQUIRE_FALSE (authored->scaleMaxSceneDefault);
+    REQUIRE (authored->scaleMax->value->getFloat () == 4.0f);
 }
 
 TEST_CASE ("Vortex variants remain distinct with current orthographic defaults", "[particle][vortex][parser]") {
