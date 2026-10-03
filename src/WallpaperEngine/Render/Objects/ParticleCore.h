@@ -367,6 +367,19 @@ inline glm::vec3 imageEmitterSimulationPosition (
     return result;
 }
 
+// Inverse of imageEmitterSimulationPosition: the native SoA position of a
+// Linux simulation-space particle (world-space orthographic streams are
+// canvas-origin, Linux simulates them canvas-centred).
+inline glm::vec3 nativeParticlePosition (
+    glm::vec3 simulationPosition, bool world, bool orthographic, glm::vec2 canvas
+) {
+    if (world && orthographic) {
+        simulationPosition.x += canvas.x * 0.5f;
+        simulationPosition.y -= canvas.y * 0.5f;
+    }
+    return { simulationPosition.x, -simulationPosition.y, simulationPosition.z };
+}
+
 inline glm::uvec2 imageEmitterReadbackSize (uint32_t sourceWidth, uint32_t sourceHeight) {
     // caps the source at 3840x2160 while preserving its aspect,
     // then divides each capped dimension by four with a two-pixel floor.
@@ -827,6 +840,21 @@ inline float capVelocityDefault (bool isOrthogonal) {
 inline glm::vec2 turbulentVelocitySpeedDefaults (bool isOrthogonal) {
     return isOrthogonal
         ? glm::vec2 (100.0f, 250.0f) : glm::vec2 (0.5f, 1.0f);
+}
+
+struct TurbulenceDefaults {
+    float scale;
+    float speedMin;
+    float speedMax;
+    float timeScale;
+    glm::vec3 mask;
+};
+
+// receives the same scene-context bit as the vortex defaults.
+inline TurbulenceDefaults turbulenceDefaults (bool isOrthogonal) {
+    return isOrthogonal
+        ? TurbulenceDefaults { 0.01f, 500.0f, 1000.0f, 20.0f, glm::vec3 (1.0f, 1.0f, 0.0f) }
+        : TurbulenceDefaults { 0.5f, 1.0f, 5.0f, 1.0f, glm::vec3 (1.0f) };
 }
 
 struct VortexDefaults {

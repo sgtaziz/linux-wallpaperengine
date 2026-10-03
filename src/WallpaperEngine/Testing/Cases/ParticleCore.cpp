@@ -3964,31 +3964,107 @@ TEST_CASE ("Native turbulence lane uses shared birth random and the damped clock
     const glm::vec3 position (0.17f, -0.31f, 0.53f);
     const glm::vec3 mask (1.0f, -0.5f, 0.25f);
     const auto delta = nativeTurbulenceVelocityDelta (
-        position, 0.375f, 0.2f, 0.8f, -4.0f, 12.0f, 0.75f, 0.4f, 2.25f,
+        position, 0.375f, 0.8f, -4.0f, 12.0f, 0.75f, 0.4f, 2.25f,
         mask, 0.125f, 0.8f);
     REQUIRE (delta.has_value ());
-    REQUIRE (delta->x == Catch::Approx (0.0056898450f).margin (0.000002f));
-    REQUIRE (delta->y == Catch::Approx (-0.0138712777f).margin (0.000002f));
-    REQUIRE (delta->z == Catch::Approx (0.0006463223f).margin (0.000002f));
+    REQUIRE (delta->x == Catch::Approx (0.0186109226f).margin (0.000002f));
+    REQUIRE (delta->y == Catch::Approx (-0.0063175955f).margin (0.000002f));
+    REQUIRE (delta->z == Catch::Approx (-0.0017057281f).margin (0.000002f));
     const auto fourfoldClock = nativeTurbulenceVelocityDelta (
-        position, 0.375f, 0.2f, 0.8f, -4.0f, 12.0f, 0.75f, 0.4f, 2.25f,
+        position, 0.375f, 0.8f, -4.0f, 12.0f, 0.75f, 0.4f, 2.25f,
         mask, 0.5f, 0.8f);
     REQUIRE (fourfoldClock.has_value ());
-    REQUIRE (fourfoldClock->x == Catch::Approx (0.0227593798f).margin (0.000002f));
-    REQUIRE (fourfoldClock->y == Catch::Approx (-0.0554851107f).margin (0.000002f));
-    REQUIRE (fourfoldClock->z == Catch::Approx (0.0025852893f).margin (0.000002f));
+    REQUIRE (fourfoldClock->x == Catch::Approx (0.0744436905f).margin (0.000002f));
+    REQUIRE (fourfoldClock->y == Catch::Approx (-0.0252703819f).margin (0.000002f));
+    REQUIRE (fourfoldClock->z == Catch::Approx (-0.0068229125f).margin (0.000002f));
     const auto negativeSpeed = nativeTurbulenceVelocityDelta (
-        position, 0.375f, 0.2f, 0.8f, -8.0f, 4.0f, 0.75f, 0.4f, 2.25f,
+        position, 0.375f, 0.8f, -8.0f, 4.0f, 0.75f, 0.4f, 2.25f,
         mask, 0.125f, 0.8f);
     REQUIRE (negativeSpeed.has_value ());
-    REQUIRE (negativeSpeed->x == Catch::Approx (-0.0739679784f).margin (0.000002f));
-    REQUIRE (negativeSpeed->y == Catch::Approx (0.1803266108f).margin (0.000002f));
-    REQUIRE (negativeSpeed->z == Catch::Approx (-0.0084021902f).margin (0.000002f));
+    REQUIRE (negativeSpeed->x == Catch::Approx (-0.2419419885f).margin (0.000002f));
+    REQUIRE (negativeSpeed->y == Catch::Approx (0.0821287483f).margin (0.000002f));
+    REQUIRE (negativeSpeed->z == Catch::Approx (0.0221744664f).margin (0.000002f));
     const auto zeroMask = nativeTurbulenceVelocityDelta (
         {std::numeric_limits<float>::infinity (), 0.0f, 0.0f}, 0.375f,
-        0.2f, 0.8f, -4.0f, 12.0f, 0.75f, 0.4f, 2.25f, {}, 0.125f, 0.8f);
+        0.8f, -4.0f, 12.0f, 0.75f, 0.4f, 2.25f, {}, 0.125f, 0.8f);
     REQUIRE (zeroMask.has_value ());
     REQUIRE (*zeroMask == glm::vec3 (0.0f));
+}
+
+TEST_CASE ("Turbulence samples noise at the native particle position", "[particle][turbulence]") {
+    // World-space orthographic streams are canvas-origin natively and
+    // canvas-centred in Linux; local and perspective streams only reflect Y.
+    const glm::vec2 canvas (256.0f, 256.0f);
+    const glm::vec3 native (150.0f, 290.0f, 3.0f);
+    for (bool world : { false, true })
+        for (bool ortho : { false, true })
+            REQUIRE (nativeParticlePosition (imageEmitterSimulationPosition (native, world, ortho, canvas), world, ortho, canvas)
+                     == native);
+    REQUIRE (nativeParticlePosition ({0.0f, 0.0f, 0.0f}, true, true, canvas) == glm::vec3 (128.0f, 128.0f, 0.0f));
+    REQUIRE (nativeParticlePosition ({0.0f, 0.0f, 0.0f}, false, true, canvas) == glm::vec3 (0.0f));
+}
+
+TEST_CASE ("Native turbulence reads only the phase span", "[particle][turbulence]") {
+    using WallpaperEngine::Render::Utils::nativeTurbulenceVelocityDelta;
+    // Original 2.8.42 interpreter opcode 0x0e (w10 turbulence
+    // oracle, damped clock 0.027194): phasemin 2..5 and 0.5..1.5 shift
+    // nothing; only phasemax - phasemin reaches the lane.
+    const glm::vec3 position (0.17f, -0.31f, 0.53f);
+    const auto ortho = nativeTurbulenceVelocityDelta (
+        position, 0.6180339f, 5.0f - 2.0f, 500.0f, 500.0f, 0.01f, 20.0f, 12.5f,
+        glm::vec3 (1.0f, 1.0f, 0.0f), 0.027194f, 1.0f);
+    REQUIRE (ortho.has_value ());
+    REQUIRE (ortho->x == Catch::Approx (0.434397429f).margin (0.000002f));
+    REQUIRE (ortho->y == Catch::Approx (0.325819641f).margin (0.000002f));
+    REQUIRE (ortho->z == 0.0f);
+    const auto perspective = nativeTurbulenceVelocityDelta (
+        position, 0.6180339f, 1.5f - 0.5f, 1.0f, 4.0f, 0.5f, 1.0f, 7.75f,
+        glm::vec3 (1.0f), 0.027194f, 1.0f);
+    REQUIRE (perspective.has_value ());
+    REQUIRE (perspective->x == Catch::Approx (0.0257003531f).margin (0.000002f));
+    REQUIRE (perspective->y == Catch::Approx (0.000853145844f).margin (0.000002f));
+    REQUIRE (perspective->z == Catch::Approx (-0.00443954067f).margin (0.000002f));
+}
+
+TEST_CASE ("Turbulence parser defaults follow the native projection branch", "[particle][turbulence][parser]") {
+    using WallpaperEngine::Data::Parsers::ObjectParser;
+    using WallpaperEngine::Data::Model::Particle;
+    using WallpaperEngine::Data::Model::TurbulenceOperator;
+    using WallpaperEngine::Data::Model::Project;
+    using WallpaperEngine::Data::JSON::JSON;
+    Project project {};
+    const auto data = JSON::parse (R"({"id":1,"name":"turb","particle":{"operator":[
+        {"name":"turbulence"},
+        {"name":"turbulence","scale":0.2,"speedmin":3,"speedmax":7,"timescale":4,"mask":"0 1 1"}]}})");
+    const auto object = ObjectParser::parse (data, project);
+    const auto* particle = dynamic_cast<const Particle*> (object.get ());
+    REQUIRE (particle != nullptr);
+    REQUIRE (particle->operators.size () == 2);
+    const auto* omitted = particle->operators[0]->as<TurbulenceOperator> ();
+    const auto* authored = particle->operators[1]->as<TurbulenceOperator> ();
+    REQUIRE (omitted != nullptr);
+    REQUIRE (authored != nullptr);
+    const auto& defaults = omitted->sceneDefaults;
+    REQUIRE ((defaults.scale && defaults.speedMin && defaults.speedMax && defaults.timeScale && defaults.mask));
+    const auto& explicitFields = authored->sceneDefaults;
+    REQUIRE_FALSE ((explicitFields.scale || explicitFields.speedMin || explicitFields.speedMax
+                    || explicitFields.timeScale || explicitFields.mask));
+    REQUIRE (authored->timeScale->value->getFloat () == 4.0f);
+    // orthographic .01 / 500..1000 / 20 / "1 1 0"; perspective .5 / 1..5 / 1 / "1 1 1".
+    const auto ortho = turbulenceDefaults (true);
+    REQUIRE (ortho.scale == 0.01f);
+    REQUIRE (ortho.speedMin == 500.0f);
+    REQUIRE (ortho.speedMax == 1000.0f);
+    REQUIRE (ortho.timeScale == 20.0f);
+    REQUIRE (ortho.mask == glm::vec3 (1.0f, 1.0f, 0.0f));
+    const auto perspective = turbulenceDefaults (false);
+    REQUIRE (perspective.scale == 0.5f);
+    REQUIRE (perspective.speedMin == 1.0f);
+    REQUIRE (perspective.speedMax == 5.0f);
+    REQUIRE (perspective.timeScale == 1.0f);
+    REQUIRE (perspective.mask == glm::vec3 (1.0f));
+    REQUIRE (omitted->timeScale->value->getFloat () == ortho.timeScale);
+    REQUIRE (omitted->scale->value->getFloat () == ortho.scale);
 }
 
 TEST_CASE ("Native particle scene clock retains double precision and wraps on float threshold",
