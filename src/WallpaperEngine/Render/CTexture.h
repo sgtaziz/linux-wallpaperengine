@@ -34,6 +34,9 @@ public:
     static uint32_t mipLevelCount (const Texture& header, uint32_t imageIndex);
     [[nodiscard]] uint32_t getRealWidth () const override;
     [[nodiscard]] uint32_t getRealHeight () const override;
+    /** TEXI image dimensions: the authored data inside the uploaded pages. */
+    [[nodiscard]] uint32_t getImageWidth () const;
+    [[nodiscard]] uint32_t getImageHeight () const;
     [[nodiscard]] TextureFormat getFormat () const override;
     [[nodiscard]] uint32_t getFlags () const override;
     [[nodiscard]] const glm::vec4* getResolution () const override;

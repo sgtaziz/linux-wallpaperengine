@@ -20,6 +20,7 @@
 #include "GLSLContext.h"
 #include "ExactSourceCache.h"
 #include "ParticleRopeShader.h"
+#include "ParticleSpriteShader.h"
 #include "ShaderMetadata.h"
 #include "NativeReflectionVectors.h"
 #include "WallpaperEngine/Assets/AssetLoadException.h"
@@ -156,6 +157,15 @@ ShaderUnit::ShaderUnit (
         && m_overrideCombos.contains ("LINUX_CPU_ROPE_UV")
         && m_overrideCombos.at ("LINUX_CPU_ROPE_UV") != 0)
         m_content = particleRopeCpuUVSource (std::move (m_content));
+    if (m_type == GLSLContext::UnitType_Vertex && m_file == "genericparticle"
+        && m_overrideCombos.contains ("LINUX_CPU_SPRITE_UV")
+        && m_overrideCombos.at ("LINUX_CPU_SPRITE_UV") != 0) {
+        // Without the CPU windows the native g_RenderVar1 grid still applies.
+        if (auto patched = particleSpriteCpuUVSource (m_content))
+            m_content = std::move (*patched);
+        else
+            sLog.error ("Particle sprite atlas shader source differs; using the uniform frame grid");
+    }
     // pre-process the shader so the units are clear
     this->preprocess ();
 }

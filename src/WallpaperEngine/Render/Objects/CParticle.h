@@ -1,6 +1,7 @@
 #pragma once
 
 #include "CRenderable.h"
+#include "ParticleAtlas.h"
 #include "ParticleCore.h"
 #include "ParticleEventInheritance.h"
 #include "ParticleInstancePatch.h"
@@ -243,6 +244,7 @@ protected:
     void applyParallaxToModelMatrix ();
     void updateParticleViewProjection ();
     void updateParticleRenderVars ();
+    void setupAtlas (const std::shared_ptr<const TextureProvider>& texture);
 
 private:
     [[nodiscard]] const CParticle* instanceOverrideOwner () const;
@@ -398,8 +400,9 @@ private:
     int m_spritesheetFrames { 0 };
     int m_animationFrameCount { 0 };
     bool m_separatePageAnimation { false };
-    float m_spritesheetDuration { 1.0f };
-    bool m_authoredFrameTimeline { false };
+    // Same-page TEXS atlas: per-frame sampling windows carried per vertex,
+    // shared by every node on the same texture page.
+    std::shared_ptr<const ParticleAtlas::Layout> m_atlas;
 
     // Material shader constants
     float m_overbright { 1.0f };
@@ -433,7 +436,8 @@ private:
     bool m_ropeUVSmoothing { true }; // rope only
 
     // Per-vertex float counts for different renderer types
-    static constexpr int SPRITE_FLOATS_PER_VERTEX = 17;
+    // 17 native floats plus the CPU atlas UVs (current xy, next zw) and blend.
+    static constexpr int SPRITE_FLOATS_PER_VERTEX = 22;
     static constexpr int ROPE_FLOATS_PER_VERTEX = 37;
 
     // Transformed origin (screen space to centered space conversion)
