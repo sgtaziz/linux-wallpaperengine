@@ -2,11 +2,18 @@
 
 #include "WallpaperEngine/Scripting/LayerPropertyWrites.h"
 
+#include <cmath>
+#include <limits>
 #include <string>
 
+using WallpaperEngine::Scripting::convertLayerBoolean;
+using WallpaperEngine::Scripting::convertLayerFloat;
+using WallpaperEngine::Scripting::convertLayerInt;
 using WallpaperEngine::Scripting::convertLayerString;
+using WallpaperEngine::Scripting::convertLayerVector;
 using WallpaperEngine::Scripting::defineLayerExpando;
-using WallpaperEngine::Scripting::LayerStringWrite;
+using WallpaperEngine::Scripting::layerPropertyKey;
+using WallpaperEngine::Scripting::LayerWrite;
 
 namespace {
 struct Context {
@@ -37,29 +44,37 @@ struct Context {
     }
 };
 
-// A layer wrapper with one String host property. It routes writes the way
-// the scriptable-object adapter does: the host name converts as String;
-// every other name is an expando.
+// A layer wrapper with a String and a Float host property. It routes writes
+// the way the scriptable-object adapter does: host names go through their
+// converter; every other name is an expando.
 std::string layerText = "initial";
+float layerVolume = 0.5f;
 JSClassID layerClass = 0;
 
 JSValue layerGet (JSContext* context, JSValueConst, JSAtom atom, JSValueConst) {
     const char* name = JS_AtomToCString (context, atom);
-    const bool text = name && std::string (name) == "text";
+    const std::string field = name ? name : "";
     JS_FreeCString (context, name);
-    return text ? JS_NewStringLen (context, layerText.data (), layerText.size ()) : JS_UNDEFINED;
+    if (field == "volume") return JS_NewFloat64 (context, layerVolume);
+    return field == "text" ? JS_NewStringLen (context, layerText.data (), layerText.size ()) : JS_UNDEFINED;
 }
 
 int layerSet (JSContext* context, JSValueConst, JSAtom atom, JSValueConst value, JSValueConst receiver, int flags) {
     const char* name = JS_AtomToCString (context, atom);
-    const bool text = name && std::string (name) == "text";
+    const std::string field = name ? name : "";
     JS_FreeCString (context, name);
-    if (!text) return defineLayerExpando (context, receiver, atom, value, flags);
+    if (field == "volume") {
+        float converted = 0.0f;
+        const auto result = convertLayerFloat (context, value, converted);
+        if (result == LayerWrite::Assign) layerVolume = converted;
+        return result == LayerWrite::Exception ? -1 : 1;
+    }
+    if (field != "text") return defineLayerExpando (context, receiver, atom, value, flags);
     std::string converted;
     switch (convertLayerString (context, value, converted)) {
-        case LayerStringWrite::Exception: return -1;
-        case LayerStringWrite::Ignore: return 1;
-        case LayerStringWrite::Assign: layerText = converted; return 1;
+        case LayerWrite::Exception: return -1;
+        case LayerWrite::Ignore: return 1;
+        case LayerWrite::Assign: layerText = converted; return 1;
     }
     return -1;
 }
@@ -95,7 +110,7 @@ TEST_CASE ("String layer properties take ToString of non-string values", "[scrip
         JSValue value = js.eval (item.source);
         REQUIRE_FALSE (JS_IsException (value));
         std::string result = "unchanged";
-        CHECK (convertLayerString (js.context, value, result) == LayerStringWrite::Assign);
+        CHECK (convertLayerString (js.context, value, result) == LayerWrite::Assign);
         CHECK (result == item.expected);
         JS_FreeValue (js.context, value);
     }
@@ -106,7 +121,7 @@ TEST_CASE ("String layer properties skip null and undefined without an exception
     for (const char* source : {"null", "undefined"}) {
         JSValue value = js.eval (source);
         std::string result = "unchanged";
-        CHECK (convertLayerString (js.context, value, result) == LayerStringWrite::Ignore);
+        CHECK (convertLayerString (js.context, value, result) == LayerWrite::Ignore);
         CHECK (result == "unchanged");
         CHECK_FALSE (JS_HasException (js.context));
     }
@@ -116,7 +131,7 @@ TEST_CASE ("A throwing ToString reaches the script", "[script][layer]") {
     Context js;
     JSValue value = js.eval ("Symbol ('s')");
     std::string result = "unchanged";
-    CHECK (convertLayerString (js.context, value, result) == LayerStringWrite::Exception);
+    CHECK (convertLayerString (js.context, value, result) == LayerWrite::Exception);
     CHECK (result == "unchanged");
     JSValue exception = JS_GetException (js.context);
     CHECK (JS_IsError (exception));
@@ -151,4 +166,183 @@ TEST_CASE ("An expando write to a non-extensible layer throws in module code", "
     installLayer (js);
     CHECK (js.evaluateModule ("Object.preventExtensions (layer);\nlayer.opacity = 1;\n").find ("extensible")
            != std::string::npos);
+}
+
+TEST_CASE ("Boolean layer properties accept only booleans", "[script][layer]") {
+    Context js;
+    for (const char* source : {"true", "false"}) {
+        JSValue value = js.eval (source);
+        bool result = std::string (source) != "true";
+        CHECK (convertLayerBoolean (value, result) == LayerWrite::Assign);
+        CHECK (result == (std::string (source) == "true"));
+    }
+    // Native IsBoolean rejects numbers, strings and objects.
+    for (const char* source : {"1", "0", "'true'", "null", "undefined", "({})", "new Boolean (true)"}) {
+        JSValue value = js.eval (source);
+        bool result = false;
+        CHECK (convertLayerBoolean (value, result) == LayerWrite::Ignore);
+        CHECK_FALSE (result);
+        JS_FreeValue (js.context, value);
+    }
+}
+
+TEST_CASE ("Int layer properties use ToInt32 for any number", "[script][layer]") {
+    Context js;
+    const struct {
+        const char* source;
+        int32_t expected;
+    } cases[] {
+        {"7", 7},
+        {"3.7", 3},
+        {"-3.7", -3},
+        {"NaN", 0},
+        {"Infinity", 0},
+        {"-Infinity", 0},
+        {"2 ** 32 + 5", 5},
+        {"2 ** 31", std::numeric_limits<int32_t>::min ()},
+        {"1e20", 1661992960},
+    };
+    for (const auto& item : cases) {
+        JSValue value = js.eval (item.source);
+        int32_t result = -1;
+        CHECK (convertLayerInt (js.context, value, result) == LayerWrite::Assign);
+        CHECK (result == item.expected);
+    }
+    for (const char* source : {"'5'", "true", "undefined", "null", "5n", "({valueOf () { return 5; }})"}) {
+        JSValue value = js.eval (source);
+        int32_t result = -1;
+        CHECK (convertLayerInt (js.context, value, result) == LayerWrite::Ignore);
+        CHECK (result == -1);
+        JS_FreeValue (js.context, value);
+    }
+}
+
+TEST_CASE ("Float layer properties keep NaN and Infinity and skip non-numbers", "[script][layer]") {
+    Context js;
+    const auto convert = [&] (const char* source, float& result) {
+        JSValue value = js.eval (source);
+        const auto written = convertLayerFloat (js.context, value, result);
+        JS_FreeValue (js.context, value);
+        return written;
+    };
+    float result = 0.0f;
+    CHECK (convert ("0.25", result) == LayerWrite::Assign);
+    CHECK (result == 0.25f);
+    CHECK (convert ("NaN", result) == LayerWrite::Assign);
+    CHECK (std::isnan (result));
+    CHECK (convert ("-Infinity", result) == LayerWrite::Assign);
+    CHECK (result == -std::numeric_limits<float>::infinity ());
+    // cvtsd2ss rounds to nearest: 2^128 - 2^104 is the largest float, and
+    // the halfway point 2^128 - 2^103 rounds up to Infinity.
+    CHECK (convert ("2 ** 128 - 2 ** 103 - 2 ** 80", result) == LayerWrite::Assign);
+    CHECK (result == std::numeric_limits<float>::max ());
+    CHECK (convert ("-(2 ** 128 - 2 ** 103)", result) == LayerWrite::Assign);
+    CHECK (result == -std::numeric_limits<float>::infinity ());
+    CHECK (convert ("1e300", result) == LayerWrite::Assign);
+    CHECK (result == std::numeric_limits<float>::infinity ());
+    // Installed 2955378002 and 2896906752 write `array[i].volume = shared.volume`
+    // before `shared.volume` is set.
+    result = 0.5f;
+    for (const char* source : {"undefined", "null", "'1'", "true", "[1]"}) {
+        CHECK (convert (source, result) == LayerWrite::Ignore);
+        CHECK (result == 0.5f);
+    }
+    CHECK_FALSE (JS_HasException (js.context));
+}
+
+TEST_CASE ("Vector layer properties read object components or broadcast a number", "[script][layer]") {
+    Context js;
+    const auto convert = [&] (const char* source, int count, bool angle, float* components) {
+        JSValue value = js.eval (source);
+        REQUIRE_FALSE (JS_IsException (value));
+        const auto written = convertLayerVector (js.context, value, count, angle, components);
+        JS_FreeValue (js.context, value);
+        return written;
+    };
+    float vector[4] {-1.0f, -1.0f, -1.0f, -1.0f};
+    CHECK (convert ("({x: 1, y: 2, z: 3, w: 4})", 3, false, vector) == LayerWrite::Assign);
+    CHECK ((vector[0] == 1.0f && vector[1] == 2.0f && vector[2] == 3.0f && vector[3] == -1.0f));
+    CHECK (convert ("2.5", 4, false, vector) == LayerWrite::Assign);
+    CHECK ((vector[0] == 2.5f && vector[1] == 2.5f && vector[2] == 2.5f && vector[3] == 2.5f));
+    CHECK (convert ("({x: NaN, y: Infinity})", 2, false, vector) == LayerWrite::Assign);
+    CHECK ((std::isnan (vector[0]) && std::isinf (vector[1])));
+
+    // A missing or non-number component skips the whole write.
+    for (const char* source : {"({x: 1, y: 2})", "({x: 1, y: '2', z: 3})", "[1, 2, 3]", "'1 2 3'", "null",
+                               "undefined", "true"}) {
+        float unchanged[3] {7.0f, 7.0f, 7.0f};
+        CHECK (convert (source, 3, false, unchanged) == LayerWrite::Ignore);
+        CHECK ((unchanged[0] == 7.0f && unchanged[1] == 7.0f && unchanged[2] == 7.0f));
+    }
+    CHECK_FALSE (JS_HasException (js.context));
+}
+
+TEST_CASE ("Angle objects convert from degrees but a broadcast number does not", "[script][layer]") {
+    Context js;
+    float angles[3] {};
+    JSValue object = js.eval ("({x: 90, y: 0, z: -180})");
+    CHECK (convertLayerVector (js.context, object, 3, true, angles) == LayerWrite::Assign);
+    JS_FreeValue (js.context, object);
+    CHECK (angles[0] == 90.0f * 0.0174532924f);
+    CHECK (angles[1] == 0.0f);
+    CHECK (angles[2] == -180.0f * 0.0174532924f);
+    // The scalar path stores the number on every axis unchanged.
+    JSValue scalar = js.eval ("90");
+    CHECK (convertLayerVector (js.context, scalar, 3, true, angles) == LayerWrite::Assign);
+    CHECK ((angles[0] == 90.0f && angles[1] == 90.0f && angles[2] == 90.0f));
+}
+
+TEST_CASE ("Vector components are all read before any is checked", "[script][layer]") {
+    Context js;
+    JSValue value = js.eval ("globalThis.reads = [];\n"
+                             "({get x () { reads.push ('x'); return 'bad'; },\n"
+                             "  get y () { reads.push ('y'); return 2; },\n"
+                             "  get z () { reads.push ('z'); return 3; }})");
+    float vector[3] {7.0f, 7.0f, 7.0f};
+    CHECK (convertLayerVector (js.context, value, 3, false, vector) == LayerWrite::Ignore);
+    JS_FreeValue (js.context, value);
+    CHECK (vector[0] == 7.0f);
+    JSValue reads = js.eval ("reads.join ('')");
+    const char* order = JS_ToCString (js.context, reads);
+    CHECK (std::string (order) == "xyz");
+    JS_FreeCString (js.context, order);
+    JS_FreeValue (js.context, reads);
+
+    JSValue throwing = js.eval ("({get x () { throw new Error ('component'); }})");
+    CHECK (convertLayerVector (js.context, throwing, 2, false, vector) == LayerWrite::Exception);
+    JS_FreeValue (js.context, throwing);
+    JSValue exception = JS_GetException (js.context);
+    CHECK (JS_IsError (exception));
+    JS_FreeValue (js.context, exception);
+}
+
+TEST_CASE ("A wrong-typed write leaves the layer unchanged and the handler continues", "[script][layer]") {
+    Context js;
+    installLayer (js);
+    layerText = "initial";
+    layerVolume = 0.5f;
+    REQUIRE (js.evaluateModule ("const shared = {};\n"
+                                "layer.volume = shared.volume;\n"
+                                "layer.volume = 'loud';\n"
+                                "if (layer.volume !== 0.5) throw new Error ('volume changed');\n"
+                                "layer.text = 'after';\n"
+                                "layer.volume = NaN;\n")
+                 .empty ());
+    CHECK (layerText == "after");
+    CHECK (std::isnan (layerVolume));
+}
+
+TEST_CASE ("Layer property names match native host names exactly", "[script][layer]") {
+    // Text settings are registered in lowercase and looked up
+    // case-sensitively.
+    CHECK (layerPropertyKey ("backgroundbrightness") == std::optional<std::string_view> ("backgroundBrightness"));
+    CHECK (layerPropertyKey ("pointsize") == std::optional<std::string_view> ("pointSize"));
+    CHECK (layerPropertyKey ("backgroundcolor") == std::optional<std::string_view> ("backgroundColor"));
+    // The renderer's camel-case keys are not native names.
+    CHECK_FALSE (layerPropertyKey ("backgroundBrightness").has_value ());
+    CHECK_FALSE (layerPropertyKey ("pointSize").has_value ());
+    CHECK_FALSE (layerPropertyKey ("maxRows").has_value ());
+    // Other names pass through unchanged, including native camel-case ones.
+    CHECK (layerPropertyKey ("parallaxDepth") == std::optional<std::string_view> ("parallaxDepth"));
+    CHECK (layerPropertyKey ("Origin") == std::optional<std::string_view> ("Origin"));
 }

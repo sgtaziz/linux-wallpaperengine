@@ -49,6 +49,12 @@ public:
     [[nodiscard]] const std::string& getVerticalAlign () const { return m_verticalAlign; }
     void setHorizontalAlign (std::string alignment) { m_horizontalAlign = std::move (alignment); }
     void setVerticalAlign (std::string alignment) { m_verticalAlign = std::move (alignment); }
+    // The `font` host property (2.8.42: String at 0x490, change
+    // callback). The callback's relayout compares the
+    // font with the one last laid out and rebuilds the text with the new font
+    // when they differ. render () does the same with this value.
+    [[nodiscard]] const std::string& getFont () const { return m_font; }
+    void setFont (std::string font) { m_font = std::move (font); }
     [[nodiscard]] const float& getBrightness () const override;
     [[nodiscard]] const float& getUserAlpha () const override;
     [[nodiscard]] const float& getAlpha () const override;
@@ -68,6 +74,7 @@ private:
     bool initFreeType ();
     bool loadEmbeddedFont ();
     bool loadSystemFont ();
+    bool reloadFont ();
     FT_Face faceForCodepoint (char32_t codepoint);
     long computeCharacterSize26_6 () const;
     void setupEffects ();
@@ -78,6 +85,8 @@ private:
     const Text& m_text;
     std::string m_horizontalAlign;
     std::string m_verticalAlign;
+    std::string m_font;
+    std::string m_loadedFont;
     std::string m_lastRenderedText;
     long m_lastCharacterSize26_6 = 0;
     glm::vec2 m_lastSpacing = { 0.0f, 0.0f };

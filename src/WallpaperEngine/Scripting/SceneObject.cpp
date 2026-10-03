@@ -465,11 +465,11 @@ JSValue get_layer (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst
 	ScopeGuard guard ([=] { JS_FreeCString (ctx, result); });
 
 	for (auto object : container->getScene ().getScriptLayers ()) {
-	    if (object->getObject ().name != result) {
+	    if (!object->is<ScriptableObject> ()) {
 		continue;
 	    }
 
-	    if (!object->is<ScriptableObject> ()) {
+	    if (object->as<ScriptableObject> ()->getScriptName () != result) {
 		continue;
 	    }
 
@@ -498,8 +498,12 @@ static const WallpaperEngine::Render::CObject* resolve_scene_layer (
         if (!name) return nullptr;
         const std::string requested (name);
         JS_FreeCString (ctx, name);
-        for (const auto* object : owner.getScene ().getScriptLayers ())
-            if (object->getObject ().name == requested) return object;
+        // Match the name that script writes to `layer.name` update, as getLayer does.
+        for (const auto* object : owner.getScene ().getScriptLayers ()) {
+            const auto* scriptable = object->is<ScriptableObject> () ? object->as<ScriptableObject> () : nullptr;
+            if ((scriptable ? scriptable->getScriptName () : object->getObject ().name) == requested)
+                return object;
+        }
     }
     return nullptr;
 }
