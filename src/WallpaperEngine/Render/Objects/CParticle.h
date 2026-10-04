@@ -389,6 +389,7 @@ private:
     glm::vec3 m_orientationRight { 1.0f, 0.0f, 0.0f };
     glm::vec3 m_orientationForward { 0.0f, 0.0f, 1.0f };
     glm::vec3 m_viewUp { 0.0f, 1.0f, 0.0f };
+    glm::vec3 m_topDownViewUp { 0.0f, 1.0f, 0.0f };
     glm::vec3 m_viewRight { 1.0f, 0.0f, 0.0f };
     glm::vec3 m_eyePosition { 0.0f, 0.0f, 1000.0f };
     glm::vec4 m_renderVar0 { 0.0f };

@@ -19,6 +19,7 @@
 
 #include "GLSLContext.h"
 #include "ExactSourceCache.h"
+#include "ParticleRefractionShader.h"
 #include "ParticleRopeShader.h"
 #include "ParticleSpriteShader.h"
 #include "ShaderMetadata.h"
@@ -165,6 +166,16 @@ ShaderUnit::ShaderUnit (
             m_content = std::move (*patched);
         else
             sLog.error ("Particle sprite atlas shader source differs; using the uniform frame grid");
+    }
+    if (m_type == GLSLContext::UnitType_Fragment && m_file == "genericparticle"
+        && m_overrideCombos.contains ("LINUX_TOPDOWN_REFRACTION")
+        && m_overrideCombos.at ("LINUX_TOPDOWN_REFRACTION") != 0) {
+        // The owner reflects g_ViewUp only for a unit reporting this patch.
+        if (auto patched = particleTopDownRefractionSource (m_content)) {
+            m_content = std::move (*patched);
+            m_topDownRefraction = true;
+        } else
+            sLog.error ("Particle refraction shader source differs; keeping its GL offset orientation");
     }
     // pre-process the shader so the units are clear
     this->preprocess ();
