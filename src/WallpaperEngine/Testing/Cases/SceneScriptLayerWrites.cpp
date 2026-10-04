@@ -1,6 +1,8 @@
 #include <catch2/catch_test_macros.hpp>
 
+#include "WallpaperEngine/Data/Builders/UserSettingBuilder.h"
 #include "WallpaperEngine/Scripting/LayerPropertyWrites.h"
+#include "WallpaperEngine/Scripting/SceneSettingProperties.h"
 
 #include <cmath>
 #include <limits>
@@ -345,4 +347,100 @@ TEST_CASE ("Layer property names match native host names exactly", "[script][lay
     // Other names pass through unchanged, including native camel-case ones.
     CHECK (layerPropertyKey ("parallaxDepth") == std::optional<std::string_view> ("parallaxDepth"));
     CHECK (layerPropertyKey ("Origin") == std::optional<std::string_view> ("Origin"));
+}
+
+TEST_CASE ("thisScene general properties map to their own scene fields with native host types",
+           "[script][scene]") {
+    using WallpaperEngine::Data::Builders::UserSettingBuilder;
+    using WallpaperEngine::Data::Model::SceneData;
+    using WallpaperEngine::Scripting::SceneSettingProperty;
+    using WallpaperEngine::Scripting::SceneSettingType;
+    using WallpaperEngine::Scripting::sceneSettingProperties;
+    SceneData scene {};
+    scene.clearEnabled = UserSettingBuilder::fromValue (true);
+    scene.colors.ambient = UserSettingBuilder::fromValue (glm::vec3 (0.1f));
+    scene.colors.skylight = UserSettingBuilder::fromValue (glm::vec3 (0.2f));
+    scene.colors.clear = UserSettingBuilder::fromValue (glm::vec3 (0.3f));
+    scene.camera.bloom.enabled = UserSettingBuilder::fromValue (false);
+    scene.camera.bloom.strength = UserSettingBuilder::fromValue (2.5f);
+    const auto find = [] (const char* name) -> const SceneSettingProperty* {
+        for (const auto& property : sceneSettingProperties ())
+            if (std::string (property.name) == name) return &property;
+        return nullptr;
+    };
+    // clearenabled is the clear flag (it used to read bloom), and
+    // skylightcolor is not the ambient color.
+    REQUIRE (&find ("clearenabled")->setting (scene) == &scene.clearEnabled);
+    REQUIRE (find ("clearenabled")->setting (scene)->value->getBool ());
+    REQUIRE (&find ("bloom")->setting (scene) == &scene.camera.bloom.enabled);
+    REQUIRE (&find ("skylightcolor")->setting (scene) == &scene.colors.skylight);
+    REQUIRE (&find ("ambientcolor")->setting (scene) == &scene.colors.ambient);
+    REQUIRE (&find ("bloomstrength")->setting (scene) == &scene.camera.bloom.strength);
+    // Native host types: 6 bool, 4 float, 2 Vec3.
+    for (const char* name : {"bloom", "clearenabled", "camerafade", "camerashake", "cameraparallax"})
+        REQUIRE (find (name)->type == SceneSettingType::Bool);
+    for (const char* name : {"bloomstrength", "bloomthreshold", "fov", "nearz", "farz", "camerashakespeed",
+                             "camerashakeamplitude", "camerashakeroughness", "cameraparallaxamount",
+                             "cameraparallaxdelay", "cameraparallaxmouseinfluence"})
+        REQUIRE (find (name)->type == SceneSettingType::Float);
+    for (const char* name : {"clearcolor", "ambientcolor", "skylightcolor"})
+        REQUIRE (find (name)->type == SceneSettingType::Vec3);
+}
+
+TEST_CASE ("thisScene setters store converted values and reads keep float precision", "[script][scene]") {
+    using WallpaperEngine::Data::Builders::UserSettingBuilder;
+    using WallpaperEngine::Data::Model::DynamicValue;
+    using WallpaperEngine::Scripting::SceneSettingType;
+    using WallpaperEngine::Scripting::sceneSettingScalarValue;
+    using WallpaperEngine::Scripting::storeSceneSetting;
+    Context js;
+    const auto store = [&] (const char* source, DynamicValue& value, SceneSettingType type) {
+        JSValue input = js.eval (source);
+        REQUIRE_FALSE (JS_IsException (input));
+        const bool stored = storeSceneSetting (js.context, input, value, type);
+        JS_FreeValue (js.context, input);
+        return stored;
+    };
+    const auto read = [&] (const DynamicValue& value, SceneSettingType type) {
+        JSValue result = sceneSettingScalarValue (js.context, value, type);
+        double number = -1.0;
+        if (JS_IsBool (result)) number = JS_VALUE_GET_BOOL (result) ? 1.0 : 0.0;
+        else REQUIRE (JS_ToFloat64 (js.context, &number, result) == 0);
+        JS_FreeValue (js.context, result);
+        return number;
+    };
+
+    // Native type 4 is a float: a strength of 2.5 must not
+    // read back as the integer 2.
+    auto strength = UserSettingBuilder::fromValue (1.0f);
+    REQUIRE (store ("2.5", *strength->value, SceneSettingType::Float));
+    REQUIRE (strength->value->getFloat () == 2.5f);
+    REQUIRE (read (*strength->value, SceneSettingType::Float) == 2.5);
+    // A value of the wrong type is skipped without an exception.
+    REQUIRE (store ("'3'", *strength->value, SceneSettingType::Float));
+    REQUIRE (strength->value->getFloat () == 2.5f);
+    REQUIRE_FALSE (JS_HasException (js.context));
+
+    auto enabled = UserSettingBuilder::fromValue (true);
+    REQUIRE (store ("false", *enabled->value, SceneSettingType::Bool));
+    REQUIRE_FALSE (enabled->value->getBool ());
+    REQUIRE (store ("1", *enabled->value, SceneSettingType::Bool));
+    REQUIRE_FALSE (enabled->value->getBool ());
+    REQUIRE (read (*enabled->value, SceneSettingType::Bool) == 0.0);
+
+    auto color = UserSettingBuilder::fromValue (glm::vec3 (0.0f));
+    REQUIRE (store ("({x:0.25,y:0.5,z:0.75})", *color->value, SceneSettingType::Vec3));
+    REQUIRE (color->value->getVec3 () == glm::vec3 (0.25f, 0.5f, 0.75f));
+    REQUIRE (store ("({x:1,y:1})", *color->value, SceneSettingType::Vec3));
+    REQUIRE (color->value->getVec3 () == glm::vec3 (0.25f, 0.5f, 0.75f));
+    REQUIRE (store ("0.5", *color->value, SceneSettingType::Vec3));
+    REQUIRE (color->value->getVec3 () == glm::vec3 (0.5f));
+
+    // A throwing component read is the only failure; the exception stays
+    // pending for the setter to propagate.
+    REQUIRE_FALSE (store ("({get x(){ throw new Error('boom'); },y:0,z:0})", *color->value,
+                          SceneSettingType::Vec3));
+    REQUIRE (JS_HasException (js.context));
+    JS_FreeValue (js.context, JS_GetException (js.context));
+    REQUIRE (color->value->getVec3 () == glm::vec3 (0.5f));
 }
