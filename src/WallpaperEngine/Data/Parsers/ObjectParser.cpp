@@ -1572,10 +1572,12 @@ ParticleOperatorUniquePtr ObjectParser::parseParticleOperator (
 	    it.user ("speedmax", properties, 1000.0f), it.user ("timescale", properties, 20.0f),
 	    it.user ("mask", properties, glm::vec3 (1.0f, 1.0f, 0.0f)), it.user ("phasemin", properties, 0.0f),
 	    it.user ("phasemax", properties, 0.0f), it.user ("audioprocessingmode", properties, 0),
-	    it.user ("audioprocessingbounds", properties, glm::vec2 (0.0f, 1.0f)),
-	    it.user ("audioprocessingexponent", properties, 1.0f),
+	    // The turbulence builder shares audio parser 
+	    // with emitters, turbulent velocity and vortex: "0.8 1.0", 2, 0..1.
+	    it.user ("audioprocessingbounds", properties, glm::vec2 (0.8f, 1.0f)),
+	    it.user ("audioprocessingexponent", properties, 2.0f),
 	    it.user ("audioprocessingfrequencystart", properties, 0),
-	    it.user ("audioprocessingfrequencyend", properties, 15)
+	    it.user ("audioprocessingfrequencyend", properties, 1)
 	);
     } else if (name == "vortex" || name == "vortex_v2") {
 	const bool v2 = name == "vortex_v2";

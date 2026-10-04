@@ -1683,6 +1683,68 @@ TEST_CASE ("Vortex audio settings retain native defaults and authored frequency 
     REQUIRE (vortex->audioProcessingFrequencyEnd->value->getInt () == 9);
 }
 
+TEST_CASE ("Every particle audio consumer shares the native audio parser defaults", "[audio][particle]") {
+    using WallpaperEngine::Audio::ParticleAudioSettings;
+    using WallpaperEngine::Audio::particleAudioResponse;
+    using WallpaperEngine::Data::JSON::JSON;
+    using WallpaperEngine::Data::Model::Particle;
+    using WallpaperEngine::Data::Model::Project;
+    using WallpaperEngine::Data::Model::TurbulenceOperator;
+    using WallpaperEngine::Data::Model::TurbulentVelocityRandomInitializer;
+    using WallpaperEngine::Data::Model::VortexOperator;
+    using WallpaperEngine::Data::Parsers::ObjectParser;
+    // inserts "0.8 1.0", exponent 2 and bins 0..1 for every caller in
+    // emitters, turbulentvelocityrandom, turbulence, vortex, vortex_v2.
+    Project project {};
+    const auto data = JSON::parse (R"({"id":3,"name":"audio-defaults","particle":{
+        "emitter":[{"name":"sphererandom"}],
+        "initializer":[{"name":"turbulentvelocityrandom"}],
+        "operator":[{"name":"turbulence","audioprocessingmode":2},{"name":"vortex"},{"name":"vortex_v2"}]}})");
+    const auto object = ObjectParser::parse (data, project);
+    const auto* particle = dynamic_cast<const Particle*> (object.get ());
+    REQUIRE (particle != nullptr);
+    REQUIRE (particle->emitters[0].audioProcessingBounds == glm::vec2 (0.8f, 1.0f));
+    REQUIRE (particle->emitters[0].audioProcessingExponent == 2.0f);
+    REQUIRE (particle->emitters[0].audioProcessingFrequencyStart == 0);
+    REQUIRE (particle->emitters[0].audioProcessingFrequencyEnd == 1);
+    const auto requireDefaults = [] (const auto& record) {
+        REQUIRE (record.audioProcessingBounds->value->getVec2 () == glm::vec2 (0.8f, 1.0f));
+        REQUIRE (record.audioProcessingExponent->value->getFloat () == 2.0f);
+        REQUIRE (record.audioProcessingFrequencyStart->value->getInt () == 0);
+        REQUIRE (record.audioProcessingFrequencyEnd->value->getInt () == 1);
+    };
+    requireDefaults (*particle->initializers[0]->as<TurbulentVelocityRandomInitializer> ());
+    const auto& turbulence = *particle->operators[0]->as<TurbulenceOperator> ();
+    requireDefaults (turbulence);
+    requireDefaults (*particle->operators[1]->as<VortexOperator> ());
+    requireDefaults (*particle->operators[2]->as<VortexOperator> ());
+
+    // Original on the w08-audio "ramp" spectrum:
+    // right-channel mode with the shared defaults returns 0x3e7ffff0; the old
+    // turbulence defaults (0..1, exponent 1, bins 0..15) would give 0x3f78d4fd.
+    constexpr std::array<uint32_t, 32> ramp {
+        0x00000000u, 0x3d888889u, 0x3e088889u, 0x3e4ccccdu, 0x3e888889u, 0x3eaaaaabu, 0x3ecccccdu, 0x3eeeeeefu,
+        0x3f088889u, 0x3f19999au, 0x3f2aaaabu, 0x3f3bbbbcu, 0x3f4ccccdu, 0x3f5ddddeu, 0x3f6eeeefu, 0x3f800000u,
+        0x3f666666u, 0x3f570a3du, 0x3f47ae14u, 0x3f3851ecu, 0x3f28f5c3u, 0x3f19999au, 0x3f0a3d71u, 0x3ef5c28fu,
+        0x3ed70a3du, 0x3eb851ecu, 0x3e99999au, 0x3e75c28fu, 0x3e3851ecu, 0x3df5c28fu, 0x3d75c28fu, 0x00000000u};
+    std::array<float, 16> left {};
+    std::array<float, 16> right {};
+    for (size_t bin = 0; bin < 16; ++bin) {
+        left[bin] = std::bit_cast<float> (ramp[bin]);
+        right[bin] = std::bit_cast<float> (ramp[bin + 16]);
+    }
+    const glm::vec2 bounds = turbulence.audioProcessingBounds->value->getVec2 ();
+    const ParticleAudioSettings settings {
+        .mode = turbulence.audioProcessingMode->value->getInt (),
+        .lowerBound = bounds.x,
+        .upperBound = bounds.y,
+        .exponent = turbulence.audioProcessingExponent->value->getFloat (),
+        .firstBand = turbulence.audioProcessingFrequencyStart->value->getInt (),
+        .lastBand = turbulence.audioProcessingFrequencyEnd->value->getInt (),
+    };
+    REQUIRE (std::abs (particleAudioResponse (left, right, settings) - std::bit_cast<float> (0x3e7ffff0u)) < 1.0e-6f);
+}
+
 TEST_CASE ("Capture cadence uses native FPS delay and relative waits after work", "[audio][capture-worker]") {
     using namespace WallpaperEngine::Audio::Drivers::Recorders;
     using namespace std::chrono_literals;
