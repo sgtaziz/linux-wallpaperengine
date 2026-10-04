@@ -4,6 +4,7 @@
 #include "ScriptEngine.h"
 #include "SceneScriptClassRegistration.h"
 #include "SceneCameraTransforms.h"
+#include "SceneSettingProperties.h"
 #include "ScriptableObject.h"
 #include "WorkshopScriptAssetPath.h"
 #include "WallpaperEngine/Data/JSON.h"
@@ -284,143 +285,21 @@ SceneObject* get_opaque (JSContext* ctx, JSValueConst this_val) {
     return static_cast<SceneObject*> (JS_GetOpaque2 (ctx, this_val, engine->getSceneObject ()->getClassId ()));
 }
 
-JSValue get_bloom (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
+JSValue scene_get_setting (JSContext* ctx, JSValueConst this_val, int, JSValueConst*, int magic) {
     auto* container = get_opaque (ctx, this_val);
     if (!container) return JS_EXCEPTION;
-
-    return JS_NewBool (ctx, container->getScene ().getScene ().camera.bloom.enabled->value->getBool ());
-}
-
-JSValue get_bloomstrength (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
-    auto* container = get_opaque (ctx, this_val);
-    if (!container) return JS_EXCEPTION;
-
-    return JS_NewInt32 (ctx, container->getScene ().getScene ().camera.bloom.strength->value->getInt ());
-}
-
-JSValue get_bloomthreshold (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
-    auto* container = get_opaque (ctx, this_val);
-    if (!container) return JS_EXCEPTION;
-
-    return JS_NewInt32 (ctx, container->getScene ().getScene ().camera.bloom.threshold->value->getInt ());
-}
-
-JSValue get_clearenabled (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
-    auto* container = get_opaque (ctx, this_val);
-    if (!container) return JS_EXCEPTION;
-
-    return JS_NewBool (ctx, container->getScene ().getScene ().camera.bloom.enabled->value->getBool ());
-}
-
-JSValue get_clearcolor (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
-    auto* container = get_opaque (ctx, this_val);
-    if (!container) return JS_EXCEPTION;
-
-    return container->getEngine ().getAdapters ().vec3->instantiate (
-	*container->getScene ().getScene ().colors.clear->value
-    );
-}
-
-JSValue get_ambientcolor (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
-    auto* container = get_opaque (ctx, this_val);
-    if (!container) return JS_EXCEPTION;
-
-    return container->getEngine ().getAdapters ().vec3->instantiate (
-	*container->getScene ().getScene ().colors.ambient->value
-    );
-}
-
-JSValue get_skylightcolor (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
-    auto* container = get_opaque (ctx, this_val);
-    if (!container) return JS_EXCEPTION;
-
-    return container->getEngine ().getAdapters ().vec3->instantiate (
-	*container->getScene ().getScene ().colors.ambient->value
-    );
-}
-
-JSValue get_fov (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
-    auto* container = get_opaque (ctx, this_val);
-    if (!container) return JS_EXCEPTION;
-
-    return JS_NewFloat64 (ctx, container->getScene ().getScene ().camera.projection.fov->value->getFloat ());
-}
-
-JSValue get_nearz (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
-    auto* container = get_opaque (ctx, this_val);
-    if (!container) return JS_EXCEPTION;
-
-    return JS_NewFloat64 (ctx, container->getScene ().getScene ().camera.projection.nearz->value->getFloat ());
-}
-
-JSValue get_farz (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
-    auto* container = get_opaque (ctx, this_val);
-    if (!container) return JS_EXCEPTION;
-
-    return JS_NewFloat64 (ctx, container->getScene ().getScene ().camera.projection.farz->value->getFloat ());
-}
-
-JSValue get_camerafade (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
-    auto* container = get_opaque (ctx, this_val);
-    if (!container) return JS_EXCEPTION;
-
-    return JS_NewBool (ctx, container->getScene ().getScene ().camera.fade->value->getBool ());
-}
-
-JSValue get_camerashake (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
-    auto* container = get_opaque (ctx, this_val);
-    if (!container) return JS_EXCEPTION;
-
-    return JS_NewBool (ctx, container->getScene ().getScene ().camera.shake.enabled->value->getBool ());
-}
-
-JSValue get_camerashakespeed (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
-    auto* container = get_opaque (ctx, this_val);
-    if (!container) return JS_EXCEPTION;
-
-    return JS_NewFloat64 (ctx, container->getScene ().getScene ().camera.shake.speed->value->getFloat ());
-}
-
-JSValue get_camerashakeamplitude (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
-    auto* container = get_opaque (ctx, this_val);
-    if (!container) return JS_EXCEPTION;
-
-    return JS_NewFloat64 (ctx, container->getScene ().getScene ().camera.shake.amplitude->value->getFloat ());
-}
-
-JSValue get_camerashakeroughness (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
-    auto* container = get_opaque (ctx, this_val);
-    if (!container) return JS_EXCEPTION;
-
-    return JS_NewFloat64 (ctx, container->getScene ().getScene ().camera.shake.roughness->value->getFloat ());
-}
-
-JSValue get_cameraparallax (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
-    auto* container = get_opaque (ctx, this_val);
-    if (!container) return JS_EXCEPTION;
-
-    return JS_NewBool (ctx, container->getScene ().getScene ().camera.parallax.enabled->value->getBool ());
-}
-
-JSValue get_cameraparallaxamount (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
-    auto* container = get_opaque (ctx, this_val);
-    if (!container) return JS_EXCEPTION;
-
-    return JS_NewFloat64 (ctx, container->getScene ().getScene ().camera.parallax.amount->value->getFloat ());
-}
-
-JSValue get_cameraparallaxdelay (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
-    auto* container = get_opaque (ctx, this_val);
-    if (!container) return JS_EXCEPTION;
-
-    return JS_NewFloat64 (ctx, container->getScene ().getScene ().camera.parallax.delay->value->getFloat ());
-}
-
-JSValue get_cameraparallaxmouseinfluence (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
-    auto* container = get_opaque (ctx, this_val);
-    if (!container) return JS_EXCEPTION;
-
-    return JS_NewFloat64 (ctx, container->getScene ().getScene ().camera.parallax.mouseInfluence->value->getFloat ());
+    const auto& property = sceneSettingProperties ()[magic];
+    const auto& setting = property.setting (container->getScene ().getScene ());
+    if (!setting || !setting->value) return JS_UNDEFINED;
+    auto& value = *setting->value;
+    // Native type-2 getter is the one layer origin uses: it
+    // copies the three floats out, so a read is a detached Vec3 snapshot and
+    // only an assignment back through the setter changes the scene value.
+    if (property.type == SceneSettingType::Vec3) {
+        DynamicValue color (value.getVec3 ());
+        return container->getEngine ().getAdapters ().vec3->instantiate (color, true);
+    }
+    return sceneSettingScalarValue (ctx, value, property.type);
 }
 
 JSValue get_layer (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
@@ -759,7 +638,16 @@ JSValue scene_destroy_layer (JSContext* ctx, JSValueConst this_val, int argc, JS
     return JS_NewBool (ctx, owner->getMutableScene ().destroyScriptLayer (layer));
 }
 
-JSValue scene_set_value (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) { return JS_EXCEPTION; }
+JSValue scene_set_setting (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv, int magic) {
+    auto* container = get_opaque (ctx, this_val);
+    if (!container) return JS_EXCEPTION;
+    const auto& property = sceneSettingProperties ()[magic];
+    const auto& setting = property.setting (container->getScene ().getScene ());
+    if (!setting || !setting->value) return JS_UNDEFINED;
+    auto& value = *setting->value;
+    if (!storeSceneSetting (ctx, argc > 0 ? argv[0] : JS_UNDEFINED, value, property.type)) return JS_EXCEPTION;
+    return JS_UNDEFINED;
+}
 
 SceneObject::SceneObject (ScriptEngine& engine, Render::Wallpapers::CScene& scene) :
     m_scene (scene), m_engine (engine), m_classId (0), m_modelDataClassId (0) {
@@ -781,106 +669,18 @@ SceneObject::SceneObject (ScriptEngine& engine, Render::Wallpapers::CScene& scen
 
     // set properties
     JS_SetOpaque (this->m_instance, this);
-    JS_DefinePropertyGetSet (
-	this->m_engine.getContext (), this->m_instance, JS_NewAtom (this->m_engine.getContext (), "bloom"),
-	JS_NewCFunction (this->m_engine.getContext (), get_bloom, "get", 0),
-	JS_NewCFunction (this->m_engine.getContext (), scene_set_value, "set", 1), JS_PROP_ENUMERABLE
-    );
-    JS_DefinePropertyGetSet (
-	this->m_engine.getContext (), this->m_instance, JS_NewAtom (this->m_engine.getContext (), "bloomstrength"),
-	JS_NewCFunction (this->m_engine.getContext (), get_bloomstrength, "get", 0),
-	JS_NewCFunction (this->m_engine.getContext (), scene_set_value, "set", 1), JS_PROP_ENUMERABLE
-    );
-    JS_DefinePropertyGetSet (
-	this->m_engine.getContext (), this->m_instance, JS_NewAtom (this->m_engine.getContext (), "bloomthreshold"),
-	JS_NewCFunction (this->m_engine.getContext (), get_bloomthreshold, "get", 0),
-	JS_NewCFunction (this->m_engine.getContext (), scene_set_value, "set", 1), JS_PROP_ENUMERABLE
-    );
-    JS_DefinePropertyGetSet (
-	this->m_engine.getContext (), this->m_instance, JS_NewAtom (this->m_engine.getContext (), "clearenabled"),
-	JS_NewCFunction (this->m_engine.getContext (), get_clearenabled, "get", 0),
-	JS_NewCFunction (this->m_engine.getContext (), scene_set_value, "set", 1), JS_PROP_ENUMERABLE
-    );
-    JS_DefinePropertyGetSet (
-	this->m_engine.getContext (), this->m_instance, JS_NewAtom (this->m_engine.getContext (), "clearcolor"),
-	JS_NewCFunction (this->m_engine.getContext (), get_clearcolor, "get", 0),
-	JS_NewCFunction (this->m_engine.getContext (), scene_set_value, "set", 1), JS_PROP_ENUMERABLE
-    );
-    JS_DefinePropertyGetSet (
-	this->m_engine.getContext (), this->m_instance, JS_NewAtom (this->m_engine.getContext (), "ambientcolor"),
-	JS_NewCFunction (this->m_engine.getContext (), get_ambientcolor, "get", 0),
-	JS_NewCFunction (this->m_engine.getContext (), scene_set_value, "set", 1), JS_PROP_ENUMERABLE
-    );
-    JS_DefinePropertyGetSet (
-	this->m_engine.getContext (), this->m_instance, JS_NewAtom (this->m_engine.getContext (), "skylightcolor"),
-	JS_NewCFunction (this->m_engine.getContext (), get_skylightcolor, "get", 0),
-	JS_NewCFunction (this->m_engine.getContext (), scene_set_value, "set", 1), JS_PROP_ENUMERABLE
-    );
-    JS_DefinePropertyGetSet (
-	this->m_engine.getContext (), this->m_instance, JS_NewAtom (this->m_engine.getContext (), "fov"),
-	JS_NewCFunction (this->m_engine.getContext (), get_fov, "get", 0),
-	JS_NewCFunction (this->m_engine.getContext (), scene_set_value, "set", 1), JS_PROP_ENUMERABLE
-    );
-    JS_DefinePropertyGetSet (
-	this->m_engine.getContext (), this->m_instance, JS_NewAtom (this->m_engine.getContext (), "nearz"),
-	JS_NewCFunction (this->m_engine.getContext (), get_nearz, "get", 0),
-	JS_NewCFunction (this->m_engine.getContext (), scene_set_value, "set", 1), JS_PROP_ENUMERABLE
-    );
-    JS_DefinePropertyGetSet (
-	this->m_engine.getContext (), this->m_instance, JS_NewAtom (this->m_engine.getContext (), "farz"),
-	JS_NewCFunction (this->m_engine.getContext (), get_farz, "get", 0),
-	JS_NewCFunction (this->m_engine.getContext (), scene_set_value, "set", 1), JS_PROP_ENUMERABLE
-    );
-    JS_DefinePropertyGetSet (
-	this->m_engine.getContext (), this->m_instance, JS_NewAtom (this->m_engine.getContext (), "camerafade"),
-	JS_NewCFunction (this->m_engine.getContext (), get_camerafade, "get", 0),
-	JS_NewCFunction (this->m_engine.getContext (), scene_set_value, "set", 1), JS_PROP_ENUMERABLE
-    );
-    JS_DefinePropertyGetSet (
-	this->m_engine.getContext (), this->m_instance, JS_NewAtom (this->m_engine.getContext (), "camerashake"),
-	JS_NewCFunction (this->m_engine.getContext (), get_camerashake, "get", 0),
-	JS_NewCFunction (this->m_engine.getContext (), scene_set_value, "set", 1), JS_PROP_ENUMERABLE
-    );
-    JS_DefinePropertyGetSet (
-	this->m_engine.getContext (), this->m_instance, JS_NewAtom (this->m_engine.getContext (), "camerashakespeed"),
-	JS_NewCFunction (this->m_engine.getContext (), get_camerashakespeed, "get", 0),
-	JS_NewCFunction (this->m_engine.getContext (), scene_set_value, "set", 1), JS_PROP_ENUMERABLE
-    );
-    JS_DefinePropertyGetSet (
-	this->m_engine.getContext (), this->m_instance,
-	JS_NewAtom (this->m_engine.getContext (), "camerashakeamplitude"),
-	JS_NewCFunction (this->m_engine.getContext (), get_camerashakeamplitude, "get", 0),
-	JS_NewCFunction (this->m_engine.getContext (), scene_set_value, "set", 1), JS_PROP_ENUMERABLE
-    );
-    JS_DefinePropertyGetSet (
-	this->m_engine.getContext (), this->m_instance,
-	JS_NewAtom (this->m_engine.getContext (), "camerashakeroughness"),
-	JS_NewCFunction (this->m_engine.getContext (), get_camerashakeroughness, "get", 0),
-	JS_NewCFunction (this->m_engine.getContext (), scene_set_value, "set", 1), JS_PROP_ENUMERABLE
-    );
-    JS_DefinePropertyGetSet (
-	this->m_engine.getContext (), this->m_instance, JS_NewAtom (this->m_engine.getContext (), "cameraparallax"),
-	JS_NewCFunction (this->m_engine.getContext (), get_cameraparallax, "get", 0),
-	JS_NewCFunction (this->m_engine.getContext (), scene_set_value, "set", 1), JS_PROP_ENUMERABLE
-    );
-    JS_DefinePropertyGetSet (
-	this->m_engine.getContext (), this->m_instance,
-	JS_NewAtom (this->m_engine.getContext (), "cameraparallaxamount"),
-	JS_NewCFunction (this->m_engine.getContext (), get_cameraparallaxamount, "get", 0),
-	JS_NewCFunction (this->m_engine.getContext (), scene_set_value, "set", 1), JS_PROP_ENUMERABLE
-    );
-    JS_DefinePropertyGetSet (
-	this->m_engine.getContext (), this->m_instance,
-	JS_NewAtom (this->m_engine.getContext (), "cameraparallaxdelay"),
-	JS_NewCFunction (this->m_engine.getContext (), get_cameraparallaxdelay, "get", 0),
-	JS_NewCFunction (this->m_engine.getContext (), scene_set_value, "set", 1), JS_PROP_ENUMERABLE
-    );
-    JS_DefinePropertyGetSet (
-	this->m_engine.getContext (), this->m_instance,
-	JS_NewAtom (this->m_engine.getContext (), "cameraparallaxmouseinfluence"),
-	JS_NewCFunction (this->m_engine.getContext (), get_cameraparallaxmouseinfluence, "get", 0),
-	JS_NewCFunction (this->m_engine.getContext (), scene_set_value, "set", 1), JS_PROP_ENUMERABLE
-    );
+    const auto& settings = sceneSettingProperties ();
+    for (size_t index = 0; index < settings.size (); ++index) {
+	JSContext* context = this->m_engine.getContext ();
+	const JSAtom atom = JS_NewAtom (context, settings[index].name);
+	const int magic = static_cast<int> (index);
+	JS_DefinePropertyGetSet (
+	    context, this->m_instance, atom,
+	    JS_NewCFunctionMagic (context, scene_get_setting, "get", 0, JS_CFUNC_generic_magic, magic),
+	    JS_NewCFunctionMagic (context, scene_set_setting, "set", 1, JS_CFUNC_generic_magic, magic),
+	    JS_PROP_ENUMERABLE);
+	JS_FreeAtom (context, atom);
+    }
     JS_DefinePropertyValueStr (
 	this->m_engine.getContext (), this->m_instance, "getLayer",
 	JS_NewCFunction (this->m_engine.getContext (), get_layer, "getLayer", 1), JS_PROP_ENUMERABLE
