@@ -148,6 +148,11 @@ SceneUniquePtr WallpaperParser::parseScene (const JSON& file, Project& project) 
     // TODO: FIND IF THESE DEFAULTS ARE SENSIBLE OR NOT AND PERFORM PROPER VALIDATION WHEN CAMERA PREVIEW AND CAMERA
     // PARALLAX ARE PRESENT
 
+    // Omitted general fields keep the scene constructor's values (2.8.42
+    // confirmed in native disassembly): clearcolor
+    // zero, cameraparallaxamount 0.5, cameraparallaxdelay 
+    // 0.1, cameraparallaxmouseinfluence 0.5, bloomstrength 2.0,
+    // bloomthreshold 0.65, and the HDR/tint/zoom/FOV values below.
     return std::make_unique <Scene> (
         WallpaperData {
             .filename = "",
@@ -162,7 +167,7 @@ SceneUniquePtr WallpaperParser::parseScene (const JSON& file, Project& project) 
             .colors = {
                 .ambient  = general.user ("ambientcolor", properties, glm::vec3 (0.0f)),
                 .skylight = general.user ("skylightcolor", properties, glm::vec3 (0.0f)),
-                .clear = general.user ("clearcolor", properties, glm::vec3 (1.0f)),
+                .clear = general.user ("clearcolor", properties, glm::vec3 (0.0f)),
             },
             .camera = {
                 .fade = general.user ("camerafade", properties, false),
@@ -170,8 +175,8 @@ SceneUniquePtr WallpaperParser::parseScene (const JSON& file, Project& project) 
                 .preview = general.optional ("camerapreview", false),
                 .bloom = {
                     .enabled = general.user ("bloom", properties, false),
-                    .strength = general.user ("bloomstrength", properties, 0.0f),
-                    .threshold = general.user ("bloomthreshold", properties, 0.0f),
+                    .strength = general.user ("bloomstrength", properties, 2.0f),
+                    .threshold = general.user ("bloomthreshold", properties, 0.65f),
 		    .hdrStrength = general.user ("bloomhdrstrength", properties, 2.0f),
 		    .hdrThreshold = general.user ("bloomhdrthreshold", properties, 1.0f),
 		    .hdrFeather = general.user ("bloomhdrfeather", properties, 0.1f),
@@ -181,9 +186,9 @@ SceneUniquePtr WallpaperParser::parseScene (const JSON& file, Project& project) 
                 },
                 .parallax = {
                     .enabled = general.user ("cameraparallax", properties, false),
-                    .amount = general.user ("cameraparallaxamount", properties, 1.0f),
-                    .delay = general.user ("cameraparallaxdelay", properties, 0.0f),
-                    .mouseInfluence = general.user ("cameraparallaxmouseinfluence", properties, 1.0f),
+                    .amount = general.user ("cameraparallaxamount", properties, 0.5f),
+                    .delay = general.user ("cameraparallaxdelay", properties, 0.1f),
+                    .mouseInfluence = general.user ("cameraparallaxmouseinfluence", properties, 0.5f),
                 },
                 .shake = {
                     .enabled = general.user ("camerashake", properties, false),

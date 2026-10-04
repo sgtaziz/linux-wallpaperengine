@@ -928,3 +928,50 @@ TEST_CASE ("Active camera pose consumes full resolved parent world basis",
     REQUIRE (pose.up==glm::vec3 (world*glm::vec4 (0,1,0,0)));
     REQUIRE (pose.eye!=glm::vec3 (5,-7,10));
 }
+
+TEST_CASE ("Omitted general settings take the native scene constructor defaults", "[scene][parser][bloom]") {
+    using WallpaperEngine::Assets::AssetLocator;
+    using WallpaperEngine::Data::JSON::JSON;
+    using WallpaperEngine::Data::Model::Project;
+    using WallpaperEngine::Data::Model::Scene;
+    using WallpaperEngine::Data::Parsers::WallpaperParser;
+    using WallpaperEngine::FileSystem::Container;
+    // 2.8.42 initialises the general block before any JSON is read
+    // clearcolor zero,
+    // cameraparallaxamount 0.5,
+    // cameraparallaxdelay 0.1, cameraparallaxmouseinfluence 0.5,
+    // bloomstrength 2.0, bloomthreshold 0.65, bloomhdrstrength
+    // 2.0, bloomhdrthreshold 1.0, bloomhdrfeather 0.1, bloomhdrscatter 1.619,
+    // bloomhdriterations 8, bloomtint 1 1 1, fov 50, perspectiveoverridefov 95,
+    // zoom 1. A scene that enables bloom without strength or threshold
+    // therefore blooms natively.
+    auto files = std::make_unique<Container> ();
+    files->getVFS ().add ("scene.json", R"({
+      "camera":{"center":"0 0 -1","eye":"0 0 0","up":"0 1 0"},
+      "general":{"orthogonalprojection":{"width":1920,"height":1080},"bloom":true,"cameraparallax":true},
+      "objects":[]})");
+    Project project {};
+    project.type = Project::Type_Scene;
+    project.assetLocator = std::make_unique<AssetLocator> (std::move (files));
+    const auto wallpaper = WallpaperParser::parse (JSON ("scene.json"), project);
+    const auto* scene = dynamic_cast<const Scene*> (wallpaper.get ());
+    REQUIRE (scene != nullptr);
+    const auto& bloom = scene->camera.bloom;
+    REQUIRE (bloom.enabled->value->getBool ());
+    REQUIRE (bloom.strength->value->getFloat () == 2.0f);
+    REQUIRE (bloom.threshold->value->getFloat () == 0.65f);
+    REQUIRE (bloom.hdrStrength->value->getFloat () == 2.0f);
+    REQUIRE (bloom.hdrThreshold->value->getFloat () == 1.0f);
+    REQUIRE (bloom.hdrFeather->value->getFloat () == 0.1f);
+    REQUIRE (bloom.hdrScatter->value->getFloat () == 1.619f);
+    REQUIRE (bloom.hdrIterations->value->getInt () == 8);
+    REQUIRE (bloom.tint->value->getVec3 () == glm::vec3 (1.0f));
+    const auto& parallax = scene->camera.parallax;
+    REQUIRE (parallax.amount->value->getFloat () == 0.5f);
+    REQUIRE (parallax.delay->value->getFloat () == 0.1f);
+    REQUIRE (parallax.mouseInfluence->value->getFloat () == 0.5f);
+    REQUIRE (scene->colors.clear->value->getVec3 () == glm::vec3 (0.0f));
+    REQUIRE (scene->camera.projection.zoom->value->getFloat () == 1.0f);
+    REQUIRE (scene->camera.projection.fov->value->getFloat () == 50.0f);
+    REQUIRE (scene->camera.projection.perspectiveOverrideFov->value->getFloat () == 95.0f);
+}
