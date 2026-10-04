@@ -62,6 +62,11 @@ public:
      * @return Other combos detected by this shader unit during the preprocess
      */
     [[nodiscard]] const ComboMap& getDiscoveredCombos () const;
+    /**
+     * @return Whether this genericparticle fragment adds refraction offsets in
+     * the top-down target orientation (LINUX_TOPDOWN_REFRACTION was applied)
+     */
+    [[nodiscard]] bool usesTopDownRefraction () const { return m_topDownRefraction; }
 
 protected:
     /**
@@ -178,6 +183,7 @@ private:
      * The combos discovered in the pre-processing step that were not in the combos list
      */
     ComboMap m_discoveredCombos = {};
+    bool m_topDownRefraction = false;
     /**
      * The combos used by this unit that should be added
      */

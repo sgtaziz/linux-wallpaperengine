@@ -3632,6 +3632,14 @@ void CParticle::setupPass () {
     }
     if (trailPass) override->combos["TRAILRENDERER"] = 1;
     if (ropePass) override->combos["LINUX_CPU_ROPE_UV"] = 1;
+    if (m_hasRefract) {
+        const std::string* orientation = renderer < m_particle.renderers.size ()
+            ? &m_particle.renderers[renderer].orientation : nullptr;
+        const bool fixedOrUpright = orientation && (*orientation == "fixed" || *orientation == "upright");
+        if (ParticleCore::topDownRefractionRenderer (getScene ().getCamera ().isOrthogonal (),
+                m_particle.flags, ropePass, trailPass, fixedOrUpright))
+            override->combos["LINUX_TOPDOWN_REFRACTION"] = 1;
+    }
     if (ropePass && trailPass) {
         const auto& trailRecord = m_particle.renderers[renderer];
         if (m_ropeTrailUVScrolling) override->combos["TRAILSCROLLALPHA"] = 1;
@@ -3793,7 +3801,11 @@ void CParticle::setupParticleUniforms (Effects::CPass& pass) {
     pass.addUniform ("g_OrientationUp", &m_orientationUp);
     pass.addUniform ("g_OrientationRight", &m_orientationRight);
     pass.addUniform ("g_OrientationForward", &m_orientationForward);
-    pass.addUniform ("g_ViewUp", &m_viewUp);
+    // A fragment patched for top-down refraction pairs with the reflected
+    // view-up; every other pass keeps the GL fragment and unreflected axis.
+    const auto* shader = pass.getShader ();
+    pass.addUniform ("g_ViewUp", shader && shader->getFragment ().usesTopDownRefraction ()
+        ? &m_topDownViewUp : &m_viewUp);
     pass.addUniform ("g_ViewRight", &m_viewRight);
     pass.addUniform ("g_EyePosition", &m_eyePosition);
     pass.addUniform ("g_RenderVar0", &m_renderVar0);
@@ -3911,17 +3923,18 @@ void CParticle::updateMatrices () {
     m_mvpMatrix = m_viewProjectionMatrix * m_modelMatrix;
     m_mvpMatrixInverse = Wallpapers::inverseFiniteTransform (m_mvpMatrix).value_or (glm::mat4 (1.0f));
 
-    // Native's default sprite basis is authored Y-down. The ordinary
-    // orthographic model above reflects Y into Linux's centered GL space, so
-    // reflect the basis as well while retaining the authored rotation and UV.
-    // Fixed/upright renderers replace this basis below; trails use velocity.
-    m_orientationUp = getScene ().getCamera ().isOrthogonal ()
-        && (m_particle.flags & 4u) == 0
-        ? glm::vec3 (0.0f, -1.0f, 0.0f) : glm::vec3 (0.0f, 1.0f, 0.0f);
-    m_orientationRight = glm::vec3 (1.0f, 0.0f, 0.0f);
-    m_orientationForward = glm::vec3 (0.0f, 0.0f, 1.0f);
-    m_viewUp = glm::vec3 (0.0f, 1.0f, 0.0f);
-    m_viewRight = glm::vec3 (1.0f, 0.0f, 0.0f);
+    // The ordinary orthographic model above reflects Y into Linux's centered
+    // GL space, so reflect the basis as well while retaining the authored
+    // rotation and UV. Fixed/upright renderers replace this basis below;
+    // trails use velocity. Top-down refraction passes bind m_topDownViewUp.
+    const bool orthographic = getScene ().getCamera ().isOrthogonal ();
+    const auto basis = ParticleCore::screenRendererBasis (orthographic, m_particle.flags, false);
+    m_orientationUp = basis.up;
+    m_orientationRight = basis.right;
+    m_orientationForward = basis.forward;
+    m_viewUp = basis.viewUp;
+    m_viewRight = basis.viewRight;
+    m_topDownViewUp = ParticleCore::screenRendererBasis (orthographic, m_particle.flags, true).viewUp;
 
     this->updateParticleRenderVars ();
 }

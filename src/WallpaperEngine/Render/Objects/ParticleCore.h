@@ -237,6 +237,37 @@ inline std::optional<FixedRendererBasis> uprightRendererLocalBasis (
     return FixedRendererBasis {right / rightLength, up / upLength};
 }
 
+struct ScreenRendererBasis {
+    glm::vec3 right, up, forward, viewRight, viewUp;
+};
+
+// g_Orientation* and g_View* for the default "screen" sprite renderer. The
+// native GS constant buffer of an orthographic REFRACT sprite (2.8.42
+// RenderDoc, g_bufDynamic) holds right (1,0,0), up (0,1,0), forward (0,0,1),
+// view-right (1,0,0) and view-up (0,1,0) in Y-up particle space. Ordinary
+// orthographic Linux particle streams are Y-reflected by F = diag(1,-1,1) for
+// a top-down target, so the basis is F applied to native's. View-up is
+// reflected with it only for a pass whose fragment adds refraction offsets
+// in the top-down orientation (particleTopDownRefractionSource); the
+// unpatched GL fragment's own Y negation keeps the unreflected view-up.
+inline ScreenRendererBasis screenRendererBasis (bool orthographic, uint32_t particleFlags,
+                                                bool topDownRefraction) {
+    const bool reflected = orthographic && (particleFlags & 4u) == 0;
+    const glm::vec3 nativeUp (0.0f, 1.0f, 0.0f);
+    const glm::vec3 reflectedUp (0.0f, -1.0f, 0.0f);
+    return {glm::vec3 (1.0f, 0.0f, 0.0f), reflected ? reflectedUp : nativeUp,
+            glm::vec3 (0.0f, 0.0f, 1.0f), glm::vec3 (1.0f, 0.0f, 0.0f),
+            reflected && topDownRefraction ? reflectedUp : nativeUp};
+}
+
+// Passes eligible for the top-down refraction fragment: the screen sprite
+// basis above in the Y-reflected orthographic frame. Fixed/upright renderers,
+// sprite trails and ropes keep their separate bases and the GL fragment.
+inline bool topDownRefractionRenderer (bool orthographic, uint32_t particleFlags, bool rope,
+                                       bool trail, bool fixedOrUpright) {
+    return orthographic && (particleFlags & 4u) == 0 && !rope && !trail && !fixedOrUpright;
+}
+
 inline float nativeRandomUnit (std::mt19937& rng);
 
 inline float nativeBoxAxis (float unit, float direction, float minDistance,
