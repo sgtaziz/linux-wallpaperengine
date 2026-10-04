@@ -4,7 +4,9 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/catch_approx.hpp>
 #include <array>
+#include <cmath>
 #include <limits>
+#include <random>
 
 using namespace WallpaperEngine::Render::Objects::ParticleCore;
 
@@ -258,4 +260,81 @@ TEST_CASE ("Position offset uses signed component blend and bounded octave/domai
     REQUIRE_FALSE (birthSimplexNoise2 (0, std::numeric_limits<float>::quiet_NaN ()));
     const auto fixed = positionOffsetBirth (position, 99, 0.01f, 100, 0, 3, {1, 2, 3}, {});
     REQUIRE (fixed == positionOffsetBirth (position, 2, 0.01f, 100, 0, 3, {1, 2, 3}, {}));
+}
+
+TEST_CASE ("Sphere sign masks follow the original builder gate and float sign masks",
+           "[particle][birthgeometry][sphere][sign]") {
+    // Builder forces record flag bit 0 when |sign|^2 > FLT_EPSILON.
+    REQUIRE (sphereSignActive (0u, {1.0f, -1.0f, 0.0f}));
+    REQUIRE (sphereSignActive (2u, {1.0f, 1.0f, 0.0f}));
+    REQUIRE (sphereSignActive (0u, {0.0f, 0.001f, 0.0f}));
+    REQUIRE_FALSE (sphereSignActive (0u, {0.0f, 0.0f, 0.0001f}));   // 1e-8 is not above FLT_EPSILON
+    REQUIRE_FALSE (sphereSignActive (0u, glm::vec3 (0.0f)));
+    REQUIRE (sphereSignActive (1u, glm::vec3 (0.0f)));
+
+    // Original sphere births
+    // s-sign-authored-flags0: seed 18, directions 1, distance 0..100, sign
+    // "1 -1 0", authored flags 0 -> record flags 1). Five draws per birth.
+    // The 0.2 tolerance is the pre-registered precision class for native
+    // rcpps/sqrtps and its [1e-5, 1) azimuth/radius ranges.
+    constexpr std::array<glm::vec3, 8> expected {{
+        {67.5482025f, -34.2164307f, -24.7358227f}, {61.6212082f, -74.661171f, 2.55468607f},
+        {85.3224411f, -18.6280098f, 0.0162463672f}, {46.0404243f, -34.842907f, -75.0888062f},
+        {33.4358521f, -66.6745834f, -58.2456131f}, {63.3358078f, -10.5381355f, -15.6483784f},
+        {52.3138771f, -67.8819733f, -20.9910049f}, {44.1274147f, -40.5612793f, -42.0429764f}}};
+    const glm::vec3 sign (1.0f, -1.0f, 0.0f);
+    std::mt19937 rng (18u);
+    for (size_t birth = 0; birth < expected.size (); ++birth) {
+        CAPTURE (birth);
+        const float angle = nativeRandomUnit (rng);
+        const float axial = nativeRandomUnit (rng);
+        const float radius = nativeRandomUnit (rng);
+        rng.discard (2);  // speed and birth random
+        const glm::vec3 position = nativeSphereDisplacement (angle, axial, radius, glm::vec3 (1.0f), 0.0f,
+            100.0f, 0.0f, sphereSignActive (0u, sign) ? sign : glm::vec3 (0.0f));
+        for (int axis = 0; axis < 3; ++axis) REQUIRE (std::abs (position[axis] - expected[birth][axis]) <= 0.2f);
+    }
+    // Float masks: a fractional sign still selects the half-space by its sign.
+    REQUIRE (nativeSphereDisplacement (0.25f, 0.5f, 1.0f, glm::vec3 (1.0f), 0.0f, 1.0f, 0.0f,
+                                       {-0.5f, 0.25f, 0.0f}).x <= 0.0f);
+}
+
+TEST_CASE ("Box fallback direction is rotated by the selected control point basis",
+           "[particle][birthgeometry][box][fallback]") {
+    // Original box births (oracle, case b-fallback-cp1: seed
+    // 48, zero distances, directions 1, speed 10..50, control point 1 with
+    // basis Rz(30)*Rx(25)). Eight draws per birth: Z,Y,X displacement, Z,Y,X
+    // fallback, speed, birth random. Velocity tolerance is the pre-registered
+    // 0.1001 precision class (native rsqrtps and [1e-5, 1) ranges).
+    constexpr std::array<glm::vec3, 8> expected {{
+        {12.7491636f, 0.79723686f, -17.8615704f}, {-15.0534296f, 23.0713902f, 4.4221921f},
+        {14.9006767f, -4.8120656f, -0.747035265f}, {9.1525631f, -16.2248001f, 28.0953102f},
+        {14.148118f, -22.2304611f, 0.389647424f}, {0.100847527f, -9.08117485f, -16.1609497f},
+        {-5.55982447f, -12.0715656f, 30.2048569f}, {-23.1414585f, -6.16518974f, -28.430687f}}};
+    const double a = 30.0 * 3.14159265358979323846 / 180.0, b = 25.0 * 3.14159265358979323846 / 180.0;
+    const double M[3][3] = {{std::cos (a), -std::sin (a) * std::cos (b), std::sin (a) * std::sin (b)},
+                            {std::sin (a), std::cos (a) * std::cos (b), -std::cos (a) * std::sin (b)},
+                            {0.0, std::sin (b), std::cos (b)}};
+    glm::mat3 basis (1.0f);
+    for (int column = 0; column < 3; ++column)
+        for (int row = 0; row < 3; ++row) basis[column][row] = static_cast<float> (M[row][column]);
+    const auto velocity = [&] (std::mt19937& rng, bool useBasis) {
+        const glm::vec3 displacement = nativeBoxDisplacement (rng, glm::vec3 (1.0f), glm::vec3 (0.0f), glm::vec3 (0.0f));
+        REQUIRE (nativeBoxNeedsFallback (displacement));
+        const glm::vec3 direction = nativeBoxFallbackDirection (rng, glm::vec3 (1.0f), basis, useBasis);
+        const float speed = nativeRandomUnit (rng) * 40.0f + 10.0f;
+        rng.discard (1);  // birth random
+        return direction * (speed / glm::length (direction));
+    };
+    std::mt19937 rotated (48u);
+    std::mt19937 unrotated (48u);
+    float unrotatedError = 0.0f;
+    for (size_t birth = 0; birth < expected.size (); ++birth) {
+        CAPTURE (birth);
+        const glm::vec3 actual = velocity (rotated, true);
+        for (int axis = 0; axis < 3; ++axis) REQUIRE (std::abs (actual[axis] - expected[birth][axis]) <= 0.1001f);
+        const glm::vec3 local = velocity (unrotated, false);
+        unrotatedError = std::max (unrotatedError, glm::length (local - expected[birth]));
+    }
+    REQUIRE (unrotatedError > 1.0f);  // the unrotated fallback is structurally different
 }

@@ -1003,7 +1003,9 @@ ParticleEmitter ObjectParser::parseParticleEmitter (const JSON& it) {
 	return defaultValue;
     };
 
-    auto parseIVec3 = [&] (const char* fieldName, const glm::ivec3& defaultValue) -> glm::ivec3 {
+    // Builder parses sphere sign with
+    // strtod per component, so fractional signs keep their value and sign.
+    auto parseSignVec3 = [&] (const char* fieldName, const glm::vec3& defaultValue) -> glm::vec3 {
 	const auto fieldIt = it.find (fieldName);
 	if (fieldIt == it.end ()) {
 	    return defaultValue;
@@ -1012,7 +1014,7 @@ ParticleEmitter ObjectParser::parseParticleEmitter (const JSON& it) {
 	    return it.optional (fieldName, defaultValue);
 	}
 	if (fieldIt->is_array () && fieldIt->size () >= 3) {
-	    return glm::ivec3 ((*fieldIt)[0].get<int> (), (*fieldIt)[1].get<int> (), (*fieldIt)[2].get<int> ());
+	    return glm::vec3 ((*fieldIt)[0].get<float> (), (*fieldIt)[1].get<float> (), (*fieldIt)[2].get<float> ());
 	}
 	return defaultValue;
     };
@@ -1048,7 +1050,7 @@ ParticleEmitter ObjectParser::parseParticleEmitter (const JSON& it) {
 	        ? glm::vec3 (-5.0f, -5.0f, 0.0f) : glm::vec3 (0.0f)),
 	    .offsetMax = parseVec3 ("offsetmax", name == "layerimage"
 	        ? glm::vec3 (5.0f, 5.0f, 0.0f) : glm::vec3 (0.0f)),
-	    .sign = parseIVec3 ("sign", glm::ivec3 (0)),
+	    .sign = parseSignVec3 ("sign", glm::vec3 (0.0f)),
 	    .instantaneous = it.optional ("instantaneous", 0u),
 	    .speedMin = it.optional ("speedmin", name == "layerimage" ? 0.1f : 0.0f),
 	    .speedMax = it.optional ("speedmax", name == "layerimage" ? 0.2f : 0.0f),

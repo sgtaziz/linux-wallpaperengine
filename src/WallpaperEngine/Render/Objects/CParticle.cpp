@@ -1788,14 +1788,10 @@ EmitterFunc CParticle::createBoxEmitter (const ParticleEmitter& emitter, size_t 
 		glm::vec3 velocityDirection = p.position - spawnOrigin;
 		if (ParticleCore::nativeBoxNeedsFallback (velocityDirection)) {
 		    // Native opcode 2 uses three more draws for a zero-direction fallback:
-		    // Z, Y, X, then normalizes it.
-		    const float z = ParticleCore::nativeRandomUnit (m_rng);
-		    const float y = ParticleCore::nativeRandomUnit (m_rng);
-		    const float x = ParticleCore::nativeRandomUnit (m_rng);
-		    velocityDirection = glm::vec3 (
-		        (x + x - 1.0f) * flippedDirections.x,
-		        (y + y - 1.0f) * flippedDirections.y,
-		        (z + z - 1.0f) * flippedDirections.z);
+		    // Z, Y, X, rotates it by the selected CP basis
+		    // like the displacement, then normalizes it.
+		    velocityDirection = ParticleCore::nativeBoxFallbackDirection (
+		        m_rng, flippedDirections, birthTransform.basis, useCPBasis);
 		}
 		const float directionLength = glm::length (velocityDirection);
 		const glm::vec2 speedBounds = ParticleCore::emitterSpeedBounds (
@@ -1891,7 +1887,8 @@ EmitterFunc CParticle::createSphereEmitter (const ParticleEmitter& emitter, size
 	    const glm::vec3 authored = ParticleCore::nativeSphereDisplacement (
 		angle, axial, radius, emitter.directions, emitter.distanceMin.x,
 		distanceMax, emitter.cone,
-		(emitter.flags & 1u) != 0 ? emitter.sign : glm::ivec3 (0));
+		ParticleCore::sphereSignActive (emitter.flags, emitter.sign)
+		    ? emitter.sign : glm::vec3 (0.0f));
 	    glm::vec3 randomPos (authored.x, -authored.y, authored.z);
 	    // cVar43 selects the CP basis for preset world bit or a
 	    // nonzero CP index, just as in the box emitter.
