@@ -272,7 +272,7 @@ struct ParticleEmitter {
     glm::vec3 origin;
     glm::vec3 offsetMin;
     glm::vec3 offsetMax;
-    glm::ivec3 sign;
+    glm::vec3 sign;
     uint32_t instantaneous;
     float speedMin;
     float speedMax;

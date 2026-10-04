@@ -279,10 +279,31 @@ inline bool nativeBoxNeedsFallback (const glm::vec3& displacement) {
     return 1.0f / estimate < 0.0001f;
 }
 
+// Opcode 2 fallback direction: three more draws
+// Z, Y, X scaled by the authored directions, then the same selected control
+// point basis as the displacement when that basis is in use.
+inline glm::vec3 nativeBoxFallbackDirection (std::mt19937& rng, const glm::vec3& directions,
+                                             const glm::mat3& basis, bool useBasis) {
+    const float z = nativeRandomUnit (rng);
+    const float y = nativeRandomUnit (rng);
+    const float x = nativeRandomUnit (rng);
+    const glm::vec3 direction ((x + x - 1.0f) * directions.x, (y + y - 1.0f) * directions.y,
+                               (z + z - 1.0f) * directions.z);
+    return useBasis ? basis * direction : direction;
+}
+
+// Builder ORs record flag bit 0 whenever the
+// authored sign has squared length above FLT_EPSILON, using its
+// (z*z + x*x) + (w*w + y*y) order.
+inline bool sphereSignActive (uint32_t emitterFlags, const glm::vec3& sign) {
+    const float lengthSquared = (sign.z * sign.z + sign.x * sign.x) + (0.0f + sign.y * sign.y);
+    return (emitterFlags & 1u) != 0u || lengthSquared > std::numeric_limits<float>::epsilon ();
+}
+
 inline glm::vec3 nativeSphereDisplacement (float azimuthUnit, float axialUnit,
                                            float radiusUnit, const glm::vec3& directions,
                                            float distanceMin, float distanceMax,
-                                           float cone, const glm::ivec3& sign) {
+                                           float cone, const glm::vec3& sign) {
     // Opcode 1,: angle, axial cone coordinate and cube-root
     // radius are independent draws. The vector is normalized *after* the
     // authored direction scaling; its pre-normalized length remaps distance.
@@ -297,9 +318,11 @@ inline glm::vec3 nativeSphereDisplacement (float azimuthUnit, float axialUnit,
     const float length = glm::length (sample);
     if (length == 0.0f) return glm::vec3 (0.0f);
     sample /= length;
+    // Record masks (sign < 0) (sign != 0): a lane whose
+    // direction disagrees with a nonzero sign is negated.
     for (int axis = 0; axis < 3; ++axis) {
-        if (sign[axis] > 0) sample[axis] = std::abs (sample[axis]);
-        else if (sign[axis] < 0) sample[axis] = -std::abs (sample[axis]);
+        if (sign[axis] != 0.0f && (sign[axis] < 0.0f) != (sample[axis] < 0.0f))
+            sample[axis] = -sample[axis];
     }
     return sample * (distanceMin + (distanceMax - distanceMin) * length);
 }
