@@ -1,14 +1,20 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include "WallpaperEngine/Data/Builders/UserSettingBuilder.h"
+#include "WallpaperEngine/Data/Model/Project.h"
+#include "WallpaperEngine/Data/Model/Wallpaper.h"
+#include "WallpaperEngine/Data/Parsers/ObjectParser.h"
 #include "WallpaperEngine/Scripting/ScriptPropertyBindings.h"
 #include "WallpaperEngine/Render/Wallpapers/SceneTransform.h"
 #include <catch2/catch_approx.hpp>
 #include <glm/gtc/constants.hpp>
 
 #include <algorithm>
+#include <map>
+#include <memory>
 #include <set>
 #include <string>
+#include <vector>
 
 using WallpaperEngine::Data::Builders::UserSettingBuilder;
 using WallpaperEngine::Data::Model::DynamicValue;
@@ -207,4 +213,51 @@ TEST_CASE ("Transform-only parent bindings drive the child render matrix", "[scr
     REQUIRE (resolve ().origin.y == Catch::Approx (250.0f));
     binding (bindings, "visible")->update (false, DynamicValue::Script);
     REQUIRE_FALSE (resolve ().visible);
+}
+
+namespace {
+std::map<std::string, DynamicValue*> bindingMap (const std::vector<WallpaperEngine::Scripting::ScriptPropertyBinding>& bindings) {
+    std::map<std::string, DynamicValue*> result;
+    for (const auto& entry : bindings) result.emplace (entry.name, &entry.value);
+    return result;
+}
+} // namespace
+
+TEST_CASE ("Sound layers queue base transform scripts alongside volume", "[script][binding][audio]") {
+    using WallpaperEngine::Data::JSON::JSON;
+    using WallpaperEngine::Data::Model::Project;
+    using WallpaperEngine::Data::Model::Sound;
+    using WallpaperEngine::Data::Parsers::ObjectParser;
+    // Reduced from 2915841260: the Music combo selector is a sound-layer
+    // scale script whose init stops every track and whose
+    // applyUserProperties plays the chosen one.
+    Project project {};
+    const auto object = ObjectParser::parse (JSON::parse (R"({
+        "id":101494,"name":"Theme.mp3","sound":["sounds/theme.mp3"],"startsilent":true,
+        "playbackmode":"loop","volume":{"user":"musicvolume","value":0.6},
+        "scale":{"script":"export function init(){}\nexport function applyUserProperties(p){}",
+                 "value":"1 1 1"}})"), project);
+    REQUIRE (object->is<Sound> ());
+    const auto& sound = *object->as<Sound> ();
+    const auto bindings = bindingMap (scriptPropertyBindings (sound));
+    REQUIRE (bindings.size () == 4);
+    REQUIRE (bindings.at ("origin") == sound.origin->value.get ());
+    REQUIRE (bindings.at ("scale") == sound.groupScale->value.get ());
+    REQUIRE (bindings.at ("angles") == sound.groupAngles->value.get ());
+    REQUIRE (bindings.at ("volume") == sound.volume->value.get ());
+    // "visible" is not in the native sound lookup chain (-> sound
+    // table -> base table); a script write stays an expando.
+    REQUIRE_FALSE (bindings.contains ("visible"));
+    // The queued value carries the authored module, so CSound's registration
+    // reaches ScriptEngine::queueScript with a script to run.
+    const auto& source = bindings.at ("scale")->getScriptSource ();
+    REQUIRE (source.has_value ());
+    REQUIRE (source->find ("applyUserProperties") != std::string::npos);
+    REQUIRE_FALSE (bindings.at ("volume")->getScriptSource ().has_value ());
+
+    // A sound without an authored volume still binds its transform values.
+    const auto silent = ObjectParser::parse (
+        JSON::parse (R"({"id":5,"name":"bare","sound":["sounds/a.mp3"]})"), project);
+    const auto bare = bindingMap (scriptPropertyBindings (*silent->as<Sound> ()));
+    REQUIRE (bare.at ("scale") == silent->as<Sound> ()->groupScale->value.get ());
 }

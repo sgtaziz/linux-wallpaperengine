@@ -7,6 +7,7 @@
 #include "WallpaperEngine/Logging/Log.h"
 #include "WallpaperEngine/Render/Camera.h"
 #include "WallpaperEngine/Render/Wallpapers/SceneTransform.h"
+#include "WallpaperEngine/Scripting/ScriptPropertyBindings.h"
 
 #include <random>
 
@@ -19,7 +20,8 @@ CSound::CSound (Wallpapers::CScene& scene, const Sound& sound) :
 	                            sound.maxTime, sound.sounds.size ()),
 	sound.sounds.size (), *this, std::random_device {} ()
     ) {
-    if (sound.volume) this->registerProperty ("volume", *sound.volume->value);
+    for (const auto& binding : Scripting::scriptPropertyBindings (sound))
+	this->registerProperty (binding.name, binding.value);
     if (this->audioEnabled ()) m_controller.initialize (this->currentVolume ());
 }
 

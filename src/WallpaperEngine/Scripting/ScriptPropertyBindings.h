@@ -3,12 +3,16 @@
 #include "WallpaperEngine/Data/Model/Object.h"
 
 #include <array>
+#include <string>
+#include <utility>
+#include <vector>
 
 namespace WallpaperEngine::Scripting {
 using WallpaperEngine::Data::Model::DynamicValue;
 using WallpaperEngine::Data::Model::Image;
 using WallpaperEngine::Data::Model::Particle;
 using WallpaperEngine::Data::Model::ScenePointLight;
+using WallpaperEngine::Data::Model::Sound;
 using WallpaperEngine::Data::Model::Text;
 
 struct ScriptPropertyBinding {
@@ -23,6 +27,25 @@ inline auto scriptPropertyBindings (const WallpaperEngine::Data::Model::Object& 
         {"origin", *object.origin->value}, {"scale", *object.groupScale->value},
         {"angles", *object.groupAngles->value}, {"visible", *object.groupVisible->value},
     }};
+}
+
+// Native sound property lookup searches the sound table
+// Built (volume, mintime...), then the layer's
+// dynamic table, then falls back to the base layer lookup 
+// over built (origin, scale, angles,
+// parallaxDepth, sortorder, name, solid, disablepropagation). Those base vec3
+// entries load, which reaches the generic loader 
+// that retains "script". A sound layer therefore runs scripts on its
+// transform values as well as on volume. "visible" lives in a different table
+// that the sound vtable does not reach,
+// so it is not a sound property: thisLayer.visible stays an expando.
+inline std::vector<ScriptPropertyBinding> scriptPropertyBindings (const Sound& sound) {
+    std::vector<ScriptPropertyBinding> result {
+        {"origin", *sound.origin->value}, {"scale", *sound.groupScale->value},
+        {"angles", *sound.groupAngles->value},
+    };
+    if (sound.volume && sound.volume->value) result.push_back ({"volume", *sound.volume->value});
+    return result;
 }
 
 // Bind concrete renderer values when present. Text has no typed angles field,
