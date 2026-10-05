@@ -2,6 +2,8 @@
 
 #include <array>
 
+#include "ImageQuadTriangulation.h"
+
 namespace WallpaperEngine::Render::Objects {
 struct ImageQuadUV {
     float left;
@@ -9,9 +11,9 @@ struct ImageQuadUV {
     float right;
     float top;
 
+    // GL V=bottom is the source's first memory row, i.e. the image top.
     [[nodiscard]] std::array<float, 12> triangles () const {
-        return {left, top, left, bottom, right, top,
-                right, top, left, bottom, right, bottom};
+        return imageQuadTexcoords (left, bottom, right, top);
     }
 };
 

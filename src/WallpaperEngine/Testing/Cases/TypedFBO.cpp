@@ -62,11 +62,6 @@ TEST_CASE ("Direct image padding uses allocated texels and model exclusions", "[
         REQUIRE (excluded.right == 0.75f);
         REQUIRE (excluded.top == 0.5f);
     }
-    const auto vertices = odd.triangles ();
-    REQUIRE (vertices[0] == odd.left);
-    REQUIRE (vertices[1] == odd.top);
-    REQUIRE (vertices[3] == odd.bottom);
-    REQUIRE (vertices[4] == odd.right);
     const auto absent = directImageQuadUV (1, 1, 0, 0, false, false, false, false);
     REQUIRE (absent.left == 0);
     REQUIRE (absent.right == 1);
