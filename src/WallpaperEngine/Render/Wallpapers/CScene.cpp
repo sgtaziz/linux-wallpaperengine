@@ -567,9 +567,9 @@ void CScene::renderFrame (const glm::ivec4& viewport) {
     if (cameraParallax) {
 	const float amount = this->getScene ().camera.parallax.amount->value->getFloat ();
 	this->m_parallaxDisplacement = glm::mix (this->m_parallaxDisplacement,
-	    sceneParallaxDisplacementTarget (this->m_mousePosition, amount, influence), delay);
+	    sceneParallaxDisplacementTarget (this->m_parallaxCursor, amount, influence), delay);
     }
-    advanceSceneParallaxPosition (m_parallaxPosition, cameraParallax, m_mousePosition, influence,
+    advanceSceneParallaxPosition (m_parallaxPosition, cameraParallax, m_parallaxCursor, influence,
 	glm::vec2 (getWidth (), getHeight ()), glm::vec2 (m_camera->getEye ()), delay);
 
     // Native updates image controls before SceneScript callbacks (
@@ -878,6 +878,8 @@ void CScene::updateMouse (const glm::ivec4& viewport) {
 
     this->m_mousePosition.x = this->m_mousePositionNormalized.x;
     this->m_mousePosition.y = uvs.vstart + mouseY * (uvs.vend - uvs.vstart);
+    this->m_parallaxCursor = sceneParallaxCursor (
+        glm::vec2 (mouseX, mouseY), uvs.ustart, uvs.uend, uvs.vstart, uvs.vend);
 }
 
 void CScene::dispatchCursorEvents () {

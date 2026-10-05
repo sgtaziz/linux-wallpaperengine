@@ -581,7 +581,7 @@ TEST_CASE ("g_ParallaxPosition follows the native smoothed parallax point", "[sc
 }
 
 TEST_CASE ("g_ParallaxPosition and the layer offset agree on one top-origin cursor", "[scene][parallax]") {
-    // CScene feeds m_mousePosition to both. Native derives both from the same
+    // CScene feeds m_parallaxCursor to both. Native derives both from the same
     // smoothed point: offset = (root - point) * amount * depth in the y-up
     // canvas and uniform = point / size. Recovering the
     // point from the uniform must reproduce the layer offset on both axes.
@@ -600,6 +600,69 @@ TEST_CASE ("g_ParallaxPosition and the layer offset agree on one top-origin curs
             sceneParallaxDisplacementTarget (cursor, amount, influence), size.x, size.y, amount, true, true);
         REQUIRE (offset.x == Catch::Approx ((root.x - point.x) * amount).margin (1e-3));
         REQUIRE (-offset.y == Catch::Approx ((root.y - point.y) * amount).margin (1e-3));   // camera Y is negated
+    }
+}
+
+TEST_CASE ("Camera parallax sweeps the full canvas of a cover-cropped scene", "[scene][parallax]") {
+    // Native scales the viewport-fraction cursor
+    // by the full projection size. A 3440x1440 canvas shown
+    // at 16:9 keeps only u 0.128..0.872, so a cursor taken from that band moves
+    // the C-PLX F4H ember (amount 0.16, influence 0.18, depth 2) by 0.744 of
+    // native's 97.09 canvas px between the corner and centre pointers.
+    using WallpaperEngine::Render::WallpaperState;
+    using WallpaperEngine::Render::Wallpapers::advanceSceneParallaxPosition;
+    using WallpaperEngine::Render::Wallpapers::initialSceneParallaxPosition;
+    using WallpaperEngine::Render::Wallpapers::sceneParallaxCursor;
+    using WallpaperEngine::Render::Wallpapers::sceneParallaxDisplacementTarget;
+    const float amount = 0.16f, influence = 0.18f;
+    const glm::vec3 root (2000.0f, 720.0f, 0.0f);
+    for (const bool vflip : {false, true}) {
+        CAPTURE (vflip);
+        WallpaperState state (WallpaperState::TextureUVsScaling::DefaultUVs, 0);
+        state.updateState ({0, 0, 1280, 720}, vflip, 3440, 1440);
+        const auto uv = state.getTextureUVs ();
+        REQUIRE (uv.ustart == Catch::Approx (0.12791f).margin (1e-4));
+        REQUIRE (uv.uend == Catch::Approx (0.87209f).margin (1e-4));
+        const auto cursor = [&] (glm::vec2 viewport) {
+            return sceneParallaxCursor (viewport, uv.ustart, uv.uend, uv.vstart, uv.vend);
+        };
+        const auto offset = [&] (glm::vec2 viewport) {
+            return sceneLayerParallaxOffset (root, glm::vec3 (0.0f), glm::vec2 (2.0f),
+                sceneParallaxDisplacementTarget (cursor (viewport), amount, influence),
+                3440.0f, 1440.0f, amount, true, true);
+        };
+        // updateMouse's top-origin viewport fractions (mouseY = 1 - y-up) for
+        // the top-left corner pointer (0.01, 0.01) and the centre.
+        const glm::vec2 corner (0.01f), centre (0.5f);
+        const glm::vec3 delta = offset (corner) - offset (centre);
+        REQUIRE (delta.x == Catch::Approx (0.49f * 3440.0f * influence * amount * 2.0f).margin (1e-3));
+        const float canvasY = 0.49f * 1440.0f * influence * amount * 2.0f;
+        if (vflip) {
+            // A top pointer raises the parallax point, so native moves the layer
+            // down the y-up canvas; Linux camera Y is the negated canvas axis.
+            REQUIRE (delta.y == Catch::Approx (canvasY).margin (1e-3));
+        } else {
+            // vflip=false (X11) reverses the band, and with it m_mousePosition's
+            // y; that orientation is pre-existing and kept as is.
+            REQUIRE (std::abs (delta.y) == Catch::Approx (canvasY).margin (1e-3));
+        }
+        auto parallax = initialSceneParallaxPosition (true, glm::vec2 (3440.0f, 1440.0f), glm::vec2 (0.0f));
+        advanceSceneParallaxPosition (parallax, true, cursor (corner), influence,
+            glm::vec2 (3440.0f, 1440.0f), glm::vec2 (0.0f), 1.0f);
+        REQUIRE (parallax.uniform.x == Catch::Approx (0.5f - 0.49f * influence).margin (1e-5));
+    }
+    // An uncropped scene keeps the cursor m_mousePosition already forms.
+    for (const bool vflip : {false, true}) {
+        CAPTURE (vflip);
+        WallpaperState state (WallpaperState::TextureUVsScaling::DefaultUVs, 0);
+        state.updateState ({0, 0, 1280, 720}, vflip, 2560, 1440);
+        const auto uv = state.getTextureUVs ();
+        const glm::vec2 viewport (0.23f, 0.71f);
+        const glm::vec2 scene (uv.ustart + viewport.x * (uv.uend - uv.ustart),
+                               uv.vstart + viewport.y * (uv.vend - uv.vstart));
+        const glm::vec2 parallax = sceneParallaxCursor (viewport, uv.ustart, uv.uend, uv.vstart, uv.vend);
+        REQUIRE (parallax.x == Catch::Approx (scene.x));
+        REQUIRE (parallax.y == Catch::Approx (scene.y));
     }
 }
 

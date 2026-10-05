@@ -219,6 +219,17 @@ inline glm::vec2 sceneParallaxDisplacementTarget (glm::vec2 cursor, float amount
     return (cursor - glm::vec2 (0.5f)) * amount * influence;
 }
 
+// The cursor both parallax consumers receive. Native reads it as a
+// fraction of the viewport (, the g_PointerPosition
+// field) and scales it by the full projection size, so
+// a cover-cropped canvas still sweeps its whole width. The scene cursor is
+// instead remapped into the visible UV band; keep only that band's axis
+// orientation, which leaves an uncropped scene unchanged.
+inline glm::vec2 sceneParallaxCursor (glm::vec2 viewportCursor, float ustart, float uend, float vstart, float vend) {
+    return {uend >= ustart ? viewportCursor.x : 1.0f - viewportCursor.x,
+            vend >= vstart ? viewportCursor.y : 1.0f - viewportCursor.y};
+}
+
 inline float sceneParallaxDelayWeight (float delay, float frameDelta) {
     return delay > 0.0f ? std::min (1.0f, (1.0f - delay / 3.0f) * 10.0f * frameDelta) : 1.0f;
 }

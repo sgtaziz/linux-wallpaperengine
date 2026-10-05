@@ -216,6 +216,8 @@ private:
     glm::vec2 m_mousePosition = {};
     glm::vec2 m_mousePositionLast = {};
     glm::vec2 m_mousePositionNormalized = {};
+    /** Camera parallax cursor: the viewport fraction native reads, in m_mousePosition's orientation, uncropped. */
+    glm::vec2 m_parallaxCursor = {};
     glm::vec2 m_mouseScreenPosition = {};
     bool m_mouseLeftDown = false;
     bool m_cursorInputInitialized = false;
