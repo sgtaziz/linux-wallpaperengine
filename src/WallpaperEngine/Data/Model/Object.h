@@ -200,6 +200,14 @@ struct ScenePointLightData {
     UserSettingUniquePtr intensity;
     UserSettingUniquePtr radius;
     UserSettingUniquePtr exponent;
+    /**
+     * Native modern-light volumetric descriptors: castvolumetrics is
+     * bit 2 flags, density and volumetricsexponent
+     * default to 2 and 1 constructor.
+     */
+    UserSettingUniquePtr castVolumetrics;
+    UserSettingUniquePtr density;
+    UserSettingUniquePtr volumetricsExponent;
 };
 
 class ScenePointLight : public Object, public ScenePointLightData {

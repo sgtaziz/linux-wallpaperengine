@@ -34,6 +34,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/type_ptr.hpp>
 
 extern float g_Time;
 extern float g_TimeLast;
@@ -803,7 +804,29 @@ void CScene::renderFrame (const glm::ivec4& viewport) {
         restore ();
     }
     if (clearEnabled) glClear (GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-    for (auto* root : roots) renderNode (root);
+    const auto flushVolumetrics = [this] {
+        if (m_volumetrics && m_volumetrics->pending ())
+            m_volumetrics->flush (m_sceneFBO->getFramebuffer (),
+                                  {int (m_sceneFBO->getRealWidth ()), int (m_sceneFBO->getRealHeight ())});
+    };
+    for (auto* root : roots) {
+        // Native finishes a volumetric batch before
+        // the next visible object that is not a light, and once after the list.
+        const auto& data = root->getObject ();
+        if (data.is<ScenePointLight> () || data.is<SceneSpotLight> () || data.is<SceneTubeLight> ()) {
+            if (data.is<ScenePointLight> ()) renderVolumetricLight (*data.as<ScenePointLight> ());
+            continue;
+        }
+        if (m_volumetrics && m_volumetrics->pending ()
+            && volumetricBatchEndsBefore (false, resolveSceneTransform (data,
+                   [this] (int parentId) -> const Object* { return findObjectData (parentId); },
+                   [this] (const Object& parent, const std::string& name) {
+                       return getPuppetAttachmentTransform (parent.id, name);
+                   }).visible))
+            flushVolumetrics ();
+        renderNode (root);
+    }
+    flushVolumetrics ();
     // Native copies the completed scene and generates reflection mips before
     // DOF/HDR presentation. This snapshot is consumed by the next scene frame.
     if (m_mipMappedSceneFBO) m_mipMappedSceneFBO->snapshotFrom (*m_sceneFBO);
@@ -1227,6 +1250,42 @@ void CScene::refreshTubeLights () {
         m_tubeLightColors[slot] = packed[slot].color;
         m_tubeLightOriginsA[slot] = packed[slot].originA;
         m_tubeLightOriginsB[slot] = packed[slot].originB;
+    }
+}
+
+void CScene::renderVolumetricLight (const ScenePointLight& light) {
+    // Native gates on the light's castvolumetrics bit and a non-zero
+    // volumetric quality.
+    if (m_volumetricsFailed || !light.castVolumetrics || !light.castVolumetrics->value->getBool () || kVolumetricQuality == 0)
+        return;
+    const auto transform = resolveSceneTransform (light,
+        [this] (int parentId) -> const Object* { return findObjectData (parentId); },
+        [this] (const Object& parent, const std::string& name) {
+            return getPuppetAttachmentTransform (parent.id, name);
+        });
+    if (!transform.visible) return;
+    const glm::vec3 origin = glm::vec3 (transform.authoredMatrix[3]);
+    const float radius = light.radius->value->getFloat ();
+    const auto volume = packPointVolume (origin, light.color->value->getVec3 (), light.intensity->value->getFloat (),
+        radius, light.density->value->getFloat (), light.volumetricsExponent->value->getFloat ());
+    const float* values = glm::value_ptr (volume.volume);
+    for (int i = 0; i < 16; ++i)
+        if (!std::isfinite (values[i])) return;
+    if (!(radius > 0.0f) || !std::isfinite (volume.originDensity.w) || !std::isfinite (volume.colorExponent.w)) return;
+    // The camera-inside variant (volumetrics_fullscreen) is not reproduced:
+    // such a volume is skipped rather than drawn from its front faces.
+    const auto& eye = getCamera ().getEye ();
+    if (eyeInsidePointVolume (eye, glm::normalize (getCamera ().getCenter () - eye), origin, radius)) return;
+    if (!m_volumetrics) m_volumetrics = std::make_unique<CVolumetrics> (getAssetLocator ());
+    const glm::mat4 viewProjection = m_activeRenderProjection
+        * sceneAuthoredToCamera (getWidth (), getHeight (), getCamera ().isOrthogonal ());
+    try {
+        m_volumetrics->accumulate (volume, viewProjection,
+            {int (m_sceneFBO->getRealWidth ()), int (m_sceneFBO->getRealHeight ())}, m_hdrPostprocessing);
+    } catch (const std::exception& e) {
+        sLog.error ("Cannot render volumetric light ", light.id, ": ", e.what ());
+        m_volumetrics.reset ();
+        m_volumetricsFailed = true;
     }
 }
 

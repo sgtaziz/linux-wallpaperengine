@@ -289,6 +289,9 @@ ObjectUniquePtr ObjectParser::parse (const JSON& it, const Project& project) {
 	        .intensity = it.user ("intensity", project.properties, 0.0f),
 	        .radius = it.user ("radius", project.properties, 1.0f),
 	        .exponent = it.user ("exponent", project.properties, 2.0f),
+	        .castVolumetrics = it.user ("castvolumetrics", project.properties, false),
+	        .density = it.user ("density", project.properties, 2.0f),
+	        .volumetricsExponent = it.user ("volumetricsexponent", project.properties, 1.0f),
 	    });
 	}
     } else if (shapeIt != it.end ()) {
