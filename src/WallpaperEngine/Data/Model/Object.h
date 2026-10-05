@@ -50,6 +50,12 @@ struct ObjectData {
     UserSettingUniquePtr groupScale;
     UserSettingUniquePtr groupAngles;
     UserSettingUniquePtr groupVisible;
+    /**
+     * Per-axis camera parallax depth. Native registers it on the base object
+     * initializes it to (1,1) for every
+     * layer type, groups included; reads it from the root ancestor.
+     */
+    UserSettingUniquePtr parallaxDepth;
     /** Detached authored configuration for SceneScript cloning; excludes only the layer ID. */
     std::string initialConfiguration;
 };
@@ -138,8 +144,6 @@ struct ImageData {
     std::string alignment;
     /** Image dimensions, including live user and script updates. */
     UserSettingUniquePtr size;
-    /** Parallax depth used for parallax scrolling */
-    UserSettingUniquePtr parallaxDepth;
     /** The color blending mode for this image */
     UserSettingUniquePtr colorBlendMode;
     /** The brightness of the image */
@@ -964,9 +968,6 @@ struct ParticleData {
     UserSettingUniquePtr angles;
     UserSettingUniquePtr visible;
 
-    /** Parallax depth */
-    UserSettingUniquePtr parallaxDepth;
-
     /** Reference to particle definition file */
     std::string particleFile;
 
@@ -1050,8 +1051,6 @@ struct TextData {
     UserSettingUniquePtr alpha;
     /** Whether the text is visible */
     UserSettingUniquePtr visible;
-    /** Authored per-axis camera parallax depth */
-    UserSettingUniquePtr parallaxDepth;
     /** Horizontal alignment: "left", "center", "right" */
     std::string alignment;
     /** Vertical alignment: "top", "center", "bottom" */

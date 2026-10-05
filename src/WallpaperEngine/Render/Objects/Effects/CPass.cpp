@@ -1143,6 +1143,7 @@ void CPass::setupUniforms () {
     this->addUniform ("g_ViewProjectionMatrix", &this->m_viewProjectionMatrix);
     this->addUniform ("g_PointerPosition", scene.getMousePosition ());
     this->addUniform ("g_PointerPositionLast", scene.getMousePositionLast ());
+    this->addUniform ("g_ParallaxPosition", scene.getParallaxPosition ());
     this->addUniform ("g_EffectTextureProjectionMatrix", glm::mat4 (1.0));
     this->addUniform ("g_EffectTextureProjectionMatrixInverse", glm::mat4 (1.0));
     this->addUniform ("g_TexelSize", &m_sceneTexelSize);

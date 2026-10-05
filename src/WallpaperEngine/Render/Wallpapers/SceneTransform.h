@@ -94,44 +94,131 @@ inline glm::mat4 secondarySceneProjectionForCamera (
     return clip * flip * nativeProjection * nativeView * flip * inverseBridge;
 }
 
-inline bool modelPresentationReversesWinding (bool orthographic, bool childScope) {
-    return orthographic || !childScope;
+inline bool modelPresentationReversesWinding (bool orthographic, bool localProjection) {
+    return orthographic || !localProjection;
 }
 
-// Displacement already includes camera amount and mouse influence.
-// Zero authored depth is fixed on screen.
-inline glm::vec3 sceneParallaxOffset (
-    const glm::vec2& depth, const glm::vec2& displacement, float sceneWidth, bool orthographic
+// Native translates the scene view stack before
+// each object draw by
+//   (root.origin.xy - parallaxPos) * cameraparallaxamount * root.parallaxDepth
+// in the native canvas (origin bottom-left, +Y up on screen), and only when
+// the scene has both camera parallax and an orthographic projection
+// (flags & 0x108). forms
+//   parallaxPos = size*0.5*(1-influence) + size*(x, 1-y)*influence + eye
+// from a top-origin cursor. Linux keeps the cursor in its top-origin pointer
+// convention and stores only (cursor - 0.5) * amount * influence as the
+// displacement, so the canvas cursor Y term is +displacement.y * height.
+// The result is returned in Linux's centered orthographic camera space, whose
+// Y axis is the negated canvas axis (scenePointForCamera); X is unchanged.
+inline glm::vec3 sceneLayerParallaxOffset (
+    const glm::vec3& rootOrigin, const glm::vec3& cameraEye,
+    const glm::vec2& rootDepth, const glm::vec2& displacement,
+    float sceneWidth, float sceneHeight, float cameraAmount,
+    bool cameraParallax, bool orthographic
 ) {
-    // Native requires both the parallax and orthographic scene
-    // bits (0x108). Perspective world positions never receive canvas offsets.
-    if (!orthographic) return {};
-    return {-depth.x * displacement.x * sceneWidth,
-            -depth.y * displacement.y * sceneWidth, 0.0f};
+    if (!cameraParallax || !orthographic) return {};
+    const float canvasX = ((rootOrigin.x - cameraEye.x - sceneWidth * 0.5f) * cameraAmount
+        - displacement.x * sceneWidth) * rootDepth.x;
+    const float canvasY = ((rootOrigin.y - cameraEye.y - sceneHeight * 0.5f) * cameraAmount
+        + displacement.y * sceneHeight) * rootDepth.y;
+    return {canvasX, -canvasY, 0.0f};
 }
 
-// Native forms a particle/object offset from its authored origin
-// and the smoothed camera cursor, then adds it through the object's current
-// matrix basis. The scene displacement stores only the cursor's deviation
-// from center and already includes camera amount and mouse influence.
-inline glm::vec3 sceneParticleParallaxOffset (
-    const glm::vec3& origin, const glm::vec3& cameraEye,
-    const glm::vec2& depth, const glm::vec2& displacement,
-    float sceneWidth, float sceneHeight, float cameraAmount, bool orthographic
+// Native walks parent links to the top-most ancestor of any
+// object type (groups included); a missing parent ends the walk. A malformed
+// cycle stops after maxHops links.
+template <typename FindParent>
+const Data::Model::Object& sceneParallaxRoot (
+    const Data::Model::Object& object, FindParent&& findParent, size_t maxHops
 ) {
-    if (!orthographic) return {};
-    return {
-        ((origin.x - cameraEye.x - sceneWidth * 0.5f) * cameraAmount
-            - displacement.x * sceneWidth) * depth.x,
-        ((origin.y - cameraEye.y - sceneHeight * 0.5f) * cameraAmount
-            - displacement.y * sceneHeight) * depth.y,
-        0.0f,
-    };
+    const Data::Model::Object* root = &object;
+    for (size_t hops = 0; root->parent.has_value () && hops < maxHops; ++hops) {
+        const Data::Model::Object* parent = findParent (*root->parent);
+        if (parent == nullptr) break;
+        root = parent;
+    }
+    return *root;
+}
+
+// The nearest ancestor that owns an offscreen child draw scope (a composing
+// image), across ordinary transform-only ancestors; nested scopes resolve to
+// the nearest one. A missing ancestor or a malformed cycle ends the walk.
+template <typename FindParent, typename Composes>
+std::optional<int> sceneCompositionOwner (
+    const Data::Model::Object& object, FindParent&& findParent, Composes&& composes
+) {
+    std::unordered_set<int> seen;
+    auto parent = object.parent;
+    while (parent && seen.insert (*parent).second) {
+        const Data::Model::Object* ancestor = findParent (*parent);
+        if (ancestor == nullptr) return std::nullopt;
+        if (composes (*parent)) return parent;
+        parent = ancestor->parent;
+    }
+    return std::nullopt;
+}
+
+// The draw scope inside composing images. Every composer draws its children
+// into its own offscreen target, but only a non-fullscreen one replaces the
+// scene stacks (native: inverse own transform, identity view,
+// +-size/2 ortho). A fullscreen composer (& 0x2, set from the model's
+// "fullscreen") keeps them, so its children otherwise
+// draw exactly as root objects: same projection, root clip, winding and
+// presentation. A local projection, once entered, persists through nesting.
+struct SceneCompositionScope {
+    bool offscreenTarget = false;
+    bool localProjection = false;
+};
+
+inline SceneCompositionScope sceneCompositionChildScope (SceneCompositionScope outer, bool fullscreenComposer) {
+    return {true, outer.localProjection || !fullscreenComposer};
+}
+
+// A fullscreen passthrough's copy quad is clip space. It copies the current
+// target 1:1 wherever the
+// scene stacks are in effect. The local-projection exception (scene MVP) has
+// no native counterpart: native gates its passthrough identity copy on 0x20
+// alone; it carries over the c337199 behaviour, which no installed scene hits.
+inline bool sceneFullscreenCopyInClipSpace (bool fullscreenPassthrough, SceneCompositionScope scope) {
+    return fullscreenPassthrough && !scope.localProjection;
+}
+
+// Native draws a non-fullscreen composer's children in its
+// local space with an identity view, so they take no camera parallax there and
+// reach the screen through the composer's composite, which carries the shared
+// root offset once. A fullscreen composer keeps the scene stacks unchanged: its
+// children keep the scene view's root translation and its composite does not
+// A child is therefore excluded from parallax iff
+// any composer above it is not fullscreen.
+template <typename FindParent, typename Composes, typename Fullscreen>
+bool sceneCompositionSuppressesParallax (
+    const Data::Model::Object& object, FindParent&& findParent, Composes&& composes, Fullscreen&& fullscreen
+) {
+    std::unordered_set<int> seen;
+    const Data::Model::Object* current = &object;
+    while (auto owner = sceneCompositionOwner (*current, findParent, composes)) {
+        if (!seen.insert (*owner).second) return false;
+        if (!fullscreen (*owner)) return true;
+        current = findParent (*owner);
+        if (current == nullptr) return false;
+    }
+    return false;
+}
+
+// Native initializes every object's depth to (1,1).
+inline glm::vec2 sceneParallaxDepth (const Data::Model::Object& object) {
+    return object.parallaxDepth ? object.parallaxDepth->value->getVec2 () : glm::vec2 (1.0f);
 }
 
 // Native maps the authored 0..3 delay slider to a per-frame
 // interpolation weight. Zero/negative delay bypasses smoothing; positive
 // values clamp only the upper bound, exactly as the native update does.
+// The displacement sceneLayerParallaxOffset consumes, from the same
+// top-origin cursor that advanceSceneParallaxPosition receives.
+inline glm::vec2 sceneParallaxDisplacementTarget (glm::vec2 cursor, float amount, float influence) {
+    return (cursor - glm::vec2 (0.5f)) * amount * influence;
+}
+
 inline float sceneParallaxDelayWeight (float delay, float frameDelta) {
     return delay > 0.0f ? std::min (1.0f, (1.0f - delay / 3.0f) * 10.0f * frameDelta) : 1.0f;
 }
@@ -165,6 +252,40 @@ inline glm::vec3 cameraShakeOffset (
     return {x * scale, y * scale, z * scale};
 }
 
+// Native g_ParallaxPosition (shader global 0x6b, bound by
+// ). writes it only while cameraparallax is on,
+// without an orthographic gate: the smoothed parallax point (the
+// clamped top-origin cursor as (x, 1 - y), scaled by the mouse influence about
+// the canvas centre, plus the eye, eased by the delay weight) divided by the
+// projection size and clamped to [0,1]. The cursor is the same top-origin one
+// sceneLayerParallaxOffset receives as a displacement. 
+// starts the uniform at (0.5,0.5) and the point at eye + size/2 for an
+// orthographic scene, 0 otherwise. Known divergence: native's size
+// is 0 for a perspective scene, so its uniform is degenerate
+// there; Linux divides by the scene size. Not modelled: the & 0x800
+// mirror, which native applies twice (cursor x at :295, uniform x at :333), and
+// the zero influence under & 0x200200; Linux has neither state.
+struct SceneParallaxPosition {
+    glm::vec2 point {0.0f};
+    glm::vec2 uniform {0.5f};
+};
+
+inline SceneParallaxPosition initialSceneParallaxPosition (bool orthographic, glm::vec2 size, glm::vec2 eye) {
+    return {orthographic ? eye + size * 0.5f : glm::vec2 (0.0f), glm::vec2 (0.5f)};
+}
+
+inline void advanceSceneParallaxPosition (
+    SceneParallaxPosition& state, bool cameraParallax, glm::vec2 cursor, float influence,
+    glm::vec2 size, glm::vec2 eye, float weight
+) {
+    if (!cameraParallax) return;
+    const glm::vec2 clamped = glm::clamp (glm::vec2 (cursor.x, 1.0f - cursor.y), glm::vec2 (0.0f), glm::vec2 (1.0f));
+    const glm::vec2 target = size * 0.5f * (1.0f - influence) + size * clamped * influence + eye;
+    state.point += (target - state.point) * weight;
+    if (size.x > 0.0f && size.y > 0.0f)
+        state.uniform = glm::clamp (state.point / size, glm::vec2 (0.0f), glm::vec2 (1.0f));
+}
+
 inline std::optional<glm::mat4> inverseFiniteTransform (const glm::mat4& matrix) {
     // Float matrix multiplication can give a mathematically singular affine
     // hierarchy a tiny nonzero determinant after rotated zero-scale axes mix.
@@ -189,6 +310,22 @@ inline std::optional<glm::mat4> inverseFiniteTransform (const glm::mat4& matrix)
         for (int row = 0; row < 4; ++row)
             if (!std::isfinite (inverse[column][row])) return std::nullopt;
     return inverse;
+}
+
+// Projection for a composer's children. A fullscreen
+// composer keeps the current scene projection, so children land 1:1 in screen
+// space. Otherwise the children are drawn in the composer's local space: an
+// orthographic box of the composer's authored size over
+// the inverse of its world transform.
+inline std::optional<glm::mat4> sceneCompositionChildProjection (
+    bool fullscreenComposer, const glm::mat4& currentProjection,
+    const glm::mat4& composerWorld, const glm::mat4& localFlip, glm::vec2 targetSize
+) {
+    if (fullscreenComposer) return currentProjection;
+    const auto inverse = inverseFiniteTransform (composerWorld);
+    if (!inverse) return std::nullopt;
+    return glm::ortho (-targetSize.x * 0.5f, targetSize.x * 0.5f,
+        -targetSize.y * 0.5f, targetSize.y * 0.5f, -1000.0f, 1000.0f) * localFlip * *inverse;
 }
 
 // Native CP matrices use the authored canvas, whereas orthographic Linux
@@ -282,11 +419,11 @@ inline glm::mat4 particlePerspectiveViewProjection (
 }
 
 inline bool particlePresentationReversesWinding (
-    bool orthographic, bool presetWorld, bool childComposition, bool perspectiveOverride
+    bool orthographic, bool presetWorld, bool localProjection, bool perspectiveOverride
 ) {
-    // Preset bit4 uses the root perspective camera even in a child target;
-    // ordinary presets use the child target's orthographic projection there.
-    return !orthographic && !presetWorld && (!childComposition || perspectiveOverride);
+    // Preset bit4 uses the root perspective camera even under a local
+    // projection; ordinary presets use the composer's local orthographic box.
+    return !orthographic && !presetWorld && (!localProjection || perspectiveOverride);
 }
 
 inline ResolvedSceneTransform localSceneTransform (const Data::Model::Object& object) {

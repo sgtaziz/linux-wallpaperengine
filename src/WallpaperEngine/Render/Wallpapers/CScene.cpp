@@ -138,6 +138,8 @@ CScene::CScene (
 	height = this->getContext ().getOutput ().getFullHeight ();
 	this->m_camera->setPerspectiveProjection (width, height);
     }
+    m_parallaxPosition = initialSceneParallaxPosition (scene->camera.projection.isOrthogonal,
+        glm::vec2 (getWidth (), getHeight ()), glm::vec2 (m_camera->getEye ()));
 
     // setup framebuffers here as they're required for the scene setup
     const auto sceneFormat = m_hdrPostprocessing ? TextureFormat_RGBA16161616f : TextureFormat_ARGB8888;
@@ -378,6 +380,43 @@ Render::CObject* CScene::createObject (const Object& object) {
     return renderObject;
 }
 
+std::optional<int> CScene::compositionOwner (
+    const CObject& object, const std::unordered_map<int, CObject*>& present) const {
+    return sceneCompositionOwner (object.getObject (),
+        [&present] (int id) -> const Object* {
+            const auto found = present.find (id);
+            return found == present.end () ? nullptr : &found->second->getObject ();
+        },
+        [&present] (int id) {
+            auto* ancestor = present.at (id);
+            return ancestor->is<Objects::CImage> () && ancestor->as<Objects::CImage> ()->canComposeChildren ();
+        });
+}
+
+void CScene::refreshComposedObjects () {
+    m_composedObjectIds.clear ();
+    // The debug object filter draws every scheduled object directly, without
+    // child composition scopes, so no object is composed in that mode.
+    const auto& debug = getContext ().getApp ().getContext ().settings.render.debug;
+    if (debug.objectFilter.has_value () || !debug.skipObjects.empty ()) return;
+    std::unordered_map<int, CObject*> present;
+    for (auto* object : m_objectsByRenderOrder) present.emplace (object->getId (), object);
+    const auto find = [&present] (int id) -> const Object* {
+        const auto found = present.find (id);
+        return found == present.end () ? nullptr : &found->second->getObject ();
+    };
+    const auto composes = [&present] (int id) {
+        auto* ancestor = present.at (id);
+        return ancestor->is<Objects::CImage> () && ancestor->as<Objects::CImage> ()->canComposeChildren ();
+    };
+    const auto fullscreen = [&present] (int id) {
+        return present.at (id)->as<Objects::CImage> ()->getImage ().model->fullscreen;
+    };
+    for (auto* object : m_objectsByRenderOrder)
+        if (sceneCompositionSuppressesParallax (object->getObject (), find, composes, fullscreen))
+            m_composedObjectIds.insert (object->getId ());
+}
+
 const Object* CScene::findObjectData (int id) const {
     const auto authored = std::ranges::find_if (getScene ().objects,
         [id] (const auto& candidate) { return candidate->id == id; });
@@ -476,7 +515,8 @@ std::shared_ptr<const CFBO> CScene::getActiveRenderTarget () const {
     return m_activeRenderTarget ? m_activeRenderTarget : getFBO ();
 }
 const glm::mat4& CScene::getActiveRenderProjection () const { return m_activeRenderProjection; }
-bool CScene::isChildCompositionScope () const { return m_childCompositionScope; }
+bool CScene::isChildCompositionScope () const { return m_compositionScope.offscreenTarget; }
+bool CScene::isLocalCompositionScope () const { return m_compositionScope.localProjection; }
 bool CScene::isMaxAlphaCompositionScope () const { return m_maxAlphaCompositionScope; }
 const Audio::Drivers::Recorders::StereoSpectrum::Bands& CScene::getAudioSpectrum () const {
     return this->m_audioSpectrum.bands ();
@@ -519,17 +559,18 @@ void CScene::renderFrame (const glm::ivec4& viewport) {
     this->updateMouse (viewport);
 
     // update the parallax position if required
-    if (this->getScene ().camera.parallax.enabled->value->getBool ()
-	&& !this->getContext ().getApp ().getContext ().settings.mouse.disableparallax) {
-	const float influence = this->getScene ().camera.parallax.mouseInfluence->value->getFloat ();
+    const bool cameraParallax = this->getScene ().camera.parallax.enabled->value->getBool ()
+	&& !this->getContext ().getApp ().getContext ().settings.mouse.disableparallax;
+    const float influence = this->getScene ().camera.parallax.mouseInfluence->value->getFloat ();
+    const float delay = sceneParallaxDelayWeight (
+	this->getScene ().camera.parallax.delay->value->getFloat (), g_Time - g_TimeLast);
+    if (cameraParallax) {
 	const float amount = this->getScene ().camera.parallax.amount->value->getFloat ();
-	const float delay = sceneParallaxDelayWeight (
-	    this->getScene ().camera.parallax.delay->value->getFloat (), g_Time - g_TimeLast);
-
-	const glm::vec2 centeredMouse = this->m_mousePosition - glm::vec2 (0.5f, 0.5f);
-	this->m_parallaxDisplacement
-	    = glm::mix (this->m_parallaxDisplacement, (centeredMouse * amount) * influence, delay);
+	this->m_parallaxDisplacement = glm::mix (this->m_parallaxDisplacement,
+	    sceneParallaxDisplacementTarget (this->m_mousePosition, amount, influence), delay);
     }
+    advanceSceneParallaxPosition (m_parallaxPosition, cameraParallax, m_mousePosition, influence,
+	glm::vec2 (getWidth (), getHeight ()), glm::vec2 (m_camera->getEye ()), delay);
 
     // Native updates image controls before SceneScript callbacks (
     // before). Joined handles observe the cached
@@ -538,6 +579,9 @@ void CScene::renderFrame (const glm::ivec4& viewport) {
         if (object->is<Objects::CImage> ())
             object->as<Objects::CImage> ()->advanceTextureAnimation (
                 getDeltaTime (), getContext ().getDriver ().getFrameCounter ());
+    // Update-time particle geometry (rope expansion) reads the camera parallax
+    // offset, so this frame's composed membership must exist before it.
+    refreshComposedObjects ();
     // Particle outer updates publish geometry before script callbacks. API
     // emissions and inner-only warmup after this point retain that publication.
     for (const auto& object : m_objectsByRenderOrder)
@@ -622,7 +666,7 @@ void CScene::renderFrame (const glm::ivec4& viewport) {
     m_activeRenderTarget = getFBO ();
     m_activeRenderProjection = m_rootRenderClipTransform
         * getCamera ().getProjection () * getCamera ().getRenderLookAt ();
-    m_childCompositionScope = false;
+    m_compositionScope = {};
     m_maxAlphaCompositionScope = false;
 
     // Native fills the spot atlas before the scene stages sample it.
@@ -652,19 +696,9 @@ void CScene::renderFrame (const glm::ivec4& viewport) {
     // passthrough image with an effect owns an offscreen child draw scope.
     // Its descendants draw at that scope's position, even across ordinary
     // transform-only ancestors; nested scopes recurse at their own position.
+    // refreshComposedObjects applied the same rule before the object updates.
     for (auto* object : m_objectsByRenderOrder) {
-	std::optional<int> owner;
-	auto parent = object->getObject ().parent;
-	while (parent) {
-	    const auto ancestor = present.find (*parent);
-	    if (ancestor == present.end ()) break;
-	    if (ancestor->second->is<Objects::CImage> ()
-		&& ancestor->second->as<Objects::CImage> ()->canComposeChildren ()) {
-		owner = *parent;
-		break;
-	    }
-	    parent = ancestor->second->getObject ().parent;
-	}
+	const auto owner = compositionOwner (*object, present);
 	if (owner) children[*owner].push_back (object);
 	else roots.push_back (object);
     }
@@ -696,26 +730,27 @@ void CScene::renderFrame (const glm::ivec4& viewport) {
 		      glm::mat4 (1.0f), glm::vec3 (-getWidth () * 0.5f, getHeight () * 0.5f, 0.0f))
 		      * flip * transform.authoredMatrix
 		: transform.authoredMatrix;
-	    const auto inverse = inverseFiniteTransform (world);
-	    if (!inverse) return;
-	    const float width = static_cast<float> (target->getRealWidth ());
-	    const float height = static_cast<float> (target->getRealHeight ());
-	    const glm::mat4 localFlip = getCamera ().isOrthogonal () ? flip : glm::mat4 (1.0f);
-	    const glm::mat4 projection = glm::ortho (-width * 0.5f, width * 0.5f,
-		-height * 0.5f, height * 0.5f, -1000.0f, 1000.0f) * localFlip * *inverse;
+	    // Native: a fullscreen composer keeps the scene stacks
+	    // (children land 1:1 in its output-sized target and keep the scene view's
+	    // camera parallax); any other composer draws them in its local space.
+	    const bool fullscreen = image->getImage ().model->fullscreen;
+	    const auto projection = sceneCompositionChildProjection (fullscreen, m_activeRenderProjection, world,
+		getCamera ().isOrthogonal () ? flip : glm::mat4 (1.0f),
+		glm::vec2 (static_cast<float> (target->getRealWidth ()), static_cast<float> (target->getRealHeight ())));
+	    if (!projection) return;
 	    const auto previousTarget = m_activeRenderTarget;
 	    const auto previousProjection = m_activeRenderProjection;
-	    const bool previousScope = m_childCompositionScope;
+	    const auto previousScope = m_compositionScope;
 	    const bool previousMaxAlpha = m_maxAlphaCompositionScope;
 	    m_activeRenderTarget = target;
-	    m_activeRenderProjection = projection;
-	    m_childCompositionScope = true;
+	    m_activeRenderProjection = *projection;
+	    m_compositionScope = sceneCompositionChildScope (previousScope, fullscreen);
 	    m_maxAlphaCompositionScope = previousMaxAlpha
 		|| !image->getImage ().copyBackground->value->getBool ();
 	    auto restore = [&] {
 		m_activeRenderTarget = previousTarget;
 		m_activeRenderProjection = previousProjection;
-		m_childCompositionScope = previousScope;
+		m_compositionScope = previousScope;
 		m_maxAlphaCompositionScope = previousMaxAlpha;
 	    };
 	    try {
@@ -966,22 +1001,30 @@ bool CScene::isMouseLeftDown () const { return m_mouseLeftDown; }
 
 const glm::vec2* CScene::getParallaxDisplacement () const { return &this->m_parallaxDisplacement; }
 
-glm::vec3 CScene::getLayerParallaxOffset (const glm::vec2& depth) const {
-    if (!getScene ().camera.parallax.enabled->value->getBool ()
-        || getContext ().getApp ().getContext ().settings.mouse.disableparallax)
-        return {};
-    return sceneParallaxOffset (depth, m_parallaxDisplacement, static_cast<float> (getWidth ()),
-                                m_camera->isOrthogonal ());
-}
-glm::vec3 CScene::getLayerParallaxOffset (const glm::vec3& origin,
-                                         const glm::vec2& depth) const {
-    if (!getScene ().camera.parallax.enabled->value->getBool ()
-        || getContext ().getApp ().getContext ().settings.mouse.disableparallax)
-        return {};
-    return sceneParticleParallaxOffset (
-        origin, m_camera->getEye (), depth, m_parallaxDisplacement,
-        static_cast<float> (getWidth ()), static_cast<float> (getHeight ()),
-        getScene ().camera.parallax.amount->value->getFloat (), m_camera->isOrthogonal ());
+const glm::vec2* CScene::getParallaxPosition () const { return &this->m_parallaxPosition.uniform; }
+
+glm::vec3 CScene::getLayerParallaxOffset (const Object& object) const {
+    // Native shifts every object once, by its root's offset. A child
+    // of a non-fullscreen composer is drawn in that composer's local space and
+    // reaches the screen through its composite, which already carries the same
+    // root offset. A fullscreen composer's children
+    // keep the scene view, so they take their root offset themselves.
+    // Membership comes from the render pass's structural ownership, so a
+    // particle's update-time geometry (rope expansion) and its draw agree.
+    const bool cameraParallax = getScene ().camera.parallax.enabled->value->getBool ()
+        && !getContext ().getApp ().getContext ().settings.mouse.disableparallax
+        && !m_compositionScope.localProjection && !m_composedObjectIds.contains (object.id);
+    if (!cameraParallax || !m_camera->isOrthogonal ()) return {};
+    auto cached = m_parallaxRoots.find (object.id);
+    if (cached == m_parallaxRoots.end ())
+        cached = m_parallaxRoots.emplace (object.id, &sceneParallaxRoot (object,
+            [this] (int id) { return findObjectData (id); },
+            getScene ().objects.size () + m_scriptObjectData.size ())).first;
+    const Object& root = *cached->second;
+    return sceneLayerParallaxOffset (
+        root.origin->value->getVec3 (), m_camera->getEye (), sceneParallaxDepth (root),
+        m_parallaxDisplacement, static_cast<float> (getWidth ()), static_cast<float> (getHeight ()),
+        getScene ().camera.parallax.amount->value->getFloat (), true, true);
 }
 
 const std::vector<CObject*>& CScene::getObjectsByRenderOrder () const { return this->m_objectsByRenderOrder; }
@@ -1295,15 +1338,18 @@ CObject* CScene::createScriptLayer (const std::string& configurationJson,
         parent = parentData ? parentData->parent : std::nullopt;
     }
     const auto inserted = m_scriptObjectData.emplace (id, std::move (model));
+    m_parallaxRoots.clear ();
     CObject* result = nullptr;
     try {
         result = createObject (*inserted.first->second);
     } catch (...) {
         m_scriptObjectData.erase (id);
+        m_parallaxRoots.clear ();
         throw;
     }
     if (!result) {
         m_scriptObjectData.erase (id);
+        m_parallaxRoots.clear ();
         throw std::runtime_error ("SceneScript layer could not be initialized");
     }
     if (inserted.first->second->is<ScenePointLight> ()) {
@@ -1376,6 +1422,7 @@ void CScene::flushDestroyedScriptLayers () {
             delete object;
             m_scriptObjectData.erase (id);
             m_rejectedObjectIds.insert (id);
+            m_parallaxRoots.clear ();
         }
     }
 }

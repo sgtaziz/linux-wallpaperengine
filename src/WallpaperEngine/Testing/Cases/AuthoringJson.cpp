@@ -496,7 +496,31 @@ TEST_CASE ("Text preserves authored parallax depth including a negative axis", "
     object = ObjectParser::parse (input, project);
     text = dynamic_cast<const Text*> (object.get ());
     REQUIRE (text != nullptr);
-    REQUIRE (text->parallaxDepth->value->getVec2 () == glm::vec2 (0.0f));
+    // Native initializes to 1.0; an absent key is a no-op.
+    REQUIRE (text->parallaxDepth->value->getVec2 () == glm::vec2 (1.0f));
+}
+
+TEST_CASE ("Every object type defaults parallax depth to native (1,1)", "[parser][parallax]") {
+    // The controlled native capture moved a layer without parallaxDepth with
+    // the (1,1) control; registers the field on the base object, so
+    // groups and other roots carry it too.
+    using WallpaperEngine::Data::Model::Project;
+    using WallpaperEngine::Data::Parsers::ObjectParser;
+    Project project {};
+    for (const char* source : {R"({"id":1,"name":"group","origin":"10 20 0"})",
+                               R"({"id":2,"name":"light","light":"lpoint"})",
+                               R"({"id":3,"name":"text","text":"Clock"})"}) {
+        auto input = parseAuthoringJson (source, "default-depth.json");
+        auto object = ObjectParser::parse (input, project);
+        REQUIRE (object->parallaxDepth != nullptr);
+        REQUIRE (object->parallaxDepth->value->getVec2 () == glm::vec2 (1.0f));
+        input["parallaxDepth"] = "0.00000 0.00000";
+        object = ObjectParser::parse (input, project);
+        REQUIRE (object->parallaxDepth->value->getVec2 () == glm::vec2 (0.0f));
+        input["parallaxDepth"] = "-1.00000 0.50000";
+        object = ObjectParser::parse (input, project);
+        REQUIRE (object->parallaxDepth->value->getVec2 () == glm::vec2 (-1.0f, 0.5f));
+    }
 }
 
 TEST_CASE ("Unsupported particle components report object and JSON path", "[particle][parser]") {
