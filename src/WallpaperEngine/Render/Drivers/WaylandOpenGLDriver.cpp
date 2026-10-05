@@ -410,22 +410,18 @@ void WaylandOpenGLDriver::dispatchEventQueue () {
 
     // TODO: WRITE A NON-BLOCKING VERSION OF THIS ONCE PARTICLE SIMULATION STARTS WORKING
     // TODO: OTHERWISE wl_display_dispatch WILL BLOCK IF NO SURFACES ARE BEING DRAWN
-    static float startTime, endTime, minimumTime = 1.0f / this->m_context.settings.render.maximumFPS;
-    // get the start time of the frame
-    startTime = this->getRenderTime ();
-
     if (wl_display_dispatch (m_waylandContext.display) == -1) {
 	m_requestedExit = true;
     }
 
     m_frameCounter++;
 
-    endTime = this->getRenderTime ();
-
-    // ensure the frame time is correct to not overrun FPS
-    if ((endTime - startTime) < minimumTime) {
-	usleep ((minimumTime - (endTime - startTime)) * CLOCKS_PER_SEC);
+    // pace the frame like the native limiter: its share of the second's budget
+    const auto done = FramePacer::Clock::now ();
+    if (const int64_t milliseconds = this->m_framePacer.sleepMilliseconds (done); milliseconds > 0) {
+	usleep (static_cast<useconds_t> (milliseconds * 1000));
     }
+    this->m_framePacer.woke (done, FramePacer::Clock::now ());
 }
 
 Output::Output& WaylandOpenGLDriver::getOutput () { return this->m_output; }

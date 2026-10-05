@@ -13,6 +13,7 @@
 #include "WallpaperEngine/Application/WallpaperApplication.h"
 #include "WallpaperEngine/Input/Drivers/WaylandMouseInput.h"
 #include "WallpaperEngine/Render/Drivers/Detectors/WaylandFullScreenDetector.h"
+#include "WallpaperEngine/Render/Drivers/FramePacer.h"
 #include "WallpaperEngine/Render/Drivers/Output/WaylandOutput.h"
 #include "WallpaperEngine/Render/Drivers/Output/WaylandOutputViewport.h"
 #include "WallpaperEngine/Render/Drivers/VideoDriver.h"
@@ -102,6 +103,7 @@ private:
     uint32_t m_frameCounter = 0;
     ApplicationContext& m_context;
     WaylandMouseInput m_mouseInput;
+    FramePacer m_framePacer {m_context.settings.render.maximumFPS};
 
     std::chrono::high_resolution_clock::time_point renderStart = std::chrono::high_resolution_clock::now ();
 };
