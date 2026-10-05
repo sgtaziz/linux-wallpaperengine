@@ -254,6 +254,14 @@ CScene::CScene (
 
     const auto bloomOrigin = glm::vec3 { sceneWidth / 2, sceneHeight / 2, 0.0f };
     const auto bloomSize = glm::vec2 { sceneWidth, sceneHeight };
+    // Native uploads bloomstrength, bloomthreshold and bloomtint to
+    // the non-HDR bloom material; renderFrame keeps them live afterwards.
+    const auto bloomTint = this->getScene ().camera.bloom.tint->value->getVec3 ();
+    const JSON bloomConstants = {
+	{ "bloomstrength", this->getScene ().camera.bloom.strength->value->getFloat () },
+	{ "bloomthreshold", this->getScene ().camera.bloom.threshold->value->getFloat () },
+	{ "bloomtint", std::to_string (bloomTint.x) + " " + std::to_string (bloomTint.y) + " "
+	                   + std::to_string (bloomTint.z) } };
 
     const JSON bloom
 	= { { "image", "models/wpenginelinux.json" },
@@ -273,18 +281,9 @@ CScene::CScene (
 		      { "name", "" },
 		      { "passes",
 			JSON::array (
-			    { { { "constantshadervalues",
-				  { { "bloomstrength", this->getScene ().camera.bloom.strength->value->getFloat () },
-				    { "bloomthreshold",
-				      this->getScene ().camera.bloom.threshold->value->getFloat () } } } },
-			      { { "constantshadervalues",
-				  { { "bloomstrength", this->getScene ().camera.bloom.strength->value->getFloat () },
-				    { "bloomthreshold",
-				      this->getScene ().camera.bloom.threshold->value->getFloat () } } } },
-			      { { "constantshadervalues",
-				  { { "bloomstrength", this->getScene ().camera.bloom.strength->value->getFloat () },
-				    { "bloomthreshold",
-				      this->getScene ().camera.bloom.threshold->value->getFloat () } } } } }
+			    { { { "constantshadervalues", bloomConstants } },
+			      { { "constantshadervalues", bloomConstants } },
+			      { { "constantshadervalues", bloomConstants } } }
 			) } } }
 	      ) } };
 
@@ -568,7 +567,7 @@ void CScene::renderFrame (const glm::ivec4& viewport) {
     } else if (m_bloomObjectData && m_bloomObjectData->is<Image> ()) {
 	const auto& bloom = this->getScene ().camera.bloom;
 	applyBloomConstants (m_bloomObjectData->as<Image> ()->effects, bloom.strength->value->getFloat (),
-	                     bloom.threshold->value->getFloat ());
+	                     bloom.threshold->value->getFloat (), bloom.tint->value->getVec3 ());
     }
     flushDestroyedScriptLayers ();
     refreshPointLights ();
