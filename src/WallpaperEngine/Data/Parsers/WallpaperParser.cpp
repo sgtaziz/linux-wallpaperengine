@@ -135,13 +135,18 @@ SceneUniquePtr WallpaperParser::parseScene (const JSON& file, Project& project) 
             throw std::invalid_argument ("Scene tube lightconfig exceeds its serialized four-bit count");
     }
     const auto& properties = project.properties;
-    // Native ignores wrong JSON types. Preserve registered bool user
-    // settings, while invalid authored values retain the initial false bit.
-    auto clearGeneral = general;
-    if (const auto value = general.optional ("clearenabled"); value
-        && !value->is_boolean ()
-        && !(value->is_object () && value->contains ("value") && value->at ("value").is_boolean ()))
-        clearGeneral["clearenabled"] = false;
+    // Native starts the general flags qword at 0x26
+    // so bloom, camerafade
+    // and clearenabled begin set. Each
+    // loader writes its bit only for a JSON bool or an object whose "value" is
+    // a bool; any other type, including null, leaves the bit set. Omitted or
+    // invalid authoring therefore reads as true.
+    auto boolGeneral = general;
+    for (const char* key : {"bloom", "camerafade", "clearenabled"})
+        if (const auto value = general.optional (key); value
+            && !value->is_boolean ()
+            && !(value->is_object () && value->contains ("value") && value->at ("value").is_boolean ()))
+            boolGeneral[key] = true;
 
     // Shipped scenes author these projection fields under general. Keep camera
     // as a fallback for older definitions that placed them there.
@@ -171,18 +176,18 @@ SceneUniquePtr WallpaperParser::parseScene (const JSON& file, Project& project) 
             .spotShadowSlots = spotShadowSlots,
             .spotCookieSlots = spotCookieSlots,
             .spotShadowCookieSlots = spotShadowCookieSlots,
-            .clearEnabled = clearGeneral.user ("clearenabled", properties, false),
+            .clearEnabled = boolGeneral.user ("clearenabled", properties, true),
             .colors = {
                 .ambient  = general.user ("ambientcolor", properties, glm::vec3 (0.0f)),
                 .skylight = general.user ("skylightcolor", properties, glm::vec3 (0.0f)),
                 .clear = general.user ("clearcolor", properties, glm::vec3 (0.0f)),
             },
             .camera = {
-                .fade = general.user ("camerafade", properties, false),
+                .fade = boolGeneral.user ("camerafade", properties, true),
 		.hdr = general.optional ("hdr", false),
                 .preview = general.optional ("camerapreview", false),
                 .bloom = {
-                    .enabled = general.user ("bloom", properties, false),
+                    .enabled = boolGeneral.user ("bloom", properties, true),
                     .strength = general.user ("bloomstrength", properties, 2.0f),
                     .threshold = general.user ("bloomthreshold", properties, 0.65f),
 		    .hdrStrength = general.user ("bloomhdrstrength", properties, 2.0f),
