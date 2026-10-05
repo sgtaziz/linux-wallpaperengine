@@ -257,4 +257,28 @@ inline SpotLightPacking packSpotLights (
     return result;
 }
 
+/** One visible tube light, in scene registration order. */
+struct TubeLightInput {
+    /** Raw castshadow|usecookie flags (sort key only; tubes draw unshadowed). */
+    int flags = 0;
+    /** dot(authored local origin, view forward); native. */
+    float depth = 0.0f;
+    TubeLightUniforms uniforms {glm::vec4 (0.0f), glm::vec4 (0.0f), glm::vec4 (0.0f)};
+};
+
+// Native fills tube slots sort order while its
+// serialized tube count (lightconfig bits 8-11) lasts; unused slots stay zero.
+inline std::vector<TubeLightUniforms> packTubeLights (const std::vector<TubeLightInput>& lights, int slots) {
+    const glm::vec4 zero (0.0f);
+    std::vector<TubeLightUniforms> result (std::max (slots, 0), TubeLightUniforms {zero, zero, zero});
+    std::vector<size_t> order (lights.size ());
+    for (size_t i = 0; i < order.size (); ++i) order[i] = i;
+    std::stable_sort (order.begin (), order.end (), [&] (size_t left, size_t right) {
+        return spotLightPrecedes (lights[left].flags, lights[left].depth, lights[right].flags, lights[right].depth);
+    });
+    for (size_t slot = 0; slot < result.size () && slot < order.size (); ++slot)
+        result[slot] = lights[order[slot]].uniforms;
+    return result;
+}
+
 } // namespace WallpaperEngine::Render::Wallpapers

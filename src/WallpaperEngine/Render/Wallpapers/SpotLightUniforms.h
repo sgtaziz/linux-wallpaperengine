@@ -25,4 +25,24 @@ inline SpotLightUniforms packSpotLightUniforms (
         glm::vec4 (exponent, 0.0f, 0.0f, 0.0f),
     };
 }
+struct TubeLightUniforms {
+    glm::vec4 color;
+    glm::vec4 originA;
+    glm::vec4 originB;
+};
+
+// Native packs a tube from its
+// authored node matrix: color*intensity with radius in w, segment start at
+// the matrix translation with exponent in w, and segment end at the matrix
+// applied to the local control point (w = 1), stored with w = 0.
+inline TubeLightUniforms packTubeLightUniforms (
+    const glm::mat4& authoredMatrix, const glm::vec3& color, float intensity,
+    float radius, float exponent, const glm::vec3& controlPoint
+) {
+    return {
+        glm::vec4 (color * intensity, radius),
+        glm::vec4 (glm::vec3 (authoredMatrix[3]), exponent),
+        glm::vec4 (glm::vec3 (authoredMatrix * glm::vec4 (controlPoint, 1.0f)), 0.0f),
+    };
+}
 } // namespace WallpaperEngine::Render::Wallpapers

@@ -576,6 +576,9 @@ std::string ShaderUnit::generateLightingV1 () const {
         return override != m_overrideCombos.end () ? override->second
             : authored != m_combos.end () ? authored->second : 0;
     };
+    const int tubeCount = count ("LIGHTS_TUBE");
+    if (tubeCount < 0 || tubeCount > 15)
+        throw std::invalid_argument ("LightingV1 tube-light count exceeds native four-bit lightconfig range");
     const int bothCount = count ("LIGHTS_SPOT_SHADOW_COOKIE");
     const int cookieCount = count ("LIGHTS_SPOT_COOKIE");
     const int shadowCount = count ("LIGHTS_SPOT_SHADOW");
@@ -594,6 +597,10 @@ std::string ShaderUnit::generateLightingV1 () const {
         for (const char* name : {"Color", "Origin", "Direction", "Exponent"})
             result += std::string ("uniform vec4 g_LSpot_") + name
                 + "[" + std::to_string (spotCount) + "];\n";
+    if (tubeCount > 0)
+        for (const char* name : {"Color", "OriginA", "OriginB"})
+            result += std::string ("uniform vec4 g_LTube_") + name
+                + "[" + std::to_string (tubeCount) + "];\n";
     if (featureCount > 0)
         result += "uniform mat4 g_LFeature_ShadowProjection[" + std::to_string (featureCount) + "];\n"
                   "uniform vec4 g_LFeature_ShadowProjectionTransform[" + std::to_string (featureCount) + "];\n";
@@ -628,6 +635,16 @@ std::string ShaderUnit::generateLightingV1 () const {
                   "g_LSpot_Color[i].rgb * " + std::string (cookie ? "colorCookie" : "spotCookie") +
                   ", g_LSpot_Color[i].w, g_LSpot_Exponent[i].x, specularTint, ambient, roughness, metallic, "
                   + std::string (shadow ? "shadowFactor" : "1.0") + "); }\n";
+    }
+    // Native emits the tube loop after the spot loops and
+    // before the directional ones, unshadowed: the closest point on the
+    // segment, color/radius in Color and the exponent in OriginA.w.
+    for (int index = 0; index < tubeCount; ++index) {
+        result += "    { const uint i = " + std::to_string (index) + "u;\n"
+                  "      vec3 lightDelta = PointSegmentDelta(worldPos, g_LTube_OriginA[i].xyz, g_LTube_OriginB[i].xyz);\n"
+                  "      light += ComputePBRLightShadow(normal, lightDelta, viewVector, color, "
+                  "g_LTube_Color[i].rgb, g_LTube_Color[i].w, g_LTube_OriginA[i].w, "
+                  "specularTint, ambient, roughness, metallic, 1.0); }\n";
     }
     result += "    return light;\n}\n#else\n"
               "vec3 PerformLighting_V1(vec3 worldPos, vec3 color, vec3 normal, vec3 viewVector,\n"

@@ -54,6 +54,7 @@ struct SceneData {
     /** Serialized native point-light shader slots; object count may differ. */
     int pointLightSlots = 0;
     int spotLightSlots = 0;
+    int tubeLightSlots = 0;
     int spotShadowSlots = 0;
     int spotCookieSlots = 0;
     int spotShadowCookieSlots = 0;

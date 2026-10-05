@@ -812,6 +812,7 @@ void CPass::setupShaders () {
     Shaders::applySceneHdrCombo (sceneCombos, m_renderable.getScene ().isHdrPostprocessingActive ());
     sceneCombos.insert_or_assign ("LIGHTS_POINT", m_renderable.getScene ().getPointLightCount ());
     sceneCombos.insert_or_assign ("LIGHTS_SPOT", m_renderable.getScene ().getSpotLightCount ());
+    sceneCombos.insert_or_assign ("LIGHTS_TUBE", m_renderable.getScene ().getTubeLightCount ());
     // Native publishes the serialized spot feature subsets, then
     // enables the shipped shadow/cookie helpers when any subset is present.
     const auto& lightScene = m_renderable.getScene ();
@@ -1101,6 +1102,11 @@ void CPass::setupUniforms () {
         this->addUniform ("g_LSpot_Origin", scene.getSpotLightOrigins (), scene.getSpotLightCount ());
         this->addUniform ("g_LSpot_Direction", scene.getSpotLightDirections (), scene.getSpotLightCount ());
         this->addUniform ("g_LSpot_Exponent", scene.getSpotLightExponents (), scene.getSpotLightCount ());
+    }
+    if (scene.getTubeLightCount () > 0) {
+        this->addUniform ("g_LTube_Color", scene.getTubeLightColors (), scene.getTubeLightCount ());
+        this->addUniform ("g_LTube_OriginA", scene.getTubeLightOriginsA (), scene.getTubeLightCount ());
+        this->addUniform ("g_LTube_OriginB", scene.getTubeLightOriginsB (), scene.getTubeLightCount ());
     }
     if (scene.getSpotFeatureCount () > 0) {
         this->addUniform ("g_LFeature_ShadowProjection", scene.getSpotFeatureProjections (), scene.getSpotFeatureCount ());
