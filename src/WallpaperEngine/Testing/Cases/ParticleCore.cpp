@@ -952,6 +952,25 @@ TEST_CASE ("Compiled particle color endpoints receive a separate HSV tint",
         == Catch::Approx (1.0f).margin (1e-6f));
 }
 
+TEST_CASE ("Ordered colour changes compose on the current colour stream", "[particle][color][colorchange]") {
+    // Original 2.8.42 opcode 5 replay (, birth
+    // RGB .9 .8 .7, life 0.4): C1 = .2..0.8 (1 .5 .25)->(.2 .4 1), C2 = 0..1
+    // (.5 1 1)->(1 1 .5). Native multiplies the current stream, so C1C2 and
+    // C2C1 both give birth * C1 * C2 (RCPPS ramp tolerance), not birth * C2.
+    const glm::vec3 birth (0.9f, 0.8f, 0.7f);
+    const auto c1 = [] (glm::vec3& c) { applyColorChange (c, 0.4f, 0.2f, 0.8f, {1.0f, 0.5f, 0.25f}, {0.2f, 0.4f, 1.0f}); };
+    const auto c2 = [] (glm::vec3& c) { applyColorChange (c, 0.4f, 0.0f, 1.0f, {0.5f, 1.0f, 1.0f}, {1.0f, 1.0f, 0.5f}); };
+    glm::vec3 single = birth, ab = birth, ba = birth;
+    c1 (single); c1 (ab); c2 (ab); c2 (ba); c1 (ba);
+    REQUIRE (single.r == Catch::Approx (0.660052657f).margin (2e-4f));
+    REQUIRE (single.b == Catch::Approx (0.349961579f).margin (2e-4f));
+    for (const glm::vec3& composed : {ab, ba}) {
+        REQUIRE (composed.r == Catch::Approx (0.461996555f).margin (2e-4f));
+        REQUIRE (composed.g == Catch::Approx (0.373339206f).margin (2e-4f));
+        REQUIRE (composed.b == Catch::Approx (0.279990613f).margin (2e-4f));
+    }
+}
+
 TEST_CASE ("Particle preset color summary comes from color components, not authored top level",
            "[particle][instance][parser]") {
     using WallpaperEngine::Data::Parsers::ObjectParser;
@@ -969,7 +988,9 @@ TEST_CASE ("Particle preset color summary comes from color components, not autho
     auto object = ObjectParser::parse (data, project);
     const auto* particle = dynamic_cast<const Particle*> (object.get ());
     REQUIRE (particle != nullptr);
-    REQUIRE (particle->presetColorN == glm::vec3 (1.0f, 0.75f, 0.0f));
+    // takes the summary from the color initializer (colorrandom
+    // midpoint); colorchange's start color is only the no-initializer fallback.
+    REQUIRE (particle->presetColorN == glm::vec3 (1.0f));
     REQUIRE (particle->presetHasColor);
     REQUIRE (particle->presetTintCompiled); // Missing scene version defaults to 0.
     REQUIRE (particle->flags == 8u);
@@ -993,7 +1014,11 @@ TEST_CASE ("Particle preset color summary comes from color components, not autho
     particle = dynamic_cast<const Particle*> (object.get ());
     REQUIRE (particle != nullptr);
     REQUIRE (particle->instanceOverride.colorn->value->getVec3 () == glm::vec3 (1.0f));
-    REQUIRE (particleInstanceTintValid (glm::vec3 (1.0f), particle->presetColorN,
+    // A white tint equals the white colorrandom summary, so native leaves the
+    // authored colorchange untinted (as for the grass in 2915841260).
+    REQUIRE_FALSE (particleInstanceTintValid (glm::vec3 (1.0f), particle->presetColorN,
+        particle->presetColorN, 0, 0, true));
+    REQUIRE (particleInstanceTintValid (glm::vec3 (1.0f, 0.75f, 0.0f), particle->presetColorN,
         particle->presetColorN, 0, 0, true));
     // Native normalizes the legacy authored 0..255 `color` field
     // into `colorn`, overriding a simultaneous `colorn` entry.

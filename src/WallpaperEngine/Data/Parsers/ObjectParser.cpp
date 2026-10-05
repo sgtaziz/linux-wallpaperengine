@@ -868,21 +868,17 @@ ParticleUniquePtr ObjectParser::parseParticle (const JSON& it, const Project& pr
 	float startTime = 0.0f;
 	uint32_t flags = 0;
 	// synthesizes the compiled preset's colorn/hascolor from its
-	// color components, overwriting any top-level authored values. Color-random
-	// uses the midpoint; color-change's start color takes precedence afterward.
+	// color components, overwriting any top-level authored values. The last
+	// color initializer wins (color-random uses its midpoint); color-change's
+	// start color is only the fallback when no color initializer exists
 	glm::vec3 presetColorN (1.0f);
 	bool presetHasColor = false;
-	const bool extendedBirthColors = std::any_of (initializers.begin (), initializers.end (), [] (const auto& initializer) {
-	    return initializer->template is<HsvColorRandomInitializer> ()
-	        || initializer->template is<ColorListInitializer> ();
-	});
 	for (const auto& initializer : initializers) {
 	    if (initializer->is<ColorRandomInitializer> ()) {
 		const auto* random = initializer->as<ColorRandomInitializer> ();
 		presetColorN = (random->min->value->getVec3 ()
 		    + random->max->value->getVec3 ()) * 0.5f;
 		presetHasColor = true;
-		if (!extendedBirthColors) break;
 	    } else if (initializer->is<HsvColorRandomInitializer> ()) {
 	        const auto* hsv = initializer->as<HsvColorRandomInitializer> ();
 	        const glm::vec3 midpoint (
@@ -900,11 +896,8 @@ ParticleUniquePtr ObjectParser::parseParticle (const JSON& it, const Project& pr
 	        }
 	    }
 	}
-	// New color families follow native last-initializer/fallback precedence.
-	// The accepted legacy-only path retains its prior colorchange behavior;
-	// changing that path requires a separate native/user regression batch.
 	for (const auto& op : operators) {
-	    if (op->is<ColorChangeOperator> () && (!extendedBirthColors || !presetHasColor)) {
+	    if (op->is<ColorChangeOperator> () && !presetHasColor) {
 		const auto* change = op->as<ColorChangeOperator> ();
 		presetColorN = change->startValue->value->getVec3 ();
 		presetHasColor = true;

@@ -3162,14 +3162,7 @@ OperatorFunc CParticle::createColorChangeOperator (const ColorChangeOperator& op
 		    continue;
 		}
 
-		float life = p.getLifetimePos ();
-
-		glm::vec3 color;
-		color.r = WallpaperEngine::Maths::fadeValue (life, startTime, endTime, startValue.r, endValue.r);
-		color.g = WallpaperEngine::Maths::fadeValue (life, startTime, endTime, startValue.g, endValue.g);
-		color.b = WallpaperEngine::Maths::fadeValue (life, startTime, endTime, startValue.b, endValue.b);
-
-		p.color = p.initial.color * color;
+		ParticleCore::applyColorChange (p.color, p.getLifetimePos (), startTime, endTime, startValue, endValue);
 	    }
 	};
 }

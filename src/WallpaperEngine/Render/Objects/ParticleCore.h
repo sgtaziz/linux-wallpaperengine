@@ -15,6 +15,7 @@
 
 #include "WallpaperEngine/Render/Utils/NativeParticleGradientNoise.h"
 #include "ParticleNativeRuntime.h"
+#include "WallpaperEngine/Maths.h"
 
 #include <glm/glm.hpp>
 #include <glm/gtc/constants.hpp>
@@ -1306,6 +1307,16 @@ inline glm::vec3 positionOscillationDelta (float age, float step, float random,
 // Interpreter restores size from stream 0x4f on every invocation
 // and restores alpha from 0x66 when its alpha-processing flag is set. This
 // happens before all operator records, including each of two half-step passes.
+// opcode 5 (colorchange) scales the current colour streams, which
+// the interpreter restores from the birth colour each tick, so ordered colour
+// changes (and earlier colour writers) compose.
+inline void applyColorChange (glm::vec3& color, float life, float startTime, float endTime,
+                              const glm::vec3& startValue, const glm::vec3& endValue) {
+    for (int channel = 0; channel < 3; ++channel)
+        color[channel] *= WallpaperEngine::Maths::fadeValue (
+            life, startTime, endTime, startValue[channel], endValue[channel]);
+}
+
 inline void restoreOperatorStreams (float& alpha, float& size, float initialAlpha,
                                     float initialSize, bool resetAlpha) {
     size = initialSize;
