@@ -327,9 +327,9 @@ CImage::CImage (Wallpapers::CScene& scene, const Image& image) :
     m_targetBaseSize = backingSize;
 
     // build a list of vertices, these might need some change later (or maybe invert the camera)
-    GLfloat sceneSpacePosition[] = { this->m_pos.x, this->m_pos.y, 0.0f, this->m_pos.x, this->m_pos.w, 0.0f,
-				     this->m_pos.z, this->m_pos.y, 0.0f, this->m_pos.z, this->m_pos.y, 0.0f,
-				     this->m_pos.x, this->m_pos.w, 0.0f, this->m_pos.z, this->m_pos.w, 0.0f };
+    const auto sceneSpacePosition = imageLocalQuadPositions ({
+        glm::vec3 (this->m_pos.x, this->m_pos.y, 0.0f), glm::vec3 (this->m_pos.x, this->m_pos.w, 0.0f),
+        glm::vec3 (this->m_pos.z, this->m_pos.y, 0.0f), glm::vec3 (this->m_pos.z, this->m_pos.w, 0.0f)});
 
     float width = 1.0f;
     float height = 1.0f;
@@ -394,44 +394,41 @@ CImage::CImage (Wallpapers::CScene& scene, const Image& image) :
 	realHeight = 1.0f;
     }
 
-    GLfloat texcoordCopy[] = { x, height, x, y, width, height, width, height, x, y, width, y };
+    const auto texcoordCopy = imageQuadTexcoords (x, y, width, height);
     m_texcoordCopyTopV = height;
     m_texcoordCopyBottomV = y;
 
-    GLfloat copySpacePosition[] = { realX,     realHeight, 0.0f, realX, realY, 0.0f, realWidth, realHeight, 0.0f,
-				    realWidth, realHeight, 0.0f, realX, realY, 0.0f, realWidth, realY,      0.0f };
-    GLfloat texcoordPass[] = { 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, 1.0f, 1.0f, 1.0f, 0.0f, 0.0f, 1.0f, 0.0f };
-    GLfloat texcoordPassPresented[] = { 0.0f, 0.0f, 0.0f, 1.0f, 1.0f, 0.0f,
-                                       1.0f, 0.0f, 0.0f, 1.0f, 1.0f, 1.0f };
+    const auto copySpacePosition = imageTargetQuadPositions (realX, realY, realWidth, realHeight);
+    const auto texcoordPass = imageQuadTexcoords (0.0f, 0.0f, 1.0f, 1.0f);
+    const auto texcoordPassPresented = imageQuadTexcoords (0.0f, 1.0f, 1.0f, 0.0f);
 
-    GLfloat passSpacePosition[]
-	= { -1.0, 1.0, 0.0f, -1.0, -1.0, 0.0f, 1.0, 1.0, 0.0f, 1.0, 1.0, 0.0f, -1.0, -1.0, 0.0f, 1.0, -1.0, 0.0f };
+    const auto passSpacePosition = imagePassQuadPositions ();
 
     // bind vertex list to the openGL buffers
     glGenBuffers (1, &this->m_sceneSpacePosition);
     glBindBuffer (GL_ARRAY_BUFFER, this->m_sceneSpacePosition);
-    glBufferData (GL_ARRAY_BUFFER, sizeof (sceneSpacePosition), sceneSpacePosition, GL_STATIC_DRAW);
+    glBufferData (GL_ARRAY_BUFFER, sizeof (sceneSpacePosition), sceneSpacePosition.data (), GL_STATIC_DRAW);
 
     glGenBuffers (1, &this->m_copySpacePosition);
     glBindBuffer (GL_ARRAY_BUFFER, this->m_copySpacePosition);
-    glBufferData (GL_ARRAY_BUFFER, sizeof (copySpacePosition), copySpacePosition, GL_STATIC_DRAW);
+    glBufferData (GL_ARRAY_BUFFER, sizeof (copySpacePosition), copySpacePosition.data (), GL_STATIC_DRAW);
 
     // bind pass' vertex list to the openGL buffers
     glGenBuffers (1, &this->m_passSpacePosition);
     glBindBuffer (GL_ARRAY_BUFFER, this->m_passSpacePosition);
-    glBufferData (GL_ARRAY_BUFFER, sizeof (passSpacePosition), passSpacePosition, GL_STATIC_DRAW);
+    glBufferData (GL_ARRAY_BUFFER, sizeof (passSpacePosition), passSpacePosition.data (), GL_STATIC_DRAW);
 
     glGenBuffers (1, &this->m_texcoordCopy);
     glBindBuffer (GL_ARRAY_BUFFER, this->m_texcoordCopy);
-    glBufferData (GL_ARRAY_BUFFER, sizeof (texcoordCopy), texcoordCopy, GL_STATIC_DRAW);
+    glBufferData (GL_ARRAY_BUFFER, sizeof (texcoordCopy), texcoordCopy.data (), GL_STATIC_DRAW);
 
     glGenBuffers (1, &this->m_texcoordPass);
     glBindBuffer (GL_ARRAY_BUFFER, this->m_texcoordPass);
-    glBufferData (GL_ARRAY_BUFFER, sizeof (texcoordPass), texcoordPass, GL_STATIC_DRAW);
+    glBufferData (GL_ARRAY_BUFFER, sizeof (texcoordPass), texcoordPass.data (), GL_STATIC_DRAW);
 
     glGenBuffers (1, &this->m_texcoordPassPresented);
     glBindBuffer (GL_ARRAY_BUFFER, this->m_texcoordPassPresented);
-    glBufferData (GL_ARRAY_BUFFER, sizeof (texcoordPassPresented), texcoordPassPresented, GL_STATIC_DRAW);
+    glBufferData (GL_ARRAY_BUFFER, sizeof (texcoordPassPresented), texcoordPassPresented.data (), GL_STATIC_DRAW);
 
     this->m_hasPuppetMesh = this->loadPuppetMesh (size);
 
@@ -447,7 +444,7 @@ CImage::CImage (Wallpapers::CScene& scene, const Image& image) :
     } else if (this->getImage ().model->fullscreen) {
 	this->m_modelViewProjectionCopy = glm::mat4 (1.0f);
     } else {
-	this->m_modelViewProjectionCopy = glm::ortho<float> (0.0, quadProjectionSize.x, 0.0, quadProjectionSize.y);
+	this->m_modelViewProjectionCopy = imageTargetProjection (quadProjectionSize);
     }
     this->m_modelViewProjectionCopyInverse = glm::inverse (this->m_modelViewProjectionCopy);
     this->m_modelMatrix = glm::ortho<float> (0.0, quadProjectionSize.x, 0.0, quadProjectionSize.y);
@@ -1857,32 +1854,18 @@ void CImage::updateScenePosition (
 }
 
 void CImage::uploadGeometryBuffers (const glm::vec2& size) {
-    const glm::vec2 half = size * 0.5f;
-    const GLfloat localPosition[] {
-        -half.x, -half.y, 0, -half.x, half.y, 0, half.x, -half.y, 0,
-        half.x, -half.y, 0, -half.x, half.y, 0, half.x, half.y, 0,
-    };
+    const auto localPosition = imageLocalQuadPositions (size * 0.5f);
     if (m_lightingLocalPosition == GL_NONE) glGenBuffers (1, &m_lightingLocalPosition);
     glBindBuffer (GL_ARRAY_BUFFER, m_lightingLocalPosition);
-    glBufferData (GL_ARRAY_BUFFER, sizeof (localPosition), localPosition, GL_DYNAMIC_DRAW);
+    glBufferData (GL_ARRAY_BUFFER, sizeof (localPosition), localPosition.data (), GL_DYNAMIC_DRAW);
     const glm::vec2 sourceHalf = (m_hasSourceTexture
         ? glm::vec2 (m_texture->getRealWidth (), m_texture->getRealHeight ())
         : imageBackingDimensions (size)) * 0.5f;
-    const GLfloat prelightingPosition[] {
-        -sourceHalf.x, -sourceHalf.y, 0, -sourceHalf.x, sourceHalf.y, 0, sourceHalf.x, -sourceHalf.y, 0,
-        sourceHalf.x, -sourceHalf.y, 0, -sourceHalf.x, sourceHalf.y, 0, sourceHalf.x, sourceHalf.y, 0,
-    };
+    const auto prelightingPosition = imageLocalQuadPositions (sourceHalf);
     if (m_prelightingLocalPosition == GL_NONE) glGenBuffers (1, &m_prelightingLocalPosition);
     glBindBuffer (GL_ARRAY_BUFFER, m_prelightingLocalPosition);
-    glBufferData (GL_ARRAY_BUFFER, sizeof (prelightingPosition), prelightingPosition, GL_DYNAMIC_DRAW);
-    GLfloat sceneSpacePosition[] = {
-        m_sceneQuad[0].x, m_sceneQuad[0].y, m_sceneQuad[0].z,
-        m_sceneQuad[1].x, m_sceneQuad[1].y, m_sceneQuad[1].z,
-        m_sceneQuad[2].x, m_sceneQuad[2].y, m_sceneQuad[2].z,
-        m_sceneQuad[2].x, m_sceneQuad[2].y, m_sceneQuad[2].z,
-        m_sceneQuad[1].x, m_sceneQuad[1].y, m_sceneQuad[1].z,
-        m_sceneQuad[3].x, m_sceneQuad[3].y, m_sceneQuad[3].z,
-    };
+    glBufferData (GL_ARRAY_BUFFER, sizeof (prelightingPosition), prelightingPosition.data (), GL_DYNAMIC_DRAW);
+    const auto sceneSpacePosition = imageLocalQuadPositions (m_sceneQuad);
 
     float width = 1.0f;
     float height = 1.0f;
@@ -1918,27 +1901,19 @@ void CImage::uploadGeometryBuffers (const glm::vec2& size) {
 	realHeight = 1.0f;
     }
 
-    GLfloat texcoordCopy[] = { x, height, x, y, width, height, width, height, x, y, width, y };
+    const auto texcoordCopy = imageQuadTexcoords (x, y, width, height);
     m_texcoordCopyTopV = height;
     m_texcoordCopyBottomV = y;
-    GLfloat copySpacePosition[] = { realX,     realHeight, 0.0f, realX, realY, 0.0f, realWidth, realHeight, 0.0f,
-				    realWidth, realHeight, 0.0f, realX, realY, 0.0f, realWidth, realY,      0.0f };
-    if (this->getImage ().model->passthrough && !this->getImage ().model->fullscreen) {
-        const int corners[6] {0, 1, 2, 2, 1, 3};
-        for (int vertex = 0; vertex < 6; ++vertex) {
-            const auto& corner = m_sceneQuad[corners[vertex]];
-            copySpacePosition[vertex * 3] = corner.x;
-            copySpacePosition[vertex * 3 + 1] = corner.y;
-            copySpacePosition[vertex * 3 + 2] = corner.z;
-        }
-    }
+    const auto copySpacePosition = this->getImage ().model->passthrough && !this->getImage ().model->fullscreen
+        ? imageLocalQuadPositions (m_sceneQuad)
+        : imageTargetQuadPositions (realX, realY, realWidth, realHeight);
 
     glBindBuffer (GL_ARRAY_BUFFER, this->m_sceneSpacePosition);
-    glBufferData (GL_ARRAY_BUFFER, sizeof (sceneSpacePosition), sceneSpacePosition, GL_DYNAMIC_DRAW);
+    glBufferData (GL_ARRAY_BUFFER, sizeof (sceneSpacePosition), sceneSpacePosition.data (), GL_DYNAMIC_DRAW);
     glBindBuffer (GL_ARRAY_BUFFER, this->m_copySpacePosition);
-    glBufferData (GL_ARRAY_BUFFER, sizeof (copySpacePosition), copySpacePosition, GL_DYNAMIC_DRAW);
+    glBufferData (GL_ARRAY_BUFFER, sizeof (copySpacePosition), copySpacePosition.data (), GL_DYNAMIC_DRAW);
     glBindBuffer (GL_ARRAY_BUFFER, this->m_texcoordCopy);
-    glBufferData (GL_ARRAY_BUFFER, sizeof (texcoordCopy), texcoordCopy, GL_DYNAMIC_DRAW);
+    glBufferData (GL_ARRAY_BUFFER, sizeof (texcoordCopy), texcoordCopy.data (), GL_DYNAMIC_DRAW);
     const auto texture = getTexture ();
     const auto& model = *getImage ().model;
     const auto directUV = directImageQuadUV (
@@ -1971,7 +1946,7 @@ void CImage::uploadGeometryBuffers (const glm::vec2& size) {
     this->m_modelViewProjectionCopy = this->getImage ().model->passthrough
 	? this->m_modelViewProjectionScreen
 	: this->getImage ().model->fullscreen ? glm::mat4 (1.0f)
-	                                       : glm::ortho<float> (0.0, projectionSize.x, 0.0, projectionSize.y);
+	                                       : imageTargetProjection (projectionSize);
     this->m_modelViewProjectionCopyInverse = glm::inverse (this->m_modelViewProjectionCopy);
     this->m_modelMatrix = glm::ortho<float> (0.0, projectionSize.x, 0.0, projectionSize.y);
 }
