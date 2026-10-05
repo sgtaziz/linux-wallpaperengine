@@ -4,6 +4,7 @@
 #include "WallpaperEngine/Application/WallpaperApplication.h"
 #include "WallpaperEngine/Input/Drivers/GLFWMouseInput.h"
 #include "WallpaperEngine/Render/Drivers/Detectors/FullScreenDetector.h"
+#include "WallpaperEngine/Render/Drivers/FramePacer.h"
 #include "WallpaperEngine/Render/Drivers/VideoDriver.h"
 #include <GL/glew.h>
 #include <GLFW/glfw3.h>
@@ -41,5 +42,6 @@ private:
     Output::Output* m_output = nullptr;
     GLFWwindow* m_window = nullptr;
     uint32_t m_frameCounter = 0;
+    FramePacer m_framePacer {m_context.settings.render.maximumFPS};
 };
 } // namespace WallpaperEngine::Render::Drivers
