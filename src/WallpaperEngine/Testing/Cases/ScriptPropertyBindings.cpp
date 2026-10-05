@@ -373,11 +373,38 @@ TEST_CASE ("Non-HDR bloom passes follow the live general strength and threshold"
     }
     effects.push_back (std::move (effect));
     // A script result of 2.5 reaches every bloom pass without truncation.
-    applyBloomConstants (effects, 2.5f, 0.4f);
+    applyBloomConstants (effects, 2.5f, 0.4f, glm::vec3 (1.0f));
     for (const auto& pass : effects.front ()->passOverrides) {
         REQUIRE (pass->constants.at ("bloomstrength")->value->getFloat () == 2.5f);
         REQUIRE (pass->constants.at ("bloomthreshold")->value->getFloat () == 0.4f);
         REQUIRE (pass->constants.at ("other")->value->getFloat () == 7.0f);
     }
+}
+
+TEST_CASE ("Non-HDR bloom passes carry the live general bloom tint", "[script][scene][bloom]") {
+    using WallpaperEngine::Data::Model::ImageEffect;
+    using WallpaperEngine::Data::Model::ImageEffectPassOverride;
+    using WallpaperEngine::Data::Model::ImageEffectUniquePtr;
+    using WallpaperEngine::Render::Wallpapers::applyBloomConstants;
+    // Native's non-HDR branch uploads bloomtint beside
+    // strength and threshold; shipped downsample_quarter_bloom.frag multiplies
+    // the bloom colour by g_BloomTint ("material":"bloomtint"). Installed
+    // 3222648892 binds it to its scheme colour (0.7529 grey).
+    std::vector<ImageEffectUniquePtr> effects;
+    auto effect = std::make_unique<ImageEffect> ();
+    auto override = std::make_unique<ImageEffectPassOverride> ();
+    override->constants.emplace ("bloomstrength", UserSettingBuilder::fromValue (0.93f));
+    override->constants.emplace ("bloomthreshold", UserSettingBuilder::fromValue (0.65f));
+    override->constants.emplace ("bloomtint", UserSettingBuilder::fromValue (glm::vec3 (1.0f)));
+    auto* tint = override->constants.at ("bloomtint")->value.get ();
+    // CPass binds the uniform to this storage once; later updates must land in it.
+    const glm::vec3* bound = &tint->getVec3 ();
+    effect->passOverrides.push_back (std::move (override));
+    effects.push_back (std::move (effect));
+    const glm::vec3 scheme (0.7529412f);
+    applyBloomConstants (effects, 0.93f, 0.65f, scheme);
+    REQUIRE (*bound == scheme);
+    applyBloomConstants (effects, 0.93f, 0.65f, glm::vec3 (0.2f, 0.4f, 0.6f));
+    REQUIRE (*bound == glm::vec3 (0.2f, 0.4f, 0.6f));
 }
 
