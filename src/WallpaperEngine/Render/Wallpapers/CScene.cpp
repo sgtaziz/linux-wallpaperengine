@@ -559,20 +559,6 @@ void CScene::renderFrame (const glm::ivec4& viewport) {
     // ensure the virtual mouse position is up to date
     this->updateMouse (viewport);
 
-    // update the parallax position if required
-    const bool cameraParallax = this->getScene ().camera.parallax.enabled->value->getBool ()
-	&& !this->getContext ().getApp ().getContext ().settings.mouse.disableparallax;
-    const float influence = this->getScene ().camera.parallax.mouseInfluence->value->getFloat ();
-    const float delay = sceneParallaxDelayWeight (
-	this->getScene ().camera.parallax.delay->value->getFloat (), g_Time - g_TimeLast);
-    if (cameraParallax) {
-	const float amount = this->getScene ().camera.parallax.amount->value->getFloat ();
-	this->m_parallaxDisplacement = glm::mix (this->m_parallaxDisplacement,
-	    sceneParallaxDisplacementTarget (this->m_parallaxCursor, amount, influence), delay);
-    }
-    advanceSceneParallaxPosition (m_parallaxPosition, cameraParallax, m_parallaxCursor, influence,
-	glm::vec2 (getWidth (), getHeight ()), glm::vec2 (m_camera->getEye ()), delay);
-
     // Native updates image controls before SceneScript callbacks (
     // before). Joined handles observe the cached
     // texture's last sampled cursor without advancing it.
@@ -591,6 +577,27 @@ void CScene::renderFrame (const glm::ivec4& viewport) {
     // Native camera admission/path evaluation follows ALL object outer ticks
     // and precedes first-image reset, cursor dispatch and SceneScript.
     m_camera->advanceFrame (getDeltaTime (), m_sceneCameraObjects);
+    // Native forms the parallax point after this frame's pose and
+    // shake and eases the whole point, eye included,
+    // so object ticks above saw the previous point. The easing is linear, so
+    // the cursor displacement and the eye are eased separately with the same
+    // weight; a constant eye stays bit-exact.
+    const bool cameraParallax = this->getScene ().camera.parallax.enabled->value->getBool ()
+	&& !this->getContext ().getApp ().getContext ().settings.mouse.disableparallax;
+    const float influence = this->getScene ().camera.parallax.mouseInfluence->value->getFloat ();
+    const float delay = sceneParallaxDelayWeight (
+	this->getScene ().camera.parallax.delay->value->getFloat (), g_Time - g_TimeLast);
+    if (cameraParallax) {
+	const float amount = this->getScene ().camera.parallax.amount->value->getFloat ();
+	this->m_parallaxDisplacement = glm::mix (this->m_parallaxDisplacement,
+	    sceneParallaxDisplacementTarget (this->m_parallaxCursor, amount, influence), delay);
+	// Starts at the first frame's eye (after the root camera pose is final),
+	// so an eye that never moves equals the live eye exactly.
+	const glm::vec2 eye (m_camera->getEye ());
+	this->m_parallaxEye = m_parallaxEye ? easeSceneParallaxEye (*m_parallaxEye, eye, delay) : eye;
+    }
+    advanceSceneParallaxPosition (m_parallaxPosition, cameraParallax, m_parallaxCursor, influence,
+	glm::vec2 (getWidth (), getHeight ()), glm::vec2 (m_camera->getEye ()), delay);
     // Native resets the first image after object ticks, before scripts.
     refreshAutomaticProjection ();
     if (getScene ().camera.projection.isAuto && viewport.z > 1 && viewport.w > 1)
@@ -1047,7 +1054,7 @@ glm::vec3 CScene::getLayerParallaxOffset (const Object& object) const {
             getScene ().objects.size () + m_scriptObjectData.size ())).first;
     const Object& root = *cached->second;
     return sceneLayerParallaxOffset (
-        root.origin->value->getVec3 (), m_camera->getEye (), sceneParallaxDepth (root),
+        root.origin->value->getVec3 (), glm::vec3 (m_parallaxEye.value_or (glm::vec2 (m_camera->getEye ())), 0.0f), sceneParallaxDepth (root),
         m_parallaxDisplacement, static_cast<float> (getWidth ()), static_cast<float> (getHeight ()),
         getScene ().camera.parallax.amount->value->getFloat (), true, true);
 }
