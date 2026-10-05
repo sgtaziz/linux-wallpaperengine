@@ -10,6 +10,7 @@
 #include "WallpaperEngine/Render/DepthTarget.h"
 #include "WallpaperEngine/Scripting/ScriptEngine.h"
 #include "SpotLightShadow.h"
+#include "CVolumetrics.h"
 #include <array>
 #include <map>
 #include <optional>
@@ -153,6 +154,8 @@ private:
     void refreshPointLights ();
     void refreshSpotLights ();
     void refreshTubeLights ();
+    /** Native: a root volumetric point light draws its volume when the light itself renders. */
+    void renderVolumetricLight (const ScenePointLight& light);
     void registerSpotLight (const SceneSpotLight* light);
     void renderShadowAtlas ();
     void assignLegacyLightSlot (const ScenePointLight* light);
@@ -180,6 +183,8 @@ private:
     double m_particleSceneTimeAccumulator { 0.0 };
     float m_particleSceneTime { 0.0f };
     std::vector<const ScenePointLight*> m_pointLightObjects = {};
+    std::unique_ptr<CVolumetrics> m_volumetrics = nullptr;
+    bool m_volumetricsFailed = false;
     std::vector<const SceneSpotLight*> m_spotLightObjects = {};
     std::vector<glm::vec4> m_spotLightColors = {};
     std::vector<glm::vec4> m_spotLightOrigins = {};

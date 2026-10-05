@@ -149,11 +149,14 @@ inline auto scriptPropertyBindings (const WallpaperEngine::Data::Model::SceneCam
 }
 
 inline auto scriptPropertyBindings (const ScenePointLight& light) {
-    return std::array<ScriptPropertyBinding, 8> {{
+    // also registers the volumetric descriptors.
+    return std::array<ScriptPropertyBinding, 11> {{
         {"origin", *light.origin->value}, {"scale", *light.groupScale->value},
         {"angles", *light.groupAngles->value}, {"visible", *light.groupVisible->value},
         {"color", *light.color->value}, {"intensity", *light.intensity->value},
         {"radius", *light.radius->value}, {"exponent", *light.exponent->value},
+        {"castvolumetrics", *light.castVolumetrics->value}, {"density", *light.density->value},
+        {"volumetricsexponent", *light.volumetricsExponent->value},
     }};
 }
 

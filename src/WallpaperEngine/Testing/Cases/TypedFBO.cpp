@@ -21,6 +21,7 @@
 #include "WallpaperEngine/FileSystem/Container.h"
 #include "WallpaperEngine/Render/Shaders/Shader.h"
 #include "WallpaperEngine/Render/Wallpapers/SpotLightShadow.h"
+#include "WallpaperEngine/Render/Wallpapers/CVolumetrics.h"
 
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
@@ -1874,6 +1875,141 @@ TEST_CASE ("Shipped generic4 receivers and the shadow caster compile with spot f
     REQUIRE (glGetUniformLocation (program, "g_ViewportViewProjectionMatrices") >= 0);
     REQUIRE (glGetUniformLocation (program, "g_ModelMatrix") >= 0);
     glDeleteProgram (program);
+}
+
+TEST_CASE ("Point volumetrics ray-march the shipped shader to the native contribution", "[render][shader][gl][volumetric]") {
+    using namespace WallpaperEngine::Render::Wallpapers;
+    const char* root = std::getenv ("WPE_SHIPPED_ASSETS");
+    if (!root) return;
+    SurfacelessGL gl;
+    REQUIRE (gl.ready);
+    auto files = std::make_unique<WallpaperEngine::FileSystem::Container> ();
+    files->mount (root, "/");
+    WallpaperEngine::Assets::AssetLocator assets (std::move (files));
+    const glm::ivec2 size (1280, 720);
+    GLuint framebuffer = 0, texture = 0, vao = 0;
+    glGenVertexArrays (1, &vao);
+    glBindVertexArray (vao);
+    glGenTextures (1, &texture);
+    glBindTexture (GL_TEXTURE_2D, texture);
+    glTexImage2D (GL_TEXTURE_2D, 0, GL_RGBA8, size.x, size.y, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    glGenFramebuffers (1, &framebuffer);
+    glBindFramebuffer (GL_FRAMEBUFFER, framebuffer);
+    glFramebufferTexture2D (GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, texture, 0);
+    REQUIRE (glCheckFramebufferStatus (GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE);
+    // A 3840x2160 ortho canvas shown at 1/3, with 3217188597 light 134's
+    // parameters moved fully in front of the eye.
+    const glm::mat4 viewProjection = glm::ortho (0.0f, 3840.0f, 0.0f, 2160.0f, -2000.0f, 2000.0f);
+    // A scene pass can leave sampler objects bound (CPass cookies).
+    GLuint sampler = 0;
+    glGenSamplers (1, &sampler);
+    const auto render = [&] (float y) {
+        CVolumetrics volumetrics (assets);
+        // Frame 0 leaves a larger volume's far depth in the back target; frame 1
+        // draws under the state scene layers leave (depth and alpha writes off)
+        // plus a scissor box. The volume must clear that stale depth and hand
+        // the entry state back.
+        for (const float radius : {1000.0f, 500.0f}) {
+            glBindFramebuffer (GL_FRAMEBUFFER, framebuffer);
+            glColorMask (GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+            glClearColor (0, 0, 0, 0);
+            glClear (GL_COLOR_BUFFER_BIT);
+            const bool stale = radius == 500.0f;
+            glDepthMask (stale ? GL_FALSE : GL_TRUE);
+            glColorMask (GL_TRUE, GL_TRUE, GL_TRUE, stale ? GL_FALSE : GL_TRUE);
+            if (stale) {
+                glEnable (GL_SCISSOR_TEST);
+                glScissor (0, 0, 8, 8);
+                glBlendEquationSeparate (GL_FUNC_ADD, GL_MAX);
+                glBindSampler (1, sampler);
+                glBindSampler (3, sampler);
+            }
+            volumetrics.accumulate (packPointVolume ({1920.0f, y, -600.0f}, {0.96863f, 0.79216f, 0.57647f},
+                                                     4.21f, radius, 1.74f, 1.0700001f), viewProjection, size, false);
+            REQUIRE (volumetrics.pending ());
+            volumetrics.flush (framebuffer, size);
+            REQUIRE_FALSE (volumetrics.pending ());
+        }
+        GLboolean depthMask = GL_TRUE, colorMask[4] = {};
+        GLint equationAlpha = 0;
+        glGetBooleanv (GL_DEPTH_WRITEMASK, &depthMask);
+        glGetBooleanv (GL_COLOR_WRITEMASK, colorMask);
+        glGetIntegerv (GL_BLEND_EQUATION_ALPHA, &equationAlpha);
+        REQUIRE (depthMask == GL_FALSE);
+        REQUIRE (colorMask[3] == GL_FALSE);
+        REQUIRE (glIsEnabled (GL_SCISSOR_TEST));
+        REQUIRE (equationAlpha == GL_MAX);
+        for (const GLuint unit : {1u, 3u}) {
+            GLint bound = 0;
+            glActiveTexture (GL_TEXTURE0 + unit);
+            glGetIntegerv (GL_SAMPLER_BINDING, &bound);
+            REQUIRE (GLuint (bound) == sampler);
+            glBindSampler (unit, 0);
+        }
+        glActiveTexture (GL_TEXTURE0);
+        glDisable (GL_SCISSOR_TEST);
+        glBlendEquation (GL_FUNC_ADD);
+        glDepthMask (GL_TRUE);
+        glColorMask (GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+        std::vector<uint8_t> pixels (size_t (size.x * size.y * 4));
+        glBindFramebuffer (GL_FRAMEBUFFER, framebuffer);
+        glReadPixels (0, 0, size.x, size.y, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data ());
+        REQUIRE (glGetError () == GL_NO_ERROR);
+        return pixels;
+    };
+    const auto channel = [&] (const std::vector<uint8_t>& pixels, int x, int row, int c) {
+        return int (pixels[size_t ((row * size.x + x) * 4 + c)]);
+    };
+    const auto red = [&] (const std::vector<uint8_t>& pixels, int x, int row) { return channel (pixels, x, row, 0); };
+    // RGB along the volume's row in the native 2.8.42 V0-front capture
+    // (volumetric-v0 v2, on - off). G and B follow the raw colour, not
+    // the colour scaled by intensity.
+    const int columns[] = {512, 576, 640, 704, 768};
+    const int native[] = {17, 62, 97, 64, 16};
+    const int nativeGreen[] = {13, 53, 80, 53, 13};
+    const int nativeBlue[] = {10, 39, 58, 38, 10};
+    for (const float y : {1080.0f, 1500.0f}) {
+        INFO ("light y " << y);
+        const auto pixels = render (y);
+        const int row = int (y / 3.0f);
+        for (size_t i = 0; i < 5; ++i) {
+            INFO ("column " << columns[i]);
+            REQUIRE (std::abs (red (pixels, columns[i], row) - native[i]) <= 3);
+            REQUIRE (std::abs (channel (pixels, columns[i], row, 1) - nativeGreen[i]) <= 3);
+            REQUIRE (std::abs (channel (pixels, columns[i], row, 2) - nativeBlue[i]) <= 3);
+        }
+        // The footprint edge: native 6 at column 786, 0 from column 802.
+        REQUIRE (std::abs (red (pixels, 786, row) - 6) <= 3);
+        REQUIRE (red (pixels, 806, row) <= 1);
+        // Outside the volume nothing is added.
+        REQUIRE (red (pixels, 640, row + 200) == 0);
+        REQUIRE (red (pixels, 100, row) == 0);
+    }
+    // Two lights with an invisible object between them stay one batch: both
+    // accumulate before a single additive finish.
+    {
+        glBindFramebuffer (GL_FRAMEBUFFER, framebuffer);
+        glClearColor (0, 0, 0, 0);
+        glClear (GL_COLOR_BUFFER_BIT);
+        CVolumetrics volumetrics (assets);
+        for (const float x : {960.0f, 2880.0f}) {
+            REQUIRE_FALSE (volumetricBatchEndsBefore (false, false));
+            volumetrics.accumulate (packPointVolume ({x, 1080.0f, -600.0f}, {0.96863f, 0.79216f, 0.57647f},
+                                                     4.21f, 500.0f, 1.74f, 1.0700001f), viewProjection, size, false);
+        }
+        volumetrics.flush (framebuffer, size);
+        std::vector<uint8_t> pixels (size_t (size.x * size.y * 4));
+        glReadPixels (0, 0, size.x, size.y, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data ());
+        for (const int x : {320, 960}) {
+            REQUIRE (std::abs (red (pixels, x, 360) - 97) <= 3);
+            REQUIRE (int (pixels[size_t ((360 * size.x + x) * 4 + 3)]) == 255);
+        }
+        REQUIRE (red (pixels, 640, 360) == 0);
+    }
+    glDeleteSamplers (1, &sampler);
+    glDeleteFramebuffers (1, &framebuffer);
+    glDeleteTextures (1, &texture);
+    glDeleteVertexArrays (1, &vao);
 }
 
 TEST_CASE ("Shipped lit image shaders compile live tube loops", "[render][shader][gl][tubelight]") {

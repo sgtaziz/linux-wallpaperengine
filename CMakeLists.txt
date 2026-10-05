@@ -423,6 +423,9 @@ set(COMMON_SOURCES
     src/WallpaperEngine/Render/WallpaperState.cpp
     src/WallpaperEngine/Render/Wallpapers/CScene.h
     src/WallpaperEngine/Render/Wallpapers/CScene.cpp
+    src/WallpaperEngine/Render/Wallpapers/CVolumetrics.h
+    src/WallpaperEngine/Render/Wallpapers/CVolumetrics.cpp
+    src/WallpaperEngine/Render/Wallpapers/VolumetricLight.h
     src/WallpaperEngine/Render/Wallpapers/CVideo.h
     src/WallpaperEngine/Render/Wallpapers/CVideo.cpp
     src/WallpaperEngine/Render/Wallpapers/CWeb.h
@@ -618,6 +621,7 @@ if(BUILD_TESTING)
     target_sources(tests PRIVATE src/WallpaperEngine/Testing/Cases/ImageDimensions.cpp)
     target_sources(tests PRIVATE src/WallpaperEngine/Testing/Cases/SceneSpotLights.cpp)
     target_sources(tests PRIVATE src/WallpaperEngine/Testing/Cases/SceneTubeLights.cpp)
+    target_sources(tests PRIVATE src/WallpaperEngine/Testing/Cases/SceneVolumetricLights.cpp)
     target_sources(tests PRIVATE src/WallpaperEngine/Testing/Cases/EngineTimers.cpp)
     target_sources(tests PRIVATE src/WallpaperEngine/Testing/Cases/LocalStorage.cpp)
     target_sources(tests PRIVATE src/WallpaperEngine/Testing/Cases/ScriptObjectIdentity.cpp)
