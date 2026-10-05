@@ -11,6 +11,7 @@
 #include "WallpaperEngine/Render/WallpaperState.h"
 
 #include "CScene.h"
+#include "SceneBloomConstants.h"
 #include "SceneDependencies.h"
 #include "SceneCursor.h"
 #include "ParticleSceneClock.h"
@@ -176,6 +177,11 @@ CScene::CScene (
             registerSpotLight (object->as<SceneSpotLight> ());
     }
     refreshSpotLights ();
+
+    // The native scene loader reads the general table before the object list,
+    // so general-setting scripts and animations are queued ahead of layers.
+    for (const auto& binding : Scripting::sceneGeneralScriptBindings (*scene))
+        this->m_scriptEngine->queueSceneScript (std::string ("general_") + binding.name, binding.value);
 
     // create all objects based off their dependencies
     for (const auto& object : scene->objects) {
@@ -540,6 +546,10 @@ void CScene::renderFrame (const glm::ivec4& viewport) {
 	    .iterations = bloom.hdrIterations->value->getInt (),
 	    .tint = bloom.tint->value->getVec3 (),
 	});
+    } else if (m_bloomObjectData && m_bloomObjectData->is<Image> ()) {
+	const auto& bloom = this->getScene ().camera.bloom;
+	applyBloomConstants (m_bloomObjectData->as<Image> ()->effects, bloom.strength->value->getFloat (),
+	                     bloom.threshold->value->getFloat ());
     }
     flushDestroyedScriptLayers ();
     refreshPointLights ();

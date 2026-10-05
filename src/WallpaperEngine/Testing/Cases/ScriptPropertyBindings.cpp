@@ -1,10 +1,14 @@
 #include <catch2/catch_test_macros.hpp>
 
+#include "WallpaperEngine/Assets/AssetLocator.h"
 #include "WallpaperEngine/Data/Builders/UserSettingBuilder.h"
 #include "WallpaperEngine/Data/Model/Project.h"
 #include "WallpaperEngine/Data/Model/Wallpaper.h"
 #include "WallpaperEngine/Data/Parsers/ObjectParser.h"
+#include "WallpaperEngine/Data/Parsers/WallpaperParser.h"
+#include "WallpaperEngine/FileSystem/Container.h"
 #include "WallpaperEngine/Scripting/ScriptPropertyBindings.h"
+#include "WallpaperEngine/Render/Wallpapers/SceneBloomConstants.h"
 #include "WallpaperEngine/Render/Wallpapers/SceneTransform.h"
 #include <catch2/catch_approx.hpp>
 #include <glm/gtc/constants.hpp>
@@ -293,5 +297,87 @@ TEST_CASE ("Image model material constants are offered for script queuing", "[sc
     // The key keeps the "_constant_color" suffix that preserves alpha on an
     // RGB script result.
     REQUIRE (color->key.ends_with ("_constant_color"));
+}
+
+TEST_CASE ("Scene general settings expose scripted and animated fields to the scene queue",
+           "[script][binding][scene][parser]") {
+    using WallpaperEngine::Assets::AssetLocator;
+    using WallpaperEngine::Data::JSON::JSON;
+    using WallpaperEngine::Data::Model::Project;
+    using WallpaperEngine::Data::Model::Scene;
+    using WallpaperEngine::Data::Parsers::WallpaperParser;
+    using WallpaperEngine::FileSystem::Container;
+    using WallpaperEngine::Scripting::sceneGeneralScriptBindings;
+
+    // Forms taken from installed scenes: bloomstrength script (2134765860),
+    // camerashake* scripts (2235507313), hdr strength script with user and
+    // scriptproperties (2374921972) and a single-mode zoom animation
+    // (3027732033).
+    auto files = std::make_unique<Container> ();
+    files->getVFS ().add ("scene.json", R"({
+      "camera":{"center":"0 0 -1","eye":"0 0 0","up":"0 1 0"},
+      "general":{"orthogonalprojection":{"width":1920,"height":1080},
+        "bloom":true,
+        "bloomstrength":{"script":"export function update(){ return 2.5; }","value":1.0},
+        "bloomhdrstrength":{"script":"export function init(v){}","scriptproperties":{"minvalue":1},
+                            "user":"hdrstrength","value":6.0},
+        "camerashakeamplitude":{"script":"export function update(){ return 0.3; }","value":0.46},
+        "clearenabled":true,
+        "zoom":{"animation":{"c0":[{"frame":0,"value":1.16},{"frame":60,"value":1}],
+                             "options":{"fps":6,"length":60,"mode":"single"}},"value":1.0}},
+      "objects":[]})");
+    Project project {};
+    project.type = Project::Type_Scene;
+    project.assetLocator = std::make_unique<AssetLocator> (std::move (files));
+    const auto wallpaper = WallpaperParser::parse (JSON ("scene.json"), project);
+    const auto* scene = dynamic_cast<const Scene*> (wallpaper.get ());
+    REQUIRE (scene != nullptr);
+    const auto bindings = bindingMap (sceneGeneralScriptBindings (*scene));
+
+    // Every field kept by the scene model is offered, under its native name.
+    for (const char* name : {"clearenabled", "clearcolor", "ambientcolor", "skylightcolor", "camerafade", "bloom",
+                             "bloomstrength", "bloomthreshold", "bloomhdrstrength", "bloomhdrthreshold",
+                             "bloomhdrfeather", "bloomhdrscatter", "bloomhdriterations", "bloomtint",
+                             "cameraparallax", "cameraparallaxamount", "cameraparallaxdelay",
+                             "cameraparallaxmouseinfluence", "camerashake", "camerashakeamplitude",
+                             "camerashakeroughness", "camerashakespeed", "nearz", "farz", "fov", "zoom",
+                             "perspectiveoverridefov"})
+        REQUIRE (bindings.contains (name));
+    REQUIRE (bindings.size () == 27);
+
+    // The bound values are the ones the renderer and thisScene read.
+    REQUIRE (bindings.at ("bloomstrength") == scene->camera.bloom.strength->value.get ());
+    REQUIRE (bindings.at ("bloomhdrstrength") == scene->camera.bloom.hdrStrength->value.get ());
+    REQUIRE (bindings.at ("camerashakeamplitude") == scene->camera.shake.amplitude->value.get ());
+    REQUIRE (bindings.at ("clearenabled") == scene->clearEnabled->value.get ());
+    REQUIRE (bindings.at ("zoom") == scene->camera.projection.zoom->value.get ());
+    REQUIRE (bindings.at ("bloomstrength")->getScriptSource ().has_value ());
+    REQUIRE (bindings.at ("bloomhdrstrength")->getScriptSource ().has_value ());
+    REQUIRE (bindings.at ("camerashakeamplitude")->getScriptSource ().has_value ());
+    REQUIRE (bindings.at ("zoom")->getAnimation () != nullptr);
+    REQUIRE_FALSE (bindings.at ("bloomthreshold")->getScriptSource ().has_value ());
+}
+TEST_CASE ("Non-HDR bloom passes follow the live general strength and threshold", "[script][scene][bloom]") {
+    using WallpaperEngine::Data::Model::ImageEffect;
+    using WallpaperEngine::Data::Model::ImageEffectPassOverride;
+    using WallpaperEngine::Data::Model::ImageEffectUniquePtr;
+    using WallpaperEngine::Render::Wallpapers::applyBloomConstants;
+    std::vector<ImageEffectUniquePtr> effects;
+    auto effect = std::make_unique<ImageEffect> ();
+    for (int pass = 0; pass < 3; ++pass) {
+        auto override = std::make_unique<ImageEffectPassOverride> ();
+        override->constants.emplace ("bloomstrength", UserSettingBuilder::fromValue (2.0f));
+        override->constants.emplace ("bloomthreshold", UserSettingBuilder::fromValue (0.65f));
+        override->constants.emplace ("other", UserSettingBuilder::fromValue (7.0f));
+        effect->passOverrides.push_back (std::move (override));
+    }
+    effects.push_back (std::move (effect));
+    // A script result of 2.5 reaches every bloom pass without truncation.
+    applyBloomConstants (effects, 2.5f, 0.4f);
+    for (const auto& pass : effects.front ()->passOverrides) {
+        REQUIRE (pass->constants.at ("bloomstrength")->value->getFloat () == 2.5f);
+        REQUIRE (pass->constants.at ("bloomthreshold")->value->getFloat () == 0.4f);
+        REQUIRE (pass->constants.at ("other")->value->getFloat () == 7.0f);
+    }
 }
 

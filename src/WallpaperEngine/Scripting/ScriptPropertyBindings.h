@@ -1,6 +1,7 @@
 #pragma once
 
 #include "WallpaperEngine/Data/Model/Object.h"
+#include "WallpaperEngine/Data/Model/Wallpaper.h"
 
 #include <array>
 #include <string>
@@ -45,6 +46,50 @@ inline std::vector<ScriptPropertyBinding> scriptPropertyBindings (const Sound& s
         {"angles", *sound.groupAngles->value},
     };
     if (sound.volume && sound.volume->value) result.push_back ({"volume", *sound.volume->value});
+    return result;
+}
+
+// Native general settings table registers each field with a typed
+// loader (bool family, float, int, vec3
+// ). Every one of them calls the generic property loader,
+// which retains "script"/"scriptproperties", so a general field can carry a
+// script or a property animation just like a layer field. These are the
+// fields the Linux scene model keeps, under their native names.
+inline std::vector<ScriptPropertyBinding> sceneGeneralScriptBindings (
+    const WallpaperEngine::Data::Model::SceneData& scene) {
+    const auto& camera = scene.camera;
+    const std::pair<const char*, const WallpaperEngine::Data::Model::UserSettingUniquePtr*> fields[] {
+        {"clearenabled", &scene.clearEnabled},
+        {"clearcolor", &scene.colors.clear},
+        {"ambientcolor", &scene.colors.ambient},
+        {"skylightcolor", &scene.colors.skylight},
+        {"camerafade", &camera.fade},
+        {"bloom", &camera.bloom.enabled},
+        {"bloomstrength", &camera.bloom.strength},
+        {"bloomthreshold", &camera.bloom.threshold},
+        {"bloomhdrstrength", &camera.bloom.hdrStrength},
+        {"bloomhdrthreshold", &camera.bloom.hdrThreshold},
+        {"bloomhdrfeather", &camera.bloom.hdrFeather},
+        {"bloomhdrscatter", &camera.bloom.hdrScatter},
+        {"bloomhdriterations", &camera.bloom.hdrIterations},
+        {"bloomtint", &camera.bloom.tint},
+        {"cameraparallax", &camera.parallax.enabled},
+        {"cameraparallaxamount", &camera.parallax.amount},
+        {"cameraparallaxdelay", &camera.parallax.delay},
+        {"cameraparallaxmouseinfluence", &camera.parallax.mouseInfluence},
+        {"camerashake", &camera.shake.enabled},
+        {"camerashakeamplitude", &camera.shake.amplitude},
+        {"camerashakeroughness", &camera.shake.roughness},
+        {"camerashakespeed", &camera.shake.speed},
+        {"nearz", &camera.projection.nearz},
+        {"farz", &camera.projection.farz},
+        {"fov", &camera.projection.fov},
+        {"zoom", &camera.projection.zoom},
+        {"perspectiveoverridefov", &camera.projection.perspectiveOverrideFov},
+    };
+    std::vector<ScriptPropertyBinding> result;
+    for (const auto& [name, setting] : fields)
+        if (*setting && (*setting)->value) result.push_back ({name, *(*setting)->value});
     return result;
 }
 
