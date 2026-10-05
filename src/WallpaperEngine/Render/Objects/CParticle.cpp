@@ -1169,7 +1169,7 @@ void CParticle::update (ParticleCore::TickClock clock) {
         const auto& camera = getScene ().getCamera ();
         const auto world = Wallpapers::particleMouseWorldPosition (
             *mousePos, Wallpapers::particleMouseProjection (camera.getProjection (), camera.isOrthogonal ()),
-            camera.getLookAt ());
+            camera.getCursorLookAt ());
         if (world) {
             for (auto& cp : m_controlPoints) {
                 if (cp.linkMouse && (cp.flags & 0x10000u) == 0)
@@ -3979,7 +3979,7 @@ void CParticle::updateParticleViewProjection () {
 	    m_viewProjectionMatrix = glm::perspective (
 	        glm::radians (fov), camera.getWidth () / camera.getHeight (),
 	        camera.getNearZ (), camera.getFarZ ())
-	        * glm::translate (glm::mat4 (1.0f), glm::vec3 (0.0f, 0.0f, -eyeZ));
+	        * Camera::flag4OrthogonalView (eyeZ, camera.getShake (), camera.getWidth (), camera.getHeight ());
 	    m_eyePosition = glm::vec3 (0.0f, 0.0f, eyeZ);
 	} else {
 	    m_viewProjectionMatrix = perspectiveViewProjection ();

@@ -26,6 +26,17 @@ public:
         Pose pose;
         float zoom = 1.0f;
     };
+    /** Native frame shake; inactive while camerashake is off. */
+    struct Shake {
+        bool active = false;
+        glm::vec3 offset {0.0f};
+        [[nodiscard]] static Shake evaluate (const SceneData::Camera& camera, float sceneTime,
+                                             bool orthogonal, float orthogonalHeight);
+        /** Eye and center move together; up, and every inactive pose, are returned unchanged. */
+        [[nodiscard]] Pose apply (Pose pose) const;
+        /** The native-canvas world translation expressed in the orthographic render basis. */
+        [[nodiscard]] glm::vec3 orthogonalRenderTranslation (float width, float height) const;
+    };
 
     Camera (Wallpapers::CScene& scene, const SceneData::Camera& camera,
             const SceneCamera* activeObject = nullptr);
@@ -44,6 +55,15 @@ public:
         const glm::vec3* up, const float* zoom);
     [[nodiscard]] static glm::mat4 renderLookAtForTransforms (
         const Pose& pose, bool orthogonal, float width, float height);
+    /** Orthographic render view without script/runtime transforms; pose includes the shake. */
+    [[nodiscard]] static glm::mat4 untransformedOrthogonalRenderLookAt (
+        const Pose& pose, const Shake& shake, float width, float height);
+    /** View that cursor unprojection pairs with the drawn view (pose includes the shake). */
+    [[nodiscard]] static glm::mat4 cursorLookAtForShake (
+        const Pose& pose, const glm::mat4& lookAt, const Shake& shake, bool orthogonal, float width, float height);
+    /** Orthographic flag-4 particle view at the given eye distance, keeping the frame shake. */
+    [[nodiscard]] static glm::mat4 flag4OrthogonalView (
+        float eyeDistance, const Shake& shake, float width, float height);
     [[nodiscard]] static glm::mat4 makeScriptOrthogonalProjection (
         float width, float height, float zoom);
     [[nodiscard]] static glm::mat4 makeProjectionForTransforms (
@@ -63,6 +83,8 @@ public:
     [[nodiscard]] const glm::mat4& getProjection () const;
     [[nodiscard]] const glm::mat4& getLookAt () const;
     [[nodiscard]] const glm::mat4& getRenderLookAt () const;
+    [[nodiscard]] glm::mat4 getCursorLookAt () const;
+    [[nodiscard]] const Shake& getShake () const;
     [[nodiscard]] Wallpapers::CScene& getScene () const;
     [[nodiscard]] bool isOrthogonal () const;
     [[nodiscard]] float getWidth () const;
@@ -80,6 +102,7 @@ private:
     glm::mat4 m_lookat = {};
     glm::mat4 m_renderLookat = {};
     Pose m_pose;
+    Shake m_shake;
     Transforms m_scriptTransforms;
     bool m_hasScriptTransforms = false;
     const SceneData::Camera& m_camera;

@@ -98,6 +98,10 @@ void Camera::advanceFrame (float dt, const std::vector<const SceneCamera*>& came
         }
     }
     m_runtimeTransforms = m_runtimeOverride;
+    // Native shakes the frame copy of whichever pose won above;
+    // the stored script transforms stay unshaken.
+    m_shake = Shake::evaluate (m_camera, m_scene.getParticleSceneTime (), m_isOrthogonal, m_height);
+    m_pose = m_shake.apply (m_pose);
     m_lookat = glm::lookAt (m_pose.eye, m_pose.center, m_pose.up);
     if (m_width > 0 && m_height > 0) {
         if (m_isOrthogonal) setOrthogonalProjection (m_width, m_height);
@@ -168,7 +172,7 @@ void Camera::setTransforms (const glm::vec3* eye, const glm::vec3* center,
     // before the stored root transforms. Paths are not animated here yet.
     if (m_runtimeOverride) return;
     m_hasScriptTransforms = true;
-    m_pose = m_scriptTransforms.pose;
+    m_pose = m_shake.apply (m_scriptTransforms.pose);
     m_frameZoom = m_scriptTransforms.zoom;
     m_lookat = glm::lookAt (m_pose.eye, m_pose.center, m_pose.up);
     m_renderLookat = renderLookAtForTransforms (m_pose, m_isOrthogonal, m_width, m_height);
@@ -206,11 +210,68 @@ void Camera::setOrthogonalProjection (const float width, const float height) {
         ? makeProjectionForTransforms (width, height, getFov (), getNearZ (), getFarZ (),
                                        Transforms {m_pose, m_frameZoom}, true,
                                        m_camera.projection.zoom ? m_camera.projection.zoom->value->getFloat () : 1.0f)
-        : makeOrthogonalProjectionForScene (width, height, getNearZ (), getFarZ (), getEye ());
+        : makeOrthogonalProjectionForScene (width, height, getNearZ (), getFarZ (),
+                                            m_shake.active ? getEye () - m_shake.offset : getEye ());
     this->m_isOrthogonal = true;
     m_renderLookat = (m_hasScriptTransforms || m_runtimeTransforms)
-        ? renderLookAtForTransforms (m_pose, true, width, height) : m_lookat;
+        ? renderLookAtForTransforms (m_pose, true, width, height)
+        : m_shake.active ? untransformedOrthogonalRenderLookAt (m_pose, m_shake, width, height) : m_lookat;
 }
+
+Camera::Shake Camera::Shake::evaluate (const SceneData::Camera& camera, float sceneTime,
+                                       bool orthogonal, float orthogonalHeight) {
+    const auto& shake = camera.shake;
+    if (!shake.enabled->value->getBool ()) return {};
+    return {true, Wallpapers::cameraShakeOffset (shake.speed->value->getFloat (),
+        shake.amplitude->value->getFloat (), shake.roughness->value->getFloat (),
+        sceneTime, orthogonal, orthogonalHeight)};
+}
+
+Camera::Pose Camera::Shake::apply (Pose pose) const {
+    if (!active) return pose;
+    pose.eye += offset;
+    pose.center += offset;
+    return pose;
+}
+
+glm::vec3 Camera::Shake::orthogonalRenderTranslation (float width, float height) const {
+    // The shake is a native-canvas world translation inside the view; carry
+    // it through the canvas bridge's basis, as transformed poses do.
+    return glm::vec3 (Wallpapers::sceneAuthoredToCamera (width, height, true) * glm::vec4 (-offset, 0.0f));
+}
+
+glm::mat4 Camera::untransformedOrthogonalRenderLookAt (
+    const Pose& pose, const Shake& shake, float width, float height) {
+    return glm::translate (glm::lookAt (pose.eye - shake.offset, pose.center - shake.offset, pose.up),
+                           shake.orthogonalRenderTranslation (width, height));
+}
+
+glm::mat4 Camera::cursorLookAtForShake (
+    const Pose& pose, const glm::mat4& lookAt, const Shake& shake, bool orthogonal, float width, float height) {
+    // Native unprojects through inverse(P * V) of the drawn, shaken
+    // view. Only the shake is carried in the render basis; transformed
+    // orthographic poses keep their existing cursor basis.
+    if (!orthogonal || !shake.active) return lookAt;
+    return untransformedOrthogonalRenderLookAt (pose, shake, width, height);
+}
+
+glm::mat4 Camera::flag4OrthogonalView (float eyeDistance, const Shake& shake, float width, float height) {
+    // Native pushes a copy of the live root view
+    // edits only its translation: x/y less canvas offsets (zero by default),
+    // z replaced by the eye distance. The frame shake therefore survives.
+    auto view = glm::translate (glm::mat4 (1.0f), glm::vec3 (0.0f, 0.0f, -eyeDistance));
+    if (!shake.active) return view;
+    const auto translation = shake.orthogonalRenderTranslation (width, height);
+    view[3][0] = translation.x;
+    view[3][1] = translation.y;
+    return view;
+}
+
+glm::mat4 Camera::getCursorLookAt () const {
+    return cursorLookAtForShake (m_pose, m_lookat, m_shake, m_isOrthogonal, m_width, m_height);
+}
+
+const Camera::Shake& Camera::getShake () const { return m_shake; }
 
 void Camera::setPerspectiveProjection (float width, float height) {
     m_width = width;

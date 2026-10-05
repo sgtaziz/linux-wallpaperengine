@@ -844,3 +844,133 @@ TEST_CASE ("Secondary projection uses the camera's normalized render basis",
             REQUIRE (actual[i] == Catch::Approx (expected[i]).margin (1e-5f));
     }
 }
+
+TEST_CASE ("Camera shake follows the native deterministic scene-clock vector", "[scene][camera][shake]") {
+    using WallpaperEngine::Render::Wallpapers::cameraShakeOffset;
+    // 2.8.42: (cos p, sin 1.333p, sin p) at p = speed^2 *,
+    // scaled by amplitude/10; orthographic drops z and multiplies by height/10.
+    // At p = 0 only x is non-zero, so the scale is visible directly.
+    const auto origin = cameraShakeOffset (2.75f, 0.15f, 1.0f, 0.0f, true, 2160.0f);
+    REQUIRE (origin.x == Catch::Approx (2160.0f * 0.01f * 0.15f));
+    REQUIRE (origin.y == 0.0f);
+    REQUIRE (origin.z == 0.0f);
+    const auto perspective = cameraShakeOffset (1.0f, 0.5f, 1.0f, glm::half_pi<float> (), false, 2160.0f);
+    REQUIRE (perspective.x == Catch::Approx (0.0f).margin (1e-7f));
+    REQUIRE (perspective.y == Catch::Approx (0.05f * std::sin (1.333f * glm::half_pi<float> ())));
+    REQUIRE (perspective.z == Catch::Approx (0.05f));
+    const auto orthographic = cameraShakeOffset (1.0f, 0.5f, 1.0f, glm::half_pi<float> (), true, 1000.0f);
+    REQUIRE (orthographic.z == 0.0f);
+    REQUIRE (orthographic.y == Catch::Approx (perspective.y * 1000.0f * 0.1f));
+    // Speed is squared before multiplying the clock; no random phase or seed.
+    REQUIRE (cameraShakeOffset (2.0f, 0.5f, 1.0f, 0.3f, false, 0.0f)
+             == cameraShakeOffset (1.0f, 0.5f, 1.0f, 1.2f, false, 0.0f));
+}
+
+TEST_CASE ("Camera shake roughness reshapes only the vector length", "[scene][camera][shake]") {
+    using WallpaperEngine::Render::Wallpapers::cameraShakeOffset;
+    const float time = 0.37f;
+    const auto base = cameraShakeOffset (3.0f, 0.5f, 1.0f, time, false, 0.0f);
+    // The cubed roughness must exceed 0.001: small and zero roughness keep the
+    // raw vector instead of normalizing it.
+    REQUIRE (cameraShakeOffset (3.0f, 0.5f, 0.0f, time, false, 0.0f) == base);
+    REQUIRE (cameraShakeOffset (3.0f, 0.5f, 0.05f, time, false, 0.0f) == base);
+    // powf(0.1f, 3) is exactly 0.001f, which the native gate (r > 0.001) also
+    // skips (bundled ricepod uses 0.1). Negative roughness cubes negative.
+    REQUIRE (std::pow (0.1f, 3.0f) == 0.001f);
+    REQUIRE (cameraShakeOffset (3.0f, 0.5f, 0.1f, time, false, 0.0f) == base);
+    REQUIRE (cameraShakeOffset (3.0f, 0.5f, -1.0f, time, false, 0.0f) == base);
+    REQUIRE (cameraShakeOffset (3.0f, 0.5f, -2.0f, time, true, 1080.0f)
+             == cameraShakeOffset (3.0f, 0.5f, 1.0f, time, true, 1080.0f));
+    REQUIRE (glm::length (cameraShakeOffset (3.0f, 0.5f, 0.11f, time, false, 0.0f) - base) > 1e-4f);
+    for (bool orthographic : {false, true}) {
+        const auto raw = cameraShakeOffset (3.0f, 0.5f, 1.0f, time, orthographic, 1080.0f);
+        const float scale = orthographic ? 1080.0f * 0.1f * 0.05f : 0.05f;
+        for (float roughness : {0.5f, 2.0f}) {
+            const auto shaped = cameraShakeOffset (3.0f, 0.5f, roughness, time, orthographic, 1080.0f);
+            const float length = glm::length (raw) / scale;
+            REQUIRE (glm::length (shaped) / scale
+                     == Catch::Approx (std::pow (length, std::pow (roughness, 3.0f))));
+            REQUIRE (glm::dot (glm::normalize (shaped), glm::normalize (raw)) == Catch::Approx (1.0f));
+        }
+    }
+}
+
+TEST_CASE ("Untransformed orthographic shake translates the native view", "[scene][camera][shake]") {
+    using WallpaperEngine::Render::Camera;
+    using WallpaperEngine::Render::Wallpapers::sceneAuthoredToCamera;
+    const auto flip = glm::scale (glm::mat4 (1), glm::vec3 (1, -1, 1));
+    const Camera::Pose root {{0, 0, 0}, {0, 0, -1}, {0, 1, 0}};
+    const auto projection = Camera::makeOrthogonalProjectionForScene (768, 432, 0, 1000, root.eye);
+    const auto bridge = sceneAuthoredToCamera (768, 432, true);
+    // Without shake the root view keeps its previous exact value.
+    REQUIRE (Camera::untransformedOrthogonalRenderLookAt (root, Camera::Shake {true, glm::vec3 (0)}, 768, 432)
+             == glm::lookAt (root.eye, root.center, root.up));
+    const glm::vec3 shake {5, 7, 0};
+    const Camera::Pose shaken {root.eye + shake, root.center + shake, root.up};
+    const auto view = Camera::untransformedOrthogonalRenderLookAt (shaken, Camera::Shake {true, shake}, 768, 432);
+    // Native clip is P_native * lookAt(shaken eye, shaken center) on authored
+    // canvas points; Linux presents the same clip through one Y flip.
+    const auto point = glm::vec4 (384, 100, 0, 1);
+    const auto expected = flip * (flip * projection * bridge) * glm::lookAt (shaken.eye, shaken.center, shaken.up) * point;
+    const auto actual = projection * view * bridge * point;
+    for (int i = 0; i < 4; ++i) REQUIRE (actual[i] == Catch::Approx (expected[i]).margin (1e-6f));
+    // The untransformed and transformed paths agree once a pose is shaken.
+    const auto transformed = Camera::renderLookAtForTransforms (shaken, true, 768, 432) * bridge * point;
+    for (int i = 0; i < 4; ++i) REQUIRE ((view * bridge * point)[i] == Catch::Approx (transformed[i]).margin (1e-4f));
+}
+
+TEST_CASE ("Orthographic flag-4 particles keep the frame shake of the copied root view", "[scene][camera][shake][particle]") {
+    using WallpaperEngine::Render::Camera;
+    // Native copies * (lookAt of the shaken eye/center)
+    // rewrites only translation z, so a z = 0 particle shifts on
+    // screen exactly as the orthographic scene layer does.
+    const float width = 1280, height = 720, eye = 450.0f;
+    const auto view0 = Camera::flag4OrthogonalView (eye, Camera::Shake {}, width, height);
+    REQUIRE (view0 == glm::translate (glm::mat4 (1.0f), glm::vec3 (0.0f, 0.0f, -eye)));
+    const Camera::Shake shake {true, {9, -4, 0}};
+    const auto view = Camera::flag4OrthogonalView (eye, shake, width, height);
+    REQUIRE (view[3][2] == -eye);
+    const auto ortho = Camera::makeOrthogonalProjectionForScene (width, height, 0, 1000, glm::vec3 (0));
+    const float fov = 2.0f * std::atan (1.0f / (eye * ortho[1][1]));
+    const auto perspective = glm::perspective (fov, width / height, 0.1f, 5000.0f);
+    const Camera::Pose root {{0, 0, 0}, {0, 0, -1}, {0, 1, 0}};
+    const auto layerView = Camera::untransformedOrthogonalRenderLookAt (shake.apply (root), shake, width, height);
+    for (const glm::vec4 point : {glm::vec4 (0, 0, 0, 1), glm::vec4 (-300, 170, 0, 1)}) {
+        const auto layer0 = ortho * point, layer = ortho * layerView * point;
+        const auto particle0 = perspective * view0 * point, particle = perspective * view * point;
+        for (int axis = 0; axis < 2; ++axis)
+            REQUIRE (particle[axis] / particle.w - particle0[axis] / particle0.w
+                     == Catch::Approx (layer[axis] / layer.w - layer0[axis] / layer0.w).margin (1e-5f));
+    }
+}
+
+TEST_CASE ("Orthographic cursor unprojection uses the drawn shaken view", "[scene][camera][shake][cursor]") {
+    using WallpaperEngine::Render::Camera;
+    using WallpaperEngine::Render::Wallpapers::particleMouseProjection;
+    using WallpaperEngine::Render::Wallpapers::particleMouseWorldPosition;
+    // Native unprojects with inverse,
+    // the same shaken view it draws with, so a cursor-linked point stays under
+    // the cursor while the scene shakes.
+    const float width = 1280, height = 720;
+    const auto projection = Camera::makeOrthogonalProjectionForScene (width, height, 0, 1000, glm::vec3 (0));
+    const Camera::Pose root {{0, 0, 0}, {0, 0, -1}, {0, 1, 0}};
+    const auto rootLookAt = glm::lookAt (root.eye, root.center, root.up);
+    REQUIRE (Camera::cursorLookAtForShake (root, rootLookAt, Camera::Shake {}, true, width, height) == rootLookAt);
+    const Camera::Shake shake {true, {6, 11, 0}};
+    const auto pose = shake.apply (root);
+    const auto drawn = Camera::untransformedOrthogonalRenderLookAt (pose, shake, width, height);
+    const auto cursorView = Camera::cursorLookAtForShake (pose, glm::lookAt (pose.eye, pose.center, pose.up),
+                                                          shake, true, width, height);
+    REQUIRE (cursorView == drawn);
+    const glm::vec2 uv {0.3f, 0.65f};
+    const auto world = particleMouseWorldPosition (uv, particleMouseProjection (projection, true), cursorView);
+    REQUIRE (world);
+    const auto clip = projection * drawn * glm::vec4 (*world, 1.0f);
+    REQUIRE (clip.x / clip.w == Catch::Approx (uv.x * 2 - 1).margin (1e-5f));
+    REQUIRE (clip.y / clip.w == Catch::Approx (1 - uv.y * 2).margin (1e-5f));
+    // The unrendered lookAt would leave the point 2*s.y away from the cursor.
+    const auto stale = particleMouseWorldPosition (uv, particleMouseProjection (projection, true),
+                                                   glm::lookAt (pose.eye, pose.center, pose.up));
+    REQUIRE (stale->y - world->y == Catch::Approx (2 * shake.offset.y));
+    REQUIRE (stale->x == Catch::Approx (world->x));
+}

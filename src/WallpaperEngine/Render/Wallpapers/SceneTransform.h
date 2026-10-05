@@ -136,6 +136,35 @@ inline float sceneParallaxDelayWeight (float delay, float frameDelta) {
     return delay > 0.0f ? std::min (1.0f, (1.0f - delay / 3.0f) * 10.0f * frameDelta) : 1.0f;
 }
 
+// Native translates the frame eye and center by one deterministic
+// vector of the scene clock. Roughness is cubed into an
+// exponent on the vector length; 1.0 leaves the direction and length as-is.
+// Orthographic scenes drop z and scale by a tenth of the canvas height.
+inline glm::vec3 cameraShakeOffset (
+    float speed, float amplitude, float roughness, float sceneTime,
+    bool orthographic, float orthographicHeight
+) {
+    const float exponent = std::pow (roughness, 3.0f);
+    float scale = amplitude * 0.1f;
+    const float phase = speed * speed * sceneTime;
+    float x = std::cos (phase);
+    float y = std::sin (phase * 1.333f);
+    float z = std::sin (phase);
+    if (orthographic) {
+        z = 0.0f;
+        scale = orthographicHeight * 0.1f * scale;
+    }
+    if (exponent > 0.001f && exponent != 1.0f) {
+        const float length = std::sqrt (x * x + y * y + z * z);
+        const float power = std::pow (length, exponent);
+        const float inverse = 1.0f / length;
+        x = inverse * x * power;
+        y = inverse * y * power;
+        z = inverse * z * power;
+    }
+    return {x * scale, y * scale, z * scale};
+}
+
 inline std::optional<glm::mat4> inverseFiniteTransform (const glm::mat4& matrix) {
     // Float matrix multiplication can give a mathematically singular affine
     // hierarchy a tiny nonzero determinant after rotated zero-scale axes mix.
