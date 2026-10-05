@@ -68,6 +68,15 @@ public:
     }
 };
 
+class CTubeLight final : public Scripting::ScriptableObject {
+public:
+    CTubeLight (CScene& scene, const SceneTubeLight& light) :
+        CObject (scene, light), ScriptableObject (scene, light) {
+        for (const auto& binding : Scripting::scriptPropertyBindings (light))
+            registerProperty (binding.name, binding.value);
+    }
+};
+
 class CPointLight final : public Scripting::ScriptableObject {
 public:
     CPointLight (CScene& scene, const ScenePointLight& light) :
@@ -177,6 +186,14 @@ CScene::CScene (
             registerSpotLight (object->as<SceneSpotLight> ());
     }
     refreshSpotLights ();
+    m_tubeLightColors.resize (scene->tubeLightSlots, glm::vec4 (0.0f));
+    m_tubeLightOriginsA.resize (scene->tubeLightSlots, glm::vec4 (0.0f));
+    m_tubeLightOriginsB.resize (scene->tubeLightSlots, glm::vec4 (0.0f));
+    for (const auto& object : scene->objects) {
+        if (object->is<SceneTubeLight> () && !m_rejectedObjectIds.contains (object->id))
+            m_tubeLightObjects.push_back (object->as<SceneTubeLight> ());
+    }
+    refreshTubeLights ();
 
     // The native scene loader reads the general table before the object list,
     // so general-setting scripts and animations are queued ahead of layers.
@@ -383,6 +400,8 @@ Render::CObject* CScene::dispatchObjectType (const Object& object) {
             renderObject = new CTransformObject (*this, object);
         } else if (object.is<SceneSpotLight> ()) {
             renderObject = new CSpotLight (*this, *object.as<SceneSpotLight> ());
+        } else if (object.is<SceneTubeLight> ()) {
+            renderObject = new CTubeLight (*this, *object.as<SceneTubeLight> ());
 	} else if (object.is<ScenePointLight> ()) {
 	    renderObject = new CPointLight (*this, *object.as<ScenePointLight> ());
 	} else if (object.is<Sound> ()) {
@@ -554,6 +573,7 @@ void CScene::renderFrame (const glm::ivec4& viewport) {
     flushDestroyedScriptLayers ();
     refreshPointLights ();
     refreshSpotLights ();
+    refreshTubeLights ();
 
     // Sound scheduling follows scene time even when a sound layer is hidden
     // by a render-only debug filter. Playback itself runs in the audio driver.
@@ -999,6 +1019,10 @@ const glm::vec4* CScene::getSpotLightColors () const { return m_spotLightColors.
 const glm::vec4* CScene::getSpotLightOrigins () const { return m_spotLightOrigins.data (); }
 const glm::vec4* CScene::getSpotLightDirections () const { return m_spotLightDirections.data (); }
 const glm::vec4* CScene::getSpotLightExponents () const { return m_spotLightExponents.data (); }
+int CScene::getTubeLightCount () const { return int (m_tubeLightColors.size ()); }
+const glm::vec4* CScene::getTubeLightColors () const { return m_tubeLightColors.data (); }
+const glm::vec4* CScene::getTubeLightOriginsA () const { return m_tubeLightOriginsA.data (); }
+const glm::vec4* CScene::getTubeLightOriginsB () const { return m_tubeLightOriginsB.data (); }
 
 const glm::vec3* CScene::getLegacyLightPositions () const { return m_legacyLightPositions.data (); }
 
@@ -1128,6 +1152,38 @@ void CScene::refreshSpotLights () {
     else m_shadowAtlas->resize (packing.atlasWidth, packing.atlasHeight);
     m_shadowAtlasTexel = {1.0f / float (packing.atlasWidth), 1.0f / float (packing.atlasHeight),
                           float (packing.atlasWidth), float (packing.atlasHeight)};
+}
+
+void CScene::refreshTubeLights () {
+    if (m_tubeLightColors.empty ()) return;
+    const auto direction = viewForward (getCamera ().getLookAt ());
+    std::vector<TubeLightInput> inputs;
+    for (const SceneTubeLight* light : m_tubeLightObjects) {
+        const auto transform = resolveSceneTransform (*light,
+            [this] (int parentId) -> const Object* { return findObjectData (parentId); },
+            [this] (const Object& parent, const std::string& name) {
+                return getPuppetAttachmentTransform (parent.id, name);
+            });
+        if (!transform.visible) continue;
+        const auto packed = packTubeLightUniforms (
+            transform.authoredMatrix, light->color->value->getVec3 (),
+            light->intensity->value->getFloat (), light->radius->value->getFloat (),
+            light->exponent->value->getFloat (), light->controlPoint->value->getVec3 ());
+        const auto finite = [] (const glm::vec4& value) {
+            return std::isfinite (value.x) && std::isfinite (value.y)
+                && std::isfinite (value.z) && std::isfinite (value.w);
+        };
+        if (!finite (packed.color) || !finite (packed.originA) || !finite (packed.originB)) continue;
+        // The same key as spot lights: raw flags, then local origin depth.
+        inputs.push_back ({(light->castShadow ? 1 : 0) | (light->useCookie ? 2 : 0),
+            glm::dot (light->origin->value->getVec3 (), direction), packed});
+    }
+    const auto packed = packTubeLights (inputs, int (m_tubeLightColors.size ()));
+    for (size_t slot = 0; slot < packed.size (); ++slot) {
+        m_tubeLightColors[slot] = packed[slot].color;
+        m_tubeLightOriginsA[slot] = packed[slot].originA;
+        m_tubeLightOriginsB[slot] = packed[slot].originB;
+    }
 }
 
 void CScene::renderShadowAtlas () {

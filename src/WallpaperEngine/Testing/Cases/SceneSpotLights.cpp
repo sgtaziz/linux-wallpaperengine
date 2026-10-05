@@ -46,7 +46,7 @@ TEST_CASE ("Modern spotlight parses native cones and defaults independently of p
     REQUIRE (empty.exponent->value->getFloat () == 2);
     REQUIRE (empty.innerCone->value->getFloat () == 20);
     REQUIRE (empty.outerCone->value->getFloat () == 30);
-    REQUIRE (empty.controlPoint->value->getVec3 () == glm::vec3 (0, 2, 0));
+    REQUIRE (empty.controlPoint->value->getVec3 () == glm::vec3 (2, 0, 0));
     const auto bindings = WallpaperEngine::Scripting::scriptPropertyBindings (light);
     const auto cone = std::ranges::find_if (bindings, [] (const auto& binding) {
         return std::string (binding.name) == "innercone";

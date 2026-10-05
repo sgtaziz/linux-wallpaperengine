@@ -1875,3 +1875,30 @@ TEST_CASE ("Shipped generic4 receivers and the shadow caster compile with spot f
     REQUIRE (glGetUniformLocation (program, "g_ModelMatrix") >= 0);
     glDeleteProgram (program);
 }
+
+TEST_CASE ("Shipped lit image shaders compile live tube loops", "[render][shader][gl][tubelight]") {
+    using namespace WallpaperEngine::Render::Shaders;
+    const char* root = std::getenv ("WPE_SHIPPED_ASSETS");
+    if (!root) return;
+    SurfacelessGL gl;
+    REQUIRE (gl.ready);
+    auto files = std::make_unique<WallpaperEngine::FileSystem::Container> ();
+    files->mount (root, "/");
+    WallpaperEngine::Assets::AssetLocator assets (std::move (files));
+    const ShaderConstantMap constants;
+    const TextureMap textures;
+    // genericimage4 reaches the tube loop through LightingV1; genericimage3
+    // declares its own LIGHTS_TUBE loop over the same uniforms.
+    for (const char* name : {"genericimage4", "genericimage3"}) {
+        INFO (name);
+        const ComboMap combos {{"LIGHTING", 1}, {"REFLECTION", 1}};
+        const ComboMap scene {{"LIGHTS_POINT", 0}, {"LIGHTS_SPOT", 0}, {"LIGHTS_TUBE", 3}};
+        Shader receiver (assets, name, combos, scene, textures, textures, constants);
+        const auto [vertex, fragment] = GLSLContext::get ().toGlsl (receiver.vertex (), receiver.fragment ());
+        REQUIRE_FALSE (fragment.empty ());
+        const auto program = linkProgram (vertex, fragment);
+        for (const char* uniform : {"g_LTube_Color", "g_LTube_OriginA", "g_LTube_OriginB"})
+            REQUIRE (glGetUniformLocation (program, uniform) >= 0);
+        glDeleteProgram (program);
+    }
+}

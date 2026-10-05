@@ -109,11 +109,13 @@ SceneUniquePtr WallpaperParser::parseScene (const JSON& file, Project& project) 
     const auto lightConfig = general.optional ("lightconfig");
     int pointLightSlots = 0;
     int spotLightSlots = 0;
+    int tubeLightSlots = 0;
     int spotShadowSlots = 0, spotCookieSlots = 0, spotShadowCookieSlots = 0;
     if (lightConfig.has_value ()) {
 	if (!lightConfig->is_object ()) throw std::invalid_argument ("Scene lightconfig must be an object");
 	pointLightSlots = lightConfig->optional ("point", 0);
         spotLightSlots = lightConfig->optional ("spot", 0);
+        tubeLightSlots = lightConfig->optional ("tube", 0);
         spotShadowSlots = lightConfig->optional ("spotshadow", 0);
         spotCookieSlots = lightConfig->optional ("spotcookie", 0);
         spotShadowCookieSlots = lightConfig->optional ("spotshadowcookie", 0);
@@ -128,6 +130,9 @@ SceneUniquePtr WallpaperParser::parseScene (const JSON& file, Project& project) 
             throw std::invalid_argument ("Scene spot lightconfig exceeds its serialized four-bit count");
 	if (pointLightSlots < 0 || pointLightSlots > 15)
 	    throw std::invalid_argument ("Scene point lightconfig exceeds its serialized four-bit count");
+        // packs the tube count into bits 8-11 of the renderer lighting configuration.
+        if (tubeLightSlots < 0 || tubeLightSlots > 15)
+            throw std::invalid_argument ("Scene tube lightconfig exceeds its serialized four-bit count");
     }
     const auto& properties = project.properties;
     // Native ignores wrong JSON types. Preserve registered bool user
@@ -162,6 +167,7 @@ SceneUniquePtr WallpaperParser::parseScene (const JSON& file, Project& project) 
         }, SceneData {
             .pointLightSlots = pointLightSlots,
             .spotLightSlots = spotLightSlots,
+            .tubeLightSlots = tubeLightSlots,
             .spotShadowSlots = spotShadowSlots,
             .spotCookieSlots = spotCookieSlots,
             .spotShadowCookieSlots = spotShadowCookieSlots,

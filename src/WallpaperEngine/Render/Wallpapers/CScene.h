@@ -78,6 +78,10 @@ public:
     [[nodiscard]] const glm::vec4* getSpotLightOrigins () const;
     [[nodiscard]] const glm::vec4* getSpotLightDirections () const;
     [[nodiscard]] const glm::vec4* getSpotLightExponents () const;
+    [[nodiscard]] int getTubeLightCount () const;
+    [[nodiscard]] const glm::vec4* getTubeLightColors () const;
+    [[nodiscard]] const glm::vec4* getTubeLightOriginsA () const;
+    [[nodiscard]] const glm::vec4* getTubeLightOriginsB () const;
     /** Serialized spot feature slot counts. */
     [[nodiscard]] int getSpotShadowSlotCount () const;
     [[nodiscard]] int getSpotCookieSlotCount () const;
@@ -137,6 +141,7 @@ private:
     void flushDestroyedScriptLayers ();
     void refreshPointLights ();
     void refreshSpotLights ();
+    void refreshTubeLights ();
     void registerSpotLight (const SceneSpotLight* light);
     void renderShadowAtlas ();
     void assignLegacyLightSlot (const ScenePointLight* light);
@@ -169,6 +174,10 @@ private:
     std::vector<glm::vec4> m_spotLightOrigins = {};
     std::vector<glm::vec4> m_spotLightDirections = {};
     std::vector<glm::vec4> m_spotLightExponents = {};
+    std::vector<const SceneTubeLight*> m_tubeLightObjects = {};
+    std::vector<glm::vec4> m_tubeLightColors = {};
+    std::vector<glm::vec4> m_tubeLightOriginsA = {};
+    std::vector<glm::vec4> m_tubeLightOriginsB = {};
     std::map<const SceneSpotLight*, std::shared_ptr<const TextureProvider>> m_spotLightCookies = {};
     std::vector<glm::mat4> m_spotFeatureProjections = {};
     std::vector<glm::vec4> m_spotFeatureTransforms = {};

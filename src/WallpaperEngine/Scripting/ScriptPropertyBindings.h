@@ -157,15 +157,25 @@ inline auto scriptPropertyBindings (const ScenePointLight& light) {
     }};
 }
 
-inline auto scriptPropertyBindings (const WallpaperEngine::Data::Model::SceneSpotLight& light) {
+// Native registers the same descriptors for every modern light type.
+inline auto modernLightScriptPropertyBindings (const WallpaperEngine::Data::Model::Object& object,
+                                               const WallpaperEngine::Data::Model::SceneSpotLightData& light) {
     return std::array<ScriptPropertyBinding, 11> {{
-        {"origin", *light.origin->value}, {"scale", *light.groupScale->value},
-        {"angles", *light.groupAngles->value}, {"visible", *light.groupVisible->value},
+        {"origin", *object.origin->value}, {"scale", *object.groupScale->value},
+        {"angles", *object.groupAngles->value}, {"visible", *object.groupVisible->value},
         {"color", *light.color->value}, {"intensity", *light.intensity->value},
         {"radius", *light.radius->value}, {"exponent", *light.exponent->value},
         {"innercone", *light.innerCone->value}, {"outercone", *light.outerCone->value},
         {"controlpoint", *light.controlPoint->value},
     }};
+}
+
+inline auto scriptPropertyBindings (const WallpaperEngine::Data::Model::SceneTubeLight& light) {
+    return modernLightScriptPropertyBindings (light, light);
+}
+
+inline auto scriptPropertyBindings (const WallpaperEngine::Data::Model::SceneSpotLight& light) {
+    return modernLightScriptPropertyBindings (light, light);
 }
 
 inline auto scriptPropertyBindings (const Text& text) {

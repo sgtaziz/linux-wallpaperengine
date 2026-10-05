@@ -226,6 +226,18 @@ public:
     ~SceneSpotLight () override = default;
 };
 
+/**
+ * Native modern tube light (`ltube`, schema value 2). The shared light
+ * descriptors give it the same fields as a spot light; the
+ * producer reads color, intensity, radius, exponent and controlpoint.
+ */
+class SceneTubeLight : public Object, public SceneSpotLightData {
+public:
+    explicit SceneTubeLight (ObjectData data, SceneSpotLightData lightData) noexcept :
+        Object (std::move (data)), SceneSpotLightData (std::move (lightData)) { }
+    ~SceneTubeLight () override = default;
+};
+
 struct SoundData {
     /** Native modes are loop (the default), random and single. */
     std::optional<std::string> playbackmode;
