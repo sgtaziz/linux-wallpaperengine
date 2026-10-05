@@ -229,6 +229,9 @@ private:
     glm::vec2 m_previousCursorScreenPosition = {};
     SceneCursorState m_cursorState;
     glm::vec2 m_parallaxDisplacement = {};
+    // The eye term of native's smoothed parallax point, eased with
+    // the same weight as m_parallaxDisplacement; see CScene::render.
+    std::optional<glm::vec2> m_parallaxEye = {};
     SceneParallaxPosition m_parallaxPosition = {};
     std::shared_ptr<CFBO> _rt_4FrameBuffer = nullptr;
     std::shared_ptr<CFBO> _rt_8FrameBuffer = nullptr;

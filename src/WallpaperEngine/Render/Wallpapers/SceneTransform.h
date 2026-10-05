@@ -230,6 +230,14 @@ inline glm::vec2 sceneParallaxCursor (glm::vec2 viewportCursor, float ustart, fl
             vend >= vstart ? viewportCursor.y : 1.0f - viewportCursor.y};
 }
 
+// The eye term of native's eased parallax point (eases
+// size*0.5*(1-infl) + size*cursor*infl + eye as one point, which is linear in
+// each term). Written as prev + (eye - prev) * weight so an unchanged eye stays
+// bit-exact; sceneLayerParallaxOffset takes it in place of the live eye.
+inline glm::vec2 easeSceneParallaxEye (glm::vec2 previous, glm::vec2 eye, float weight) {
+    return previous + (eye - previous) * weight;
+}
+
 inline float sceneParallaxDelayWeight (float delay, float frameDelta) {
     return delay > 0.0f ? std::min (1.0f, (1.0f - delay / 3.0f) * 10.0f * frameDelta) : 1.0f;
 }

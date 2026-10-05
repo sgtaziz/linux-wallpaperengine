@@ -666,6 +666,48 @@ TEST_CASE ("Camera parallax sweeps the full canvas of a cover-cropped scene", "[
     }
 }
 
+TEST_CASE ("An unchanged eye stays bit-exact through the parallax eye easing", "[scene][parallax][shake]") {
+    // CScene eases the eye term with prev + (eye - prev) * weight; a constant
+    // eye must reproduce the live eye exactly, so scenes without shake keep
+    // the former layer offset to the last bit.
+    using WallpaperEngine::Render::Wallpapers::easeSceneParallaxEye;
+    for (const glm::vec2 eye : {glm::vec2 (0.0f), glm::vec2 (-47.67f, 204.18f), glm::vec2 (1720.000122f, -0.3333333f)})
+        for (const float weight : {0.0f, 0.0555556f, 0.142857f, 0.3f, 1.0f}) {
+            glm::vec2 eased = eye;
+            for (int frame = 0; frame < 300; ++frame) eased = easeSceneParallaxEye (eased, eye, weight);
+            REQUIRE (eased.x == eye.x);
+            REQUIRE (eased.y == eye.y);
+        }
+}
+
+TEST_CASE ("Easing the eye and the cursor term separately equals easing native's single point", "[scene][parallax][shake]") {
+    // Native eases P = size/2*(1-infl) + size*(x, 1-y)*infl + eye as
+    // one point; offsets layers by (root - P) * amount * depth. The
+    // easing is linear, so CScene's separately eased displacement and eye give
+    // the same offset while the shaken eye moves every frame.
+    using WallpaperEngine::Render::Wallpapers::advanceSceneParallaxPosition;
+    using WallpaperEngine::Render::Wallpapers::easeSceneParallaxEye;
+    using WallpaperEngine::Render::Wallpapers::initialSceneParallaxPosition;
+    using WallpaperEngine::Render::Wallpapers::sceneParallaxDisplacementTarget;
+    const glm::vec2 size (1920.0f, 1080.0f);
+    const glm::vec3 root (660.0f, 540.0f, 0.0f);
+    const float amount = 0.5f, influence = 0.05f, weight = 0.111111f;
+    const glm::vec2 cursor (0.5f);
+    auto point = initialSceneParallaxPosition (true, size, glm::vec2 (0.0f));
+    glm::vec2 displacement (0.0f), eye (0.0f);
+    for (int frame = 1; frame <= 120; ++frame) {
+        const float phase = 9.0f * frame / 30.0f;
+        const glm::vec2 shaken (7.56f * std::cos (phase), 7.56f * std::sin (phase * 1.333f));
+        displacement = glm::mix (displacement, sceneParallaxDisplacementTarget (cursor, amount, influence), weight);
+        eye = easeSceneParallaxEye (eye, shaken, weight);
+        advanceSceneParallaxPosition (point, true, cursor, influence, size, shaken, weight);
+        const glm::vec3 separate = sceneLayerParallaxOffset (root, glm::vec3 (eye, 0.0f), glm::vec2 (2.0f), displacement,
+                                                             size.x, size.y, amount, true, true);
+        REQUIRE (separate.x == Catch::Approx ((root.x - point.point.x) * amount * 2.0f).margin (1e-3));
+        REQUIRE (-separate.y == Catch::Approx ((root.y - point.point.y) * amount * 2.0f).margin (1e-3));
+    }
+}
+
 TEST_CASE ("Unparented scene parallax precedes rotated and mirrored object transforms", "[scene][parallax][particle]") {
     // The 2334035201 mouth smoke has Z angle ~pi and the left fog has a
     // negative X scale. Native moves the scene stack before either
