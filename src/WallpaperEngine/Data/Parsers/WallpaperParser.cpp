@@ -151,7 +151,9 @@ SceneUniquePtr WallpaperParser::parseScene (const JSON& file, Project& project) 
     // Omitted general fields keep the scene constructor's values (2.8.42
     // confirmed in native disassembly): clearcolor
     // zero, cameraparallaxamount 0.5, cameraparallaxdelay 
-    // 0.1, cameraparallaxmouseinfluence 0.5, bloomstrength 2.0,
+    // 0.1, cameraparallaxmouseinfluence 0.5, camerashakespeed 
+    // 3.0, camerashakeamplitude 0.5, camerashakeroughness 1.0,
+    // bloomstrength 2.0,
     // bloomthreshold 0.65, and the HDR/tint/zoom/FOV values below.
     return std::make_unique <Scene> (
         WallpaperData {
@@ -192,9 +194,9 @@ SceneUniquePtr WallpaperParser::parseScene (const JSON& file, Project& project) 
                 },
                 .shake = {
                     .enabled = general.user ("camerashake", properties, false),
-                    .amplitude = general.user ("camerashakeamplitude", properties, 0.0f),
-                    .roughness = general.user ("camerashakeroughness", properties, 0.0f),
-                    .speed = general.user ("camerashakespeed", properties, 0.0f),
+                    .amplitude = general.user ("camerashakeamplitude", properties, 0.5f),
+                    .roughness = general.user ("camerashakeroughness", properties, 1.0f),
+                    .speed = general.user ("camerashakespeed", properties, 3.0f),
                 },
                 .configuration = {
                     .center = camera.require <glm::vec3> ("center", "Camera must have a center position"),

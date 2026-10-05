@@ -17,6 +17,7 @@
 #include "WallpaperEngine/Scripting/ScriptPropertyBindings.h"
 
 #include <cmath>
+#include <cstring>
 #include <glm/gtc/matrix_transform.hpp>
 #include <limits>
 #include <memory>
@@ -970,8 +971,63 @@ TEST_CASE ("Omitted general settings take the native scene constructor defaults"
     REQUIRE (parallax.amount->value->getFloat () == 0.5f);
     REQUIRE (parallax.delay->value->getFloat () == 0.1f);
     REQUIRE (parallax.mouseInfluence->value->getFloat () == 0.5f);
+    // also seeds camerashakespeed 3.0, amplitude 0.5
+    // and roughness 1.0; the enable bit 0x80 starts clear.
+    const auto& shake = scene->camera.shake;
+    REQUIRE_FALSE (shake.enabled->value->getBool ());
+    REQUIRE (shake.speed->value->getFloat () == 3.0f);
+    REQUIRE (shake.amplitude->value->getFloat () == 0.5f);
+    REQUIRE (shake.roughness->value->getFloat () == 1.0f);
     REQUIRE (scene->colors.clear->value->getVec3 () == glm::vec3 (0.0f));
     REQUIRE (scene->camera.projection.zoom->value->getFloat () == 1.0f);
     REQUIRE (scene->camera.projection.fov->value->getFloat () == 50.0f);
     REQUIRE (scene->camera.projection.perspectiveOverrideFov->value->getFloat () == 95.0f);
+}
+
+TEST_CASE ("Camera shake moves the frame eye and center only while enabled", "[scene][camera][shake]") {
+    using WallpaperEngine::Assets::AssetLocator;
+    using WallpaperEngine::Data::JSON::JSON;
+    using WallpaperEngine::Data::Model::Project;
+    using WallpaperEngine::Data::Model::Scene;
+    using WallpaperEngine::Data::Parsers::WallpaperParser;
+    using WallpaperEngine::FileSystem::Container;
+    using WallpaperEngine::Render::Camera;
+    using WallpaperEngine::Render::Wallpapers::cameraShakeOffset;
+    const auto parse = [] (const char* general) {
+        auto files = std::make_unique<Container> ();
+        files->getVFS ().add ("scene.json", std::string (R"({"camera":{"center":"0 0 -1","eye":"0 0 0","up":"0 1 0"},
+          "general":{"orthogonalprojection":{"width":1920,"height":1080},)") + general + R"(},"objects":[]})");
+        auto project = std::make_unique<Project> ();
+        project->type = Project::Type_Scene;
+        project->assetLocator = std::make_unique<AssetLocator> (std::move (files));
+        auto wallpaper = WallpaperParser::parse (JSON ("scene.json"), *project);
+        return std::make_pair (std::move (project), std::move (wallpaper));
+    };
+    const auto on = parse (R"("camerashake":true,"camerashakeamplitude":0.15,"camerashakespeed":2.75,"camerashakeroughness":0.77)");
+    const auto off = parse (R"("camerashake":false,"camerashakeamplitude":0.15,"camerashakespeed":2.75)");
+    const auto& cameraOn = dynamic_cast<const Scene&> (*on.second).camera;
+    const auto& cameraOff = dynamic_cast<const Scene&> (*off.second).camera;
+    // A pose with signed zeros: the disabled path must return it bit for bit.
+    const Camera::Pose pose {{-0.0f, 3, -0.0f}, {-0.0f, 3, -1}, {0.1f, 1, -0.0f}};
+    const auto disabled = Camera::Shake::evaluate (cameraOff, 12.5f, true, 1080);
+    REQUIRE_FALSE (disabled.active);
+    const auto same = disabled.apply (pose);
+    REQUIRE (std::memcmp (&same, &pose, sizeof pose) == 0);
+    const auto shake = Camera::Shake::evaluate (cameraOn, 12.5f, true, 1080);
+    REQUIRE (shake.active);
+    REQUIRE (shake.offset == cameraShakeOffset (2.75f, 0.15f, 0.77f, 12.5f, true, 1080));
+    REQUIRE (shake.offset.z == 0.0f);
+    const auto shaken = shake.apply (pose);
+    REQUIRE (shaken.eye == pose.eye + shake.offset);
+    REQUIRE (shaken.center == pose.center + shake.offset);
+    REQUIRE (std::memcmp (&shaken.up, &pose.up, sizeof pose.up) == 0);
+    // Stored script transforms are applied to, never replaced by, the frame shake.
+    const glm::vec3 scriptEye {4, 5, 6};
+    const auto stored = Camera::updatedTransforms ({pose, 1.0f}, &scriptEye, nullptr, nullptr, nullptr);
+    const auto frame = shake.apply (stored.pose);
+    REQUIRE (stored.pose.eye == scriptEye);
+    REQUIRE (frame.eye == scriptEye + shake.offset);
+    // Perspective keeps z and ignores the orthographic height.
+    const auto perspective = Camera::Shake::evaluate (cameraOn, 12.5f, false, 1080);
+    REQUIRE (perspective.offset == cameraShakeOffset (2.75f, 0.15f, 0.77f, 12.5f, false, 0));
 }
