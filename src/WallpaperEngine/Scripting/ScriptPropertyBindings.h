@@ -48,6 +48,32 @@ inline std::vector<ScriptPropertyBinding> scriptPropertyBindings (const Sound& s
     return result;
 }
 
+struct MaterialConstantBinding {
+    std::string key;
+    DynamicValue& value;
+    const WallpaperEngine::Data::Model::ShaderConstantMap& constants;
+};
+
+// Native material loading keeps each pass's constantshadervalues
+// and applies them through the material's property table (at
+// 435). Those typed loaders reach the generic loader, which
+// appends a "script" to the scene script list. The image's
+// own model material is the one its base passes bind, so each of its pass
+// constants is a script-bearing value like an effect material constant.
+inline std::vector<MaterialConstantBinding> imageMaterialScriptBindings (const Image& image) {
+    std::vector<MaterialConstantBinding> result;
+    if (!image.model || !image.model->material) return result;
+    const auto& passes = image.model->material->passes;
+    for (size_t passIndex = 0; passIndex < passes.size (); ++passIndex) {
+        const auto& constants = passes[passIndex]->constants;
+        for (const auto& [name, setting] : constants)
+            if (setting && setting->value)
+                result.push_back ({"pass" + std::to_string (passIndex) + "_constant_" + name, *setting->value,
+                                   constants});
+    }
+    return result;
+}
+
 // Bind concrete renderer values when present. Text has no typed angles field,
 // so its previously exposed group angle remains an explicit fallback.
 inline auto scriptPropertyBindings (const Image& image) {

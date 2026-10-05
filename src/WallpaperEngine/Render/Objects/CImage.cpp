@@ -184,6 +184,13 @@ CImage::CImage (Wallpapers::CScene& scene, const Image& image) :
 	queue ("blend", layer->blend);
 	queue ("animation", layer->animation);
     }
+    // The image's own material constants are what its base passes bind (CPass
+    // reads them live). Queue their scripts with this image as thisLayer and
+    // the material as thisObject, as for effect material constants.
+    for (const auto& binding : Scripting::imageMaterialScriptBindings (image))
+	getScene ().getScriptEngine ().queueScript (
+	    "imageMaterial_object" + std::to_string (getId ()) + "_" + binding.key, binding.value, *this,
+	    std::nullopt, &binding.constants);
     // Image effect settings also retain their own DynamicValues. Queue their
     // scripts with this image as thisLayer so instance-specific constants can
     // change after CPass setup without synthetic public script properties.
