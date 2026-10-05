@@ -261,3 +261,37 @@ TEST_CASE ("Sound layers queue base transform scripts alongside volume", "[scrip
     const auto bare = bindingMap (scriptPropertyBindings (*silent->as<Sound> ()));
     REQUIRE (bare.at ("scale") == silent->as<Sound> ()->groupScale->value.get ());
 }
+
+TEST_CASE ("Image model material constants are offered for script queuing", "[script][binding][parser]") {
+    using WallpaperEngine::Data::JSON::JSON;
+    using WallpaperEngine::Data::Model::Project;
+    using WallpaperEngine::Data::Parsers::ObjectParser;
+    using WallpaperEngine::Scripting::imageMaterialScriptBindings;
+    // Reduced from 2744921335's bar.json: the image's own material carries an
+    // audio-driven "color" constant script beside plain constants.
+    auto files = std::make_unique<WallpaperEngine::FileSystem::Container> ();
+    files->getVFS ().add ("materials/bar.json", R"({"passes":[{"shader":"custom_tint",
+        "constantshadervalues":{"Alpha":0.47,
+          "color":{"script":"export function update(value){ return value; }","value":"1 1 1"}}}]})");
+    files->getVFS ().add ("models/bar.json", R"({"material":"materials/bar.json","autosize":true})");
+    Project project {};
+    project.assetLocator = std::make_unique<WallpaperEngine::Assets::AssetLocator> (std::move (files));
+    const auto object = ObjectParser::parse (JSON {{"id", 180}, {"image", "models/bar.json"}}, project);
+    const auto& image = *object->as<Image> ();
+    const auto bindings = imageMaterialScriptBindings (image);
+    REQUIRE (bindings.size () == 2);
+    const auto& constants = image.model->material->passes[0]->constants;
+    const auto color = std::find_if (bindings.begin (), bindings.end (), [] (const auto& entry) {
+        return entry.key == "pass0_constant_color";
+    });
+    REQUIRE (color != bindings.end ());
+    // The value is the one CPass binds for the base pass, and its owner map
+    // is the material handed to scripts as thisObject.
+    REQUIRE (&color->value == constants.at ("color")->value.get ());
+    REQUIRE (&color->constants == &constants);
+    REQUIRE (color->value.getScriptSource ().has_value ());
+    // The key keeps the "_constant_color" suffix that preserves alpha on an
+    // RGB script result.
+    REQUIRE (color->key.ends_with ("_constant_color"));
+}
+
