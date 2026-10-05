@@ -230,7 +230,7 @@ static void jsToDynamicValue (JSContext* ctx, JSValue val, DynamicValue& source,
 }
 
 ScriptEngine::ScriptProperty ScriptEngine::currentScriptProperty () const {
-    if (m_runningModule) return {&m_runningModule->object, &m_runningModule->value};
+    if (m_runningModule) return {m_runningModule->object, &m_runningModule->value};
     if (m_engineObject)
         return {m_engineObject->getTimers ().activeOwner (), m_engineObject->getTimers ().activeValue ()};
     return {};
@@ -404,7 +404,7 @@ void ScriptEngine::unregisterObject (const ScriptableObject& object) {
     bool removedActiveLayer = false;
     bool removedActiveObject = false;
     for (auto it = this->m_scriptModules.begin (); it != this->m_scriptModules.end ();) {
-	if (&it->second.object != &object) {
+	if (it->second.object != &object) {
 	    ++it;
 	    continue;
 	}
@@ -431,7 +431,7 @@ void ScriptEngine::unregisterObject (const ScriptableObject& object) {
 void ScriptEngine::destroyObjectModules (const ScriptableObject& object) {
     if (!m_context) return;
     auto* previousModule = m_runningModule;
-    const bool previousRemoved = previousModule && &previousModule->object == &object;
+    const bool previousRemoved = previousModule && previousModule->object == &object;
     JSValue previousLayer = JS_GetPropertyStr (m_context, m_globalThis, "thisLayer");
     JSValue previousObject = JS_GetPropertyStr (m_context, m_globalThis, "thisObject");
     ScopeGuard restore ([this, previousModule, previousRemoved, previousLayer, previousObject] {
@@ -448,7 +448,7 @@ void ScriptEngine::destroyObjectModules (const ScriptableObject& object) {
     });
     std::vector<std::string> keys;
     for (const auto& [key, module] : m_scriptModules)
-        if (&module.object == &object) keys.push_back (key);
+        if (module.object == &object) keys.push_back (key);
     for (const auto& key : keys) {
         const auto found = m_scriptModules.find (key);
         if (found == m_scriptModules.end ()) continue;
@@ -468,7 +468,7 @@ void ScriptEngine::dispatchCursorEvent (const ScriptableObject& object, const ch
     if (!m_context) return;
     std::vector<std::string> keys;
     for (const auto& [key, module] : m_scriptModules)
-        if (&module.object == &object) keys.push_back (key);
+        if (module.object == &object) keys.push_back (key);
     auto* previousModule = m_runningModule;
     JSValue previousLayer = JS_GetPropertyStr (m_context, m_globalThis, "thisLayer");
     JSValue previousObject = JS_GetPropertyStr (m_context, m_globalThis, "thisObject");
@@ -802,8 +802,18 @@ void ScriptEngine::activateLayer (const LoadedModule& module) {
 void ScriptEngine::queueScript (const std::string& key, DynamicValue& currentValue,
                                 ScriptableObject& object, std::optional<size_t> effectOwner,
                                 const ShaderConstantMap* materialOwner) {
+    queueModule (key, currentValue, &object, effectOwner, materialOwner);
+}
+
+void ScriptEngine::queueSceneScript (const std::string& key, DynamicValue& currentValue) {
+    queueModule (key, currentValue, nullptr, std::nullopt, nullptr);
+}
+
+void ScriptEngine::queueModule (const std::string& key, DynamicValue& currentValue,
+                                ScriptableObject* object, std::optional<size_t> effectOwner,
+                                const ShaderConstantMap* materialOwner) {
     if (currentValue.getAnimation ())
-        m_animatedValues.try_emplace (key, AnimatedValue {&currentValue, &object});
+        m_animatedValues.try_emplace (key, AnimatedValue {&currentValue, object});
     const auto source = currentValue.getScriptSource ();
 
     if (!source.has_value ()) {
@@ -819,8 +829,9 @@ void ScriptEngine::queueScript (const std::string& key, DynamicValue& currentVal
     // The layer must exist while module top-level code runs. JS_Eval of a
     // module returns its evaluation result, not its exports; retain the
     // namespace explicitly so update() can be called on later frames.
-    JSValue layer = this->m_adapters.object->instantiate (object);
-    JSValue thisObject = materialOwner
+    JSValue layer = object ? this->m_adapters.object->instantiate (*object) : JS_UNDEFINED;
+    JSValue thisObject = !object ? JS_UNDEFINED
+        : materialOwner
         ? createMaterialThisObject (this->m_context, layer, *materialOwner)
         : effectOwner.has_value ()
             ? createEffectThisObject (this->m_context, layer, *effectOwner)
@@ -831,7 +842,7 @@ void ScriptEngine::queueScript (const std::string& key, DynamicValue& currentVal
         return;
     }
     ScopeGuard ownerGuard ([this, thisObject] { JS_FreeValue (this->m_context, thisObject); });
-    attachPropertyAnimation (this->m_context, thisObject, layer, currentValue);
+    if (JS_IsObject (thisObject)) attachPropertyAnimation (this->m_context, thisObject, layer, currentValue);
     JSValue previousLayer = JS_GetPropertyStr (this->m_context, this->m_globalThis, "thisLayer");
     JSValue previousObject = JS_GetPropertyStr (this->m_context, this->m_globalThis, "thisObject");
     ScopeGuard layerGuard ([this, previousLayer, previousObject] {
@@ -841,10 +852,11 @@ void ScriptEngine::queueScript (const std::string& key, DynamicValue& currentVal
     JS_SetPropertyStr (this->m_context, this->m_globalThis, "thisLayer", JS_DupValue (this->m_context, layer));
     JS_SetPropertyStr (this->m_context, this->m_globalThis, "thisObject",
                        JS_DupValue (this->m_context, thisObject));
+    const bool angleProperty = object && object->isAngleProperty (currentValue);
+    const bool rgbColorProperty = object && object->isRgbColorProperty (currentValue);
     LoadedModule candidate {.value = currentValue, .object = object, .module = JS_UNDEFINED,
                             .layer = layer, .thisObject = thisObject,
-                            .angleProperty = object.isAngleProperty (currentValue),
-                            .rgbColorProperty = object.isRgbColorProperty (currentValue)};
+                            .angleProperty = angleProperty, .rgbColorProperty = rgbColorProperty};
     auto* previousModule = this->m_runningModule;
     this->m_runningModule = &candidate;
     ScopeGuard runningGuard ([this, previousModule] { this->m_runningModule = previousModule; });
@@ -902,8 +914,8 @@ void ScriptEngine::queueScript (const std::string& key, DynamicValue& currentVal
 	    .layer = layer,
 	    .thisObject = thisObject,
 	    .queueOrder = m_nextScriptQueueOrder,
-            .angleProperty = object.isAngleProperty (currentValue),
-            .rgbColorProperty = object.isRgbColorProperty (currentValue),
+            .angleProperty = angleProperty,
+            .rgbColorProperty = rgbColorProperty,
 	}
     );
 
@@ -992,7 +1004,7 @@ void ScriptEngine::tick () {
                 // pose reset. Later dynamic init and user-properties calls do not.
                 const bool previous = m_initialAuthoredInit;
                 m_initialAuthoredInit = !m_initialSceneTickCompleted
-                    && !m_scene.isScriptCreatedLayer (module.object);
+                    && !(module.object && m_scene.isScriptCreatedLayer (*module.object));
                 ScopeGuard initPhase ([this, previous] { m_initialAuthoredInit = previous; });
                 initResult = this->call (module.module, 1, initArgs, "init");
             }

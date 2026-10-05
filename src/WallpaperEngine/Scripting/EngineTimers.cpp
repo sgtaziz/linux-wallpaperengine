@@ -103,7 +103,7 @@ uint32_t EngineTimers::reserve (std::map<uint32_t, Timer>& timers, uint32_t& nex
         JS_DupValue (m_context, callback),
         JS_DupValue (m_context, module ? module->layer : m_activeLayer),
         JS_DupValue (m_context, module ? module->thisObject : m_activeThisObject),
-        module ? &module->object : m_activeOwner,
+        module ? module->object : m_activeOwner,
         module ? &module->value : m_activeValue,
         duration, now + duration});
     return nextId;

@@ -52,7 +52,8 @@ class ScriptEngine {
 public:
     struct LoadedModule {
 	DynamicValue& value;
-	ScriptableObject& object;
+	// The layer that owns the property, or null for a scene general setting.
+	ScriptableObject* object;
 	JSValue module; // evaluated module namespace
 	JSValue layer;  // retained thisLayer object for this module
 	JSValue thisObject; // property owner, which may differ from thisLayer
@@ -113,6 +114,17 @@ public:
     void queueScript (const std::string& key, DynamicValue& currentValue, ScriptableObject& object,
                       std::optional<size_t> effectOwner = std::nullopt,
                       const ShaderConstantMap* materialOwner = nullptr);
+    /**
+     * Queue the script or property animation of a scene general setting.
+     * Native registers each general field with a typed loader that
+     * reaches the generic property loader, which retains "script"
+     * and "scriptproperties" like any layer property. Native
+     * binds the scene object as these scripts' owner ((list, scene)).
+     * Linux limitation: the scene owner is not modelled as a layer here, so
+     * thisLayer and thisObject are undefined while these modules run. No
+     * installed general-setting script reads them.
+     */
+    void queueSceneScript (const std::string& key, DynamicValue& currentValue);
 
     /**
      * Runs a frame tick in the javascript engine. Dispatches any pending events,
@@ -187,6 +199,8 @@ public:
 
 private:
     JSValue call (JSValue module, int argc, JSValueConst argv[], const char* name);
+    void queueModule (const std::string& key, DynamicValue& currentValue, ScriptableObject* object,
+                      std::optional<size_t> effectOwner, const ShaderConstantMap* materialOwner);
     void activateLayer (const LoadedModule& module);
 
     void installBuiltins ();
@@ -214,7 +228,7 @@ private:
     std::unique_ptr<Modules::ScriptModuleAssets> m_moduleAssets;
     std::map<std::string, LoadedModule> m_scriptModules = {};
     size_t m_nextScriptQueueOrder = 0;
-    struct AnimatedValue { DynamicValue* value; ScriptableObject* object; };
+    struct AnimatedValue { DynamicValue* value; const ScriptableObject* object; };
     std::map<std::string, AnimatedValue> m_animatedValues = {};
 
     LoadedModule* m_runningModule = nullptr;
