@@ -762,7 +762,7 @@ TEST_CASE ("Native secondary membership ignores nonboolean reflected values and 
     REQUIRE (ObjectParser::parse (JSON::parse (R"({"id":3,"name":"omitted"})"), project)->reflected);
 }
 
-TEST_CASE ("Native scene clear defaults false and accepts only boolean authoring values",
+TEST_CASE ("Native scene bool flags default true and accept only boolean authoring values",
            "[scene][parser][secondary-reflection]") {
     using WallpaperEngine::Assets::AssetLocator;
     using WallpaperEngine::Data::JSON::JSON;
@@ -770,18 +770,31 @@ TEST_CASE ("Native scene clear defaults false and accepts only boolean authoring
     using WallpaperEngine::Data::Model::Scene;
     using WallpaperEngine::Data::Parsers::WallpaperParser;
     using WallpaperEngine::FileSystem::Container;
-    for (const auto [value, expected] : std::vector<std::pair<std::string, bool>> {
-        {"null", false}, {"0", false}, {"\"true\"", false}, {"{}", false},
-        {"true", true}, {"false", false}, {R"({"value":true})", true},
-        {R"({"value":"true"})", false}}) {
-        auto files = std::make_unique<Container> ();
-        files->getVFS ().add ("scene.json", std::string (R"({"camera":{"center":"0 0 0","eye":"0 0 1","up":"0 1 0"},"general":{"clearenabled":)")
-            + value + R"(,"orthogonalprojection":{"width":768,"height":432}},"objects":[]})");
-        Project project {};
-        project.type = Project::Type_Scene;
-        project.assetLocator = std::make_unique<AssetLocator> (std::move (files));
-        const auto wallpaper = WallpaperParser::parse (JSON ("scene.json"), project);
-        REQUIRE (wallpaper->as<Scene> ()->clearEnabled->value->getBool () == expected);
+    // starts flags at 0x26. The bloom,
+    // camerafade and clearenabled loaders write their
+    // bit only for a JSON bool or {"value": bool}; anything else, including
+    // null, leaves the initial set bit.
+    const auto flag = [] (const Scene& scene, const std::string& key) {
+        return key == "bloom" ? scene.camera.bloom.enabled->value->getBool ()
+            : key == "camerafade" ? scene.camera.fade->value->getBool ()
+            : scene.clearEnabled->value->getBool ();
+    };
+    for (const std::string key : {"bloom", "camerafade", "clearenabled"}) {
+        for (const auto [value, expected] : std::vector<std::pair<std::string, bool>> {
+            {"", true}, {"null", true}, {"0", true}, {"\"false\"", true}, {"{}", true},
+            {"true", true}, {"false", false}, {R"({"value":true})", true},
+            {R"({"value":false})", false}, {R"({"value":"false"})", true}}) {
+            auto files = std::make_unique<Container> ();
+            const std::string field = value.empty () ? "" : "\"" + key + "\":" + value + ",";
+            files->getVFS ().add ("scene.json", std::string (R"({"camera":{"center":"0 0 0","eye":"0 0 1","up":"0 1 0"},"general":{)")
+                + field + R"("orthogonalprojection":{"width":768,"height":432}},"objects":[]})");
+            Project project {};
+            project.type = Project::Type_Scene;
+            project.assetLocator = std::make_unique<AssetLocator> (std::move (files));
+            const auto wallpaper = WallpaperParser::parse (JSON ("scene.json"), project);
+            INFO (key << " = " << (value.empty () ? "<omitted>" : value));
+            REQUIRE (flag (*wallpaper->as<Scene> (), key) == expected);
+        }
     }
 }
 
@@ -982,6 +995,27 @@ TEST_CASE ("Omitted general settings take the native scene constructor defaults"
     REQUIRE (scene->camera.projection.zoom->value->getFloat () == 1.0f);
     REQUIRE (scene->camera.projection.fov->value->getFloat () == 50.0f);
     REQUIRE (scene->camera.projection.perspectiveOverrideFov->value->getFloat () == 95.0f);
+
+    // Bool flags: starts at 0x26 (: bloom 0x2, camerafade 0x4,
+    // clearenabled 0x20), so omitted flags are true, and a null clearenabled
+    // (installed 1407936446) keeps the set bit.
+    for (const char* general : {R"({"orthogonalprojection":{"width":1920,"height":1080}})",
+                                R"({"orthogonalprojection":{"width":1920,"height":1080},"clearenabled":null})"}) {
+        auto omittedFiles = std::make_unique<Container> ();
+        omittedFiles->getVFS ().add ("scene.json", std::string (R"({"camera":{"center":"0 0 -1","eye":"0 0 0","up":"0 1 0"},"general":)")
+            + general + R"(,"objects":[]})");
+        Project omittedProject {};
+        omittedProject.type = Project::Type_Scene;
+        omittedProject.assetLocator = std::make_unique<AssetLocator> (std::move (omittedFiles));
+        const auto omittedWallpaper = WallpaperParser::parse (JSON ("scene.json"), omittedProject);
+        const auto* omitted = dynamic_cast<const Scene*> (omittedWallpaper.get ());
+        REQUIRE (omitted != nullptr);
+        REQUIRE (omitted->camera.bloom.enabled->value->getBool ());
+        REQUIRE (omitted->camera.fade->value->getBool ());
+        REQUIRE (omitted->clearEnabled->value->getBool ());
+        REQUIRE_FALSE (omitted->camera.parallax.enabled->value->getBool ());
+        REQUIRE_FALSE (omitted->camera.shake.enabled->value->getBool ());
+    }
 }
 
 TEST_CASE ("Camera shake moves the frame eye and center only while enabled", "[scene][camera][shake]") {
