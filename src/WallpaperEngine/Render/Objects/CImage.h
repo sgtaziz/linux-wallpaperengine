@@ -112,6 +112,8 @@ private:
     bool refreshSizeDependentTargets ();
     void refreshSourceDimensions ();
     [[nodiscard]] glm::vec2 getCompositeTargetSize () const;
+    /** A fullscreen passthrough copying the current target 1:1 through its clip-space quad. */
+    [[nodiscard]] bool copiesTargetInClipSpace () const;
     [[nodiscard]] glm::vec2 resolveGeometrySize (float sceneWidth, float sceneHeight, glm::vec3& origin) const;
     void updateScenePosition (
 	const ResolvedTransform& transform, const glm::vec2& size, float sceneWidth, float sceneHeight

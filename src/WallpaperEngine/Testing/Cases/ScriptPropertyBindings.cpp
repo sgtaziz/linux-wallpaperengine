@@ -40,6 +40,7 @@ ObjectData baseObject () {
     base.groupScale = UserSettingBuilder::fromValue (glm::vec3 (9.0f));
     base.groupAngles = UserSettingBuilder::fromValue (glm::vec3 (8.0f));
     base.groupVisible = UserSettingBuilder::fromValue (false);
+    base.parallaxDepth = UserSettingBuilder::fromValue (glm::vec2 (0.0f));
     return base;
 }
 
@@ -89,7 +90,6 @@ TEST_CASE ("Image script bindings update the typed values consumed by rendering"
     data.alpha = UserSettingBuilder::fromValue (0.5f);
     data.color = UserSettingBuilder::fromValue (glm::vec3 (1.0f));
     data.brightness = UserSettingBuilder::fromValue (1.0f);
-    data.parallaxDepth = UserSettingBuilder::fromValue (glm::vec2 (0.0f));
     data.size = UserSettingBuilder::fromValue (glm::vec2 (32.0f, 24.0f));
     Image image (baseObject (), std::move (data));
     const auto bindings = scriptPropertyBindings (image);
@@ -115,7 +115,6 @@ TEST_CASE ("Particle and text bindings retain prior names with typed authority",
     particleData.scale = UserSettingBuilder::fromValue (glm::vec3 (1.0f));
     particleData.angles = UserSettingBuilder::fromValue (glm::vec3 (2.0f));
     particleData.visible = UserSettingBuilder::fromValue (true);
-    particleData.parallaxDepth = UserSettingBuilder::fromValue (glm::vec2 (0.0f));
     Particle particle (baseObject (), std::move (particleData));
     const auto particleBindings = scriptPropertyBindings (particle);
     REQUIRE (names (particleBindings) == std::set<std::string> {"origin", "scale", "angles", "visible", "parallaxDepth"});
@@ -143,7 +142,6 @@ TEST_CASE ("Particle and text bindings retain prior names with typed authority",
     textData.brightness = UserSettingBuilder::fromValue (1.0f);
     textData.alpha = UserSettingBuilder::fromValue (1.0f);
     textData.visible = UserSettingBuilder::fromValue (true);
-    textData.parallaxDepth = UserSettingBuilder::fromValue (glm::vec2 (0.0f));
     Text text (baseObject (), std::move (textData));
     const auto textBindings = scriptPropertyBindings (text);
     REQUIRE (names (textBindings) == std::set<std::string> {"origin", "scale", "angles", "visible",

@@ -1032,11 +1032,8 @@ void CText::render () {
 	glm::vec3 (layoutOffset, 0.0f));
     // A layer's camera offset is in world space, outside its authored and
     // parent transforms. Effects composite through this same final matrix.
-    const glm::vec2 depth = m_text.parallaxDepth->value->getVec2 ();
-    const glm::vec3 parallax = m_text.parent
-        ? getScene ().getLayerParallaxOffset (depth)
-        : getScene ().getLayerParallaxOffset (m_text.origin->value->getVec3 (), depth);
-    imageWorld = glm::translate (glm::mat4 (1.0f), parallax) * imageWorld;
+    imageWorld = glm::translate (glm::mat4 (1.0f), getScene ().getLayerParallaxOffset (m_text))
+        * imageWorld;
     glm::mat4 mvp = getScene ().getActiveRenderProjection () * imageWorld;
 
     const auto sceneTarget = getScene ().getActiveRenderTarget ();

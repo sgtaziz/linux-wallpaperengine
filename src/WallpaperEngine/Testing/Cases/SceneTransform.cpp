@@ -12,6 +12,7 @@
 #include <cmath>
 #include <limits>
 #include <map>
+#include <set>
 #include <memory>
 #include <vector>
 
@@ -21,9 +22,14 @@ using WallpaperEngine::Data::Model::ObjectData;
 using WallpaperEngine::Render::Wallpapers::resolveSceneTransform;
 using WallpaperEngine::Render::Wallpapers::inverseFiniteTransform;
 using WallpaperEngine::Render::Wallpapers::projectWorldControlPoint;
-using WallpaperEngine::Render::Wallpapers::sceneParallaxOffset;
+using WallpaperEngine::Render::Wallpapers::sceneLayerParallaxOffset;
 using WallpaperEngine::Render::Wallpapers::sceneParallaxDelayWeight;
-using WallpaperEngine::Render::Wallpapers::sceneParticleParallaxOffset;
+using WallpaperEngine::Render::Wallpapers::sceneParallaxDepth;
+using WallpaperEngine::Render::Wallpapers::sceneParallaxRoot;
+using WallpaperEngine::Render::Wallpapers::sceneCompositionOwner;
+using WallpaperEngine::Render::Wallpapers::sceneCompositionSuppressesParallax;
+using WallpaperEngine::Render::Wallpapers::sceneCompositionChildProjection;
+using WallpaperEngine::Render::Wallpapers::sceneCompositionChildScope;
 
 namespace {
 ObjectData node (int id, std::optional<int> parent, glm::vec3 origin, glm::vec3 scale,
@@ -210,24 +216,106 @@ TEST_CASE ("XYZ text basis preserves parent composition and horizontal perspecti
     REQUIRE (std::abs (baselineDelta ().y) > 0.05f);
 }
 
-TEST_CASE ("Scene layer parallax keeps zero depth fixed and signed depths symmetric", "[scene][parallax]") {
-    // 2902406982 authors both depth-zero triangle/text pairs and a
-    // negative-X-depth triangle/text pair. Camera amount is already included
-    // in the displacement passed to this helper.
-    const glm::vec2 displacement {0.125f, -0.0625f};
-    REQUIRE (sceneParallaxOffset ({0.0f, 0.0f}, displacement, 3840.0f, true)
-             == glm::vec3 (0.0f));
-    const glm::vec3 positive = sceneParallaxOffset ({0.1f, 0.1f}, displacement, 3840.0f, true);
-    const glm::vec3 negative = sceneParallaxOffset ({-0.1f, 0.0f}, displacement, 3840.0f, true);
-    REQUIRE (positive.x == Catch::Approx (-48.0f));
-    REQUIRE (positive.y == Catch::Approx (24.0f));
-    REQUIRE (negative.x == Catch::Approx (48.0f));
-    REQUIRE (negative.y == Catch::Approx (0.0f));
+namespace {
+// Independent reference for native
+// in the native canvas (+Y up on screen) with a
+// top-origin cursor. Influence and amount are applied as native does.
+glm::vec2 nativeCanvasParallaxOffset (glm::vec2 rootOrigin, glm::vec2 rootDepth, glm::vec2 eye,
+                                      glm::vec2 size, glm::vec2 cursorTopOrigin,
+                                      float amount, float influence) {
+    const glm::vec2 cursor (cursorTopOrigin.x, 1.0f - cursorTopOrigin.y);
+    const glm::vec2 parallaxPos = size * 0.5f * (1.0f - influence) + size * cursor * influence + eye;
+    return (rootOrigin - parallaxPos) * amount * rootDepth;
+}
+
+// Linux CScene displacement for the same top-origin cursor.
+glm::vec2 linuxDisplacement (glm::vec2 cursorTopOrigin, float amount, float influence) {
+    return (cursorTopOrigin - glm::vec2 (0.5f)) * amount * influence;
+}
+
+// Screen position (canvas pixels from the left/top edge) of a layer centre
+// drawn through Linux's centered camera space plus its parallax offset. The
+// final presentation shows camera +Y toward the bottom edge.
+glm::vec2 linuxScreenFromTop (glm::vec2 canvasOrigin, glm::vec3 offset, glm::vec2 size) {
+    const glm::vec3 camera = WallpaperEngine::Render::Wallpapers::scenePointForCamera (
+        glm::vec3 (canvasOrigin, 0.0f), size.x, size.y, true) + offset;
+    return {camera.x + size.x * 0.5f, camera.y + size.y * 0.5f};
+}
+}
+
+TEST_CASE ("Layer parallax reproduces the controlled native capture", "[scene][parallax]") {
+    // parallax-default-v1: ortho 1920x1080, eye 0, amount 0.25, delay 0.
+    // Native run1 (influence 0): A(480,540) depth 1,1 -> x 359.25;
+    // C(960,270) depth 1,1 -> y-from-top 876.75; B depth 0,0 stays at 1440.
+    const glm::vec2 size {1920.0f, 1080.0f};
+    const auto offset = [&] (glm::vec2 origin, glm::vec2 depth, glm::vec2 cursor, float influence) {
+        return sceneLayerParallaxOffset (glm::vec3 (origin, 0.0f), glm::vec3 (0.0f), depth,
+                                         linuxDisplacement (cursor, 0.25f, influence),
+                                         size.x, size.y, 0.25f, true, true);
+    };
+    const glm::vec2 centre {0.5f};
+    const auto a = linuxScreenFromTop ({480, 540}, offset ({480, 540}, {1, 1}, centre, 0.0f), size);
+    const auto b = linuxScreenFromTop ({1440, 540}, offset ({1440, 540}, {0, 0}, centre, 0.0f), size);
+    const auto c = linuxScreenFromTop ({960, 270}, offset ({960, 270}, {1, 1}, centre, 0.0f), size);
+    REQUIRE (a.x == Catch::Approx (359.25f).margin (2.0f));
+    REQUIRE (a.y == Catch::Approx (539.25f).margin (2.0f));
+    REQUIRE (b.x == Catch::Approx (1439.25f).margin (2.0f));
+    REQUIRE (c.x == Catch::Approx (959.25f).margin (2.0f));
+    // The static Y term moves C toward the bottom edge, as native does.
+    REQUIRE (c.y == Catch::Approx (876.75f).margin (2.0f));
+
+    // Native run2 (influence 1): cursor centre -> 0.8125 moves every depth-1
+    // layer by -150 px and leaves depth 0 fixed.
+    const glm::vec2 right {0.8125f, 0.5f};
+    REQUIRE ((offset ({480, 540}, {1, 1}, right, 1.0f) - offset ({480, 540}, {1, 1}, centre, 1.0f)).x
+             == Catch::Approx (-150.0f).margin (0.01f));
+    REQUIRE ((offset ({960, 270}, {1, 1}, right, 1.0f) - offset ({960, 270}, {1, 1}, centre, 1.0f)).x
+             == Catch::Approx (-150.0f).margin (0.01f));
+    REQUIRE (offset ({1440, 540}, {0, 0}, right, 1.0f) == glm::vec3 (0.0f));
+    // Native run2 stationary pointer (0.01, 0.01): a cursor near the top
+    // moves C down the screen; native shows it clipped at the bottom edge.
+    const auto top = linuxScreenFromTop ({960, 270}, offset ({960, 270}, {1, 1}, {0.01f, 0.01f}, 1.0f), size);
+    REQUIRE (top.y - c.y == Catch::Approx (132.3f).margin (0.01f));
+    REQUIRE (top.y + 80.0f > 1080.0f);
+}
+
+TEST_CASE ("Layer parallax matches the native canvas formula for both axes and terms", "[scene][parallax]") {
+    // Linux camera space negates the canvas Y axis; X is shared. The cursor Y
+    // term flips twice (top-origin pointer and camera axis) while the static
+    // origin term flips once, so only a sign-exact conversion matches native.
+    const glm::vec2 size {3840.0f, 2160.0f};
+    for (const glm::vec2 origin : {glm::vec2 (480, 1700), glm::vec2 (3500, 120), glm::vec2 (1920, 1080)})
+        for (const glm::vec2 depth : {glm::vec2 (1, 1), glm::vec2 (-1, 0.5f), glm::vec2 (0.1f, -0.2f)})
+            for (const glm::vec2 eye : {glm::vec2 (0), glm::vec2 (-103.6f, 120.9f)})
+                for (const glm::vec2 cursor : {glm::vec2 (0.5f), glm::vec2 (0.0f), glm::vec2 (1.0f, 0.25f)})
+                    for (const float influence : {0.0f, 0.14f, 1.0f}) {
+                        const glm::vec2 native = nativeCanvasParallaxOffset (
+                            origin, depth, eye, size, cursor, 0.1f, influence);
+                        const glm::vec3 camera = sceneLayerParallaxOffset (
+                            glm::vec3 (origin, 0.0f), glm::vec3 (eye, 0.0f), depth,
+                            linuxDisplacement (cursor, 0.1f, influence), size.x, size.y, 0.1f, true, true);
+                        REQUIRE (camera.x == Catch::Approx (native.x).margin (1e-3f));
+                        REQUIRE (camera.y == Catch::Approx (-native.y).margin (1e-3f));
+                        REQUIRE (camera.z == 0.0f);
+                    }
+}
+
+TEST_CASE ("Layer parallax applies only to orthographic camera-parallax scenes", "[scene][parallax]") {
+    // Native requires scene flags & 0x108 == 0x108: cameraparallax
+    // (0x100) and orthographic projection (0x8). Otherwise no object moves.
+    const glm::vec3 origin {100.0f, 900.0f, 0.0f};
+    const glm::vec2 displacement {0.1f, -0.1f};
+    const auto offset = [&] (bool parallax, bool orthographic) {
+        return sceneLayerParallaxOffset (origin, glm::vec3 (0.0f), {1, 1}, displacement,
+                                         1920.0f, 1080.0f, 0.5f, parallax, orthographic);
+    };
+    REQUIRE (offset (true, true) != glm::vec3 (0.0f));
+    REQUIRE (offset (false, true) == glm::vec3 (0.0f));
+    REQUIRE (offset (true, false) == glm::vec3 (0.0f));
+    REQUIRE (offset (false, false) == glm::vec3 (0.0f));
 }
 
 TEST_CASE ("Perspective parallax preserves world visibility with nonzero authored depth", "[scene][parallax][perspective]") {
-    // Native sets scene bit8 only for orthogonalprojection;
-    // applies canvas-relative offsets only when flags&0x108==0x108.
     // A valid perspective object near the world origin would otherwise be
     // displaced hundreds of scene units by the output's pixel dimensions.
     const glm::vec3 origin {3.0f, 3.4f, 3.0f};
@@ -240,15 +328,68 @@ TEST_CASE ("Perspective parallax preserves world visibility with nonzero authore
     };
     REQUIRE (visible ({}));
     for (const auto displacement : {glm::vec2 (0.0f), glm::vec2 (0.1f, -0.1f)}) {
-        const auto perspective = sceneParticleParallaxOffset (
-            origin, eye, {1.0f, 1.0f}, displacement, 1280.0f, 720.0f, 0.5f, false);
+        const auto perspective = sceneLayerParallaxOffset (
+            origin, eye, {1.0f, 1.0f}, displacement, 1280.0f, 720.0f, 0.5f, true, false);
         REQUIRE (perspective == glm::vec3 (0.0f));
         REQUIRE (visible (perspective));
-        REQUIRE (sceneParallaxOffset ({1.0f, 1.0f}, displacement, 1280.0f, false)
-                 == glm::vec3 (0.0f));
-        REQUIRE_FALSE (visible (sceneParticleParallaxOffset (
-            origin, eye, {1.0f, 1.0f}, displacement, 1280.0f, 720.0f, 0.5f, true)));
+        REQUIRE_FALSE (visible (sceneLayerParallaxOffset (
+            origin, eye, {1.0f, 1.0f}, displacement, 1280.0f, 720.0f, 0.5f, true, true)));
     }
+}
+
+TEST_CASE ("Parented layers take parallax from the top-most ancestor", "[scene][parallax][parent]") {
+    // Native walks to the root of any type and reads only
+    // the root's origin and depth; the child's own values
+    // are ignored. Absent depth stays default (1,1).
+    Object group (node (1, {}, {300, 200, 0}, {1, 1, 1}, 0));
+    group.parallaxDepth = UserSettingBuilder::fromValue (glm::vec2 (0.5f, 2.0f));
+    Object middle (node (2, 1, {50, 60, 0}, {2, 2, 1}, 0.3f));
+    middle.parallaxDepth = UserSettingBuilder::fromValue (glm::vec2 (-1.0f));
+    Object child (node (3, 2, {1700, 1000, 0}, {1, 1, 1}, 0));
+    child.parallaxDepth = UserSettingBuilder::fromValue (glm::vec2 (0.0f));
+    const std::map<int, const Object*> objects {{1, &group}, {2, &middle}, {3, &child}};
+    const auto find = [&] (int id) -> const Object* {
+        const auto it = objects.find (id);
+        return it == objects.end () ? nullptr : it->second;
+    };
+    const glm::vec2 cursor {0.75f, 0.4f};
+    const auto offset = [&] (const Object& object) {
+        const auto& root = sceneParallaxRoot (object, find, objects.size ());
+        return sceneLayerParallaxOffset (root.origin->value->getVec3 (), glm::vec3 (0.0f),
+                                         sceneParallaxDepth (root), linuxDisplacement (cursor, 0.2f, 1.0f),
+                                         1920.0f, 1080.0f, 0.2f, true, true);
+    };
+    REQUIRE (&sceneParallaxRoot (child, find, objects.size ()) == &group);
+    REQUIRE (&sceneParallaxRoot (middle, find, objects.size ()) == &group);
+    const glm::vec2 native = nativeCanvasParallaxOffset (
+        {300, 200}, {0.5f, 2.0f}, {0, 0}, {1920, 1080}, cursor, 0.2f, 1.0f);
+    for (const Object* object : {&group, &middle, &child}) {
+        const auto value = offset (*object);
+        REQUIRE (value.x == Catch::Approx (native.x).margin (1e-3f));
+        REQUIRE (value.y == Catch::Approx (-native.y).margin (1e-3f));
+    }
+
+    // A root without a depth key keeps (1,1), so a child authored "0 0"
+    // still moves with that root.
+    group.parallaxDepth.reset ();
+    REQUIRE (sceneParallaxDepth (group) == glm::vec2 (1.0f));
+    const glm::vec2 defaulted = nativeCanvasParallaxOffset (
+        {300, 200}, {1, 1}, {0, 0}, {1920, 1080}, cursor, 0.2f, 1.0f);
+    REQUIRE (offset (child).x == Catch::Approx (defaulted.x).margin (1e-3f));
+    REQUIRE (offset (child).y == Catch::Approx (-defaulted.y).margin (1e-3f));
+    REQUIRE (offset (child) != glm::vec3 (0.0f));
+
+    // A missing parent ends the walk at the last resolvable object, and a
+    // malformed cycle terminates.
+    Object orphan (node (4, 99, {10, 10, 0}, {1, 1, 1}, 0));
+    REQUIRE (&sceneParallaxRoot (orphan, find, objects.size ()) == &orphan);
+    Object loopA (node (5, 6, {0, 0, 0}, {1, 1, 1}, 0));
+    Object loopB (node (6, 5, {0, 0, 0}, {1, 1, 1}, 0));
+    const auto loopFind = [&] (int id) -> const Object* {
+        return id == 5 ? &loopA : id == 6 ? &loopB : nullptr;
+    };
+    const auto& loopRoot = sceneParallaxRoot (loopA, loopFind, 2);
+    REQUIRE ((&loopRoot == &loopA || &loopRoot == &loopB));
 }
 
 TEST_CASE ("Scene parallax delay follows native per-frame smoothing", "[scene][parallax]") {
@@ -268,38 +409,212 @@ TEST_CASE ("Scene parallax delay follows native per-frame smoothing", "[scene][p
              == Catch::Approx (-1.0f / 18.0f));
 }
 
-TEST_CASE ("Particle parallax uses authored depth and camera-relative origin", "[scene][parallax][particle]") {
-    const glm::vec3 origin {1802.36865f, 917.86761f, 0.0f};
-    const glm::vec3 eye {-103.60931f, 120.87753f, 0.0f};
-    const glm::vec2 displacement {0.125f, -0.0625f};
-    const auto offset = [&] (glm::vec2 depth) {
-        return sceneParticleParallaxOffset (origin, eye, depth, displacement,
-                                            3840.0f, 2160.0f, 0.5f, true);
+TEST_CASE ("Composed membership resolves the nearest composing ancestor", "[scene][parallax][composition]") {
+    // One rule decides both the child draw scopes and the parallax exclusion,
+    // so update-time particle geometry and the draw agree.
+    Object outer (node (1, {}, {0, 0, 0}, {1, 1, 1}, 0));
+    Object group (node (2, 1, {0, 0, 0}, {1, 1, 1}, 0));
+    Object inner (node (3, 2, {0, 0, 0}, {1, 1, 1}, 0));
+    Object leaf (node (4, 3, {0, 0, 0}, {1, 1, 1}, 0));
+    Object orphan (node (5, 99, {0, 0, 0}, {1, 1, 1}, 0));
+    const std::map<int, const Object*> objects {{1, &outer}, {2, &group}, {3, &inner}, {4, &leaf}, {5, &orphan}};
+    const auto find = [&] (int id) -> const Object* {
+        const auto it = objects.find (id);
+        return it == objects.end () ? nullptr : it->second;
     };
-    // The original 2902406982 particle authors zero depth on both axes.
-    REQUIRE (offset ({0.0f, 0.0f}) == glm::vec3 (0.0f));
-    const auto centered = sceneParticleParallaxOffset (origin, eye, {0.1f, 0.1f},
-                                                       {0.0f, 0.0f}, 3840.0f, 2160.0f, 0.5f, true);
-    REQUIRE (centered.x == Catch::Approx (-0.701102f));
-    REQUIRE (centered.y == Catch::Approx (-14.150496f));
-    const auto positive = offset ({0.1f, 0.1f});
-    const auto negative = offset ({-0.1f, -0.1f});
-    REQUIRE (positive.x == Catch::Approx ((1802.36865f - 1816.39069f) * 0.05f - 48.0f));
-    REQUIRE (positive.y == Catch::Approx ((917.86761f - 1200.87753f) * 0.05f + 13.5f));
-    REQUIRE (negative == -positive);
-    REQUIRE (offset ({0.2f, 0.2f}) == positive * 2.0f);
+    std::set<int> composing {1, 3};
+    const auto composes = [&] (int id) { return composing.contains (id); };
+    REQUIRE_FALSE (sceneCompositionOwner (outer, find, composes).has_value ());
+    REQUIRE (sceneCompositionOwner (group, find, composes) == std::optional<int> (1));   // across nothing
+    REQUIRE (sceneCompositionOwner (inner, find, composes) == std::optional<int> (1));   // across a transform-only group
+    REQUIRE (sceneCompositionOwner (leaf, find, composes) == std::optional<int> (3));    // nearest scope wins
+    REQUIRE_FALSE (sceneCompositionOwner (orphan, find, composes).has_value ());         // missing ancestor
+    composing = {};
+    REQUIRE_FALSE (sceneCompositionOwner (leaf, find, composes).has_value ());           // no scope: drawn directly
+    Object loopA (node (6, 7, {0, 0, 0}, {1, 1, 1}, 0));
+    Object loopB (node (7, 6, {0, 0, 0}, {1, 1, 1}, 0));
+    const auto loopFind = [&] (int id) -> const Object* { return id == 6 ? &loopA : id == 7 ? &loopB : nullptr; };
+    REQUIRE_FALSE (sceneCompositionOwner (loopA, loopFind, composes).has_value ());      // cycle terminates
+}
+
+TEST_CASE ("Update-time parallax exclusion agrees with the draw scope for every composer nesting", "[scene][parallax][composition]") {
+    // refreshComposedObjects walks up from each object before particle updates;
+    // the render pass folds sceneCompositionChildScope down while it draws.
+    // Every chain of up to three plain composers, fullscreen composers and
+    // transform-only groups must give the same answer in both directions.
+    // Anchors: parallax-v2 run6a (plain composer: children move only through the
+    // composite) and run6b (fullscreen composer: children move once themselves).
+    enum Kind { Plain, Fullscreen, Group };
+    size_t chains = 0;
+    for (int length = 1; length <= 3; ++length) {
+        int combinations = 1;
+        for (int i = 0; i < length; ++i) combinations *= 3;
+        for (int code = 0; code < combinations; ++code) {
+            std::vector<Kind> kinds;
+            for (int i = 0, c = code; i < length; ++i, c /= 3) kinds.push_back (static_cast<Kind> (c % 3));
+            std::vector<std::unique_ptr<Object>> chain;
+            for (int i = 0; i <= length; ++i)
+                chain.push_back (std::make_unique<Object> (node (i + 1, i == 0 ? std::optional<int> {} : std::optional<int> (i),
+                    {0, 0, 0}, {1, 1, 1}, 0)));
+            const auto find = [&] (int id) -> const Object* {
+                return id >= 1 && id <= static_cast<int> (chain.size ()) ? chain[id - 1].get () : nullptr;
+            };
+            const auto composes = [&] (int id) { return id <= length && kinds[id - 1] != Group; };
+            const auto fullscreen = [&] (int id) { return kinds[id - 1] == Fullscreen; };
+            WallpaperEngine::Render::Wallpapers::SceneCompositionScope scope;
+            for (int depth = 0; depth <= length; ++depth) {
+                CAPTURE (length, code, depth);
+                REQUIRE (sceneCompositionSuppressesParallax (*chain[depth], find, composes, fullscreen)
+                    == scope.localProjection);
+                if (depth < length && kinds[depth] != Group)
+                    scope = sceneCompositionChildScope (scope, kinds[depth] == Fullscreen);
+            }
+            ++chains;
+        }
+    }
+    REQUIRE (chains == 39);
+    using WallpaperEngine::Render::Wallpapers::SceneCompositionScope;
+    REQUIRE (sceneCompositionChildScope ({}, false).localProjection);         // run6a
+    REQUIRE_FALSE (sceneCompositionChildScope ({}, true).localProjection);    // run6b
+    REQUIRE (sceneCompositionChildScope ({}, true).offscreenTarget);
+}
+
+TEST_CASE ("A fullscreen composer's children present exactly like root draws", "[scene][composition]") {
+    // Native keeps the scene stacks for a fullscreen composer, so its
+    // children take the root projection, winding and copy route; only a
+    // non-fullscreen composer's local box changes them.
+    using WallpaperEngine::Render::Wallpapers::SceneCompositionScope;
+    using WallpaperEngine::Render::Wallpapers::modelPresentationReversesWinding;
+    using WallpaperEngine::Render::Wallpapers::particlePresentationReversesWinding;
+    using WallpaperEngine::Render::Wallpapers::sceneFullscreenCopyInClipSpace;
+    const SceneCompositionScope root {};
+    const auto fullscreen = sceneCompositionChildScope (root, true);
+    const auto nestedFullscreen = sceneCompositionChildScope (fullscreen, true);
+    const auto local = sceneCompositionChildScope (root, false);
+    const auto fullscreenInLocal = sceneCompositionChildScope (local, true);
+    for (const auto& scope : {fullscreen, nestedFullscreen}) {
+        for (const bool orthographic : {true, false}) {
+            REQUIRE (modelPresentationReversesWinding (orthographic, scope.localProjection)
+                == modelPresentationReversesWinding (orthographic, root.localProjection));
+            for (const bool presetWorld : {true, false})
+                for (const bool perspectiveOverride : {true, false})
+                    REQUIRE (particlePresentationReversesWinding (orthographic, presetWorld, scope.localProjection, perspectiveOverride)
+                        == particlePresentationReversesWinding (orthographic, presetWorld, root.localProjection, perspectiveOverride));
+        }
+        REQUIRE (sceneFullscreenCopyInClipSpace (true, scope));
+    }
+    // A perspective local box no longer carries the root presentation reflection.
+    for (const auto& scope : {local, fullscreenInLocal}) {
+        REQUIRE_FALSE (modelPresentationReversesWinding (false, scope.localProjection));
+        REQUIRE_FALSE (particlePresentationReversesWinding (false, false, scope.localProjection, false));
+        REQUIRE (particlePresentationReversesWinding (false, false, scope.localProjection, true));
+        REQUIRE_FALSE (sceneFullscreenCopyInClipSpace (true, scope));
+    }
+    REQUIRE (sceneFullscreenCopyInClipSpace (true, root));
+    REQUIRE_FALSE (sceneFullscreenCopyInClipSpace (false, root));
+
+    // parallax-v2 run6b, 1920x1080 canvas in a 1280x720 output: native draws K1
+    // at x=660 and K2 at (1260,440), wherever the composer target size comes from.
+    const glm::mat4 flip = glm::scale (glm::mat4 (1.0f), glm::vec3 (1.0f, -1.0f, 1.0f));
+    const glm::mat4 scene = glm::ortho (-960.0f, 960.0f, -540.0f, 540.0f, -1000.0f, 1000.0f);
+    const glm::mat4 parentWorld = glm::translate (glm::mat4 (1.0f), glm::vec3 (-960.0f, 540.0f, 0.0f))
+        * flip * glm::translate (glm::mat4 (1.0f), glm::vec3 (960.0f, 540.0f, 0.0f));
+    for (const glm::vec2 target : {glm::vec2 (1280.0f, 720.0f), glm::vec2 (1920.0f, 1080.0f)}) {
+        const auto composed = sceneCompositionChildProjection (true, scene, parentWorld, flip, target);
+        REQUIRE (composed.has_value ());
+        const glm::vec4 k1 = *composed * glm::vec4 (-300.0f, 0.0f, 0.0f, 1.0f);
+        const glm::vec4 k2 = *composed * glm::vec4 (300.0f, 100.0f, 0.0f, 1.0f);
+        REQUIRE ((k1.x + 1.0f) * 960.0f == Catch::Approx (660.0f));
+        REQUIRE ((k2.x + 1.0f) * 960.0f == Catch::Approx (1260.0f));
+        REQUIRE ((1.0f - k2.y) * 540.0f == Catch::Approx (440.0f));
+    }
+    // A non-fullscreen composer maps its own authored box onto the whole target.
+    const auto box = sceneCompositionChildProjection (false, scene, glm::mat4 (1.0f), flip, {1200.0f, 400.0f});
+    REQUIRE (box.has_value ());
+    for (const glm::vec2 corner : {glm::vec2 (-600, -200), glm::vec2 (600, 200)}) {
+        const glm::vec4 ndc = *box * glm::vec4 (corner, 0.0f, 1.0f);
+        REQUIRE (std::abs (ndc.x) == Catch::Approx (1.0f));
+        REQUIRE (std::abs (ndc.y) == Catch::Approx (1.0f));
+    }
+    REQUIRE_FALSE (sceneCompositionChildProjection (false, scene, glm::mat4 (0.0f), flip, {1200.0f, 400.0f}).has_value ());
+}
+
+TEST_CASE ("g_ParallaxPosition follows the native smoothed parallax point", "[scene][parallax]") {
+    // Native. Cursors are top-origin,
+    // as CScene::m_mousePosition and native g_PointerPosition; native uses (x, 1 - y).
+    using WallpaperEngine::Render::Wallpapers::advanceSceneParallaxPosition;
+    using WallpaperEngine::Render::Wallpapers::initialSceneParallaxPosition;
+    const glm::vec2 size (1920.0f, 1080.0f);
+    auto state = initialSceneParallaxPosition (true, size, glm::vec2 (0.0f));
+    REQUIRE (state.uniform == glm::vec2 (0.5f));
+    REQUIRE (state.point == size * 0.5f);
+    // Parallax off: the uniform keeps its load value whatever the cursor does.
+    advanceSceneParallaxPosition (state, false, glm::vec2 (0.9f, 0.1f), 1.0f, size, glm::vec2 (0.0f), 1.0f);
+    REQUIRE (state.uniform == glm::vec2 (0.5f));
+    advanceSceneParallaxPosition (state, true, glm::vec2 (0.5f), 0.21f, size, glm::vec2 (0.0f), 1.0f);
+    REQUIRE (state.uniform.x == Catch::Approx (0.5f));
+    REQUIRE (state.uniform.y == Catch::Approx (0.5f));
+    // 3212934821 offset cursor: window (0.8133, 0.25) from the top, influence 0.21.
+    advanceSceneParallaxPosition (state, true, glm::vec2 (0.8133f, 0.25f), 0.21f, size, glm::vec2 (0.0f), 1.0f);
+    REQUIRE (state.uniform.x == Catch::Approx (0.5658f).margin (1e-4));
+    REQUIRE (state.uniform.y == Catch::Approx (0.5525f).margin (1e-4));
+    // The cursor is clamped before scaling and the result after the eye offset.
+    advanceSceneParallaxPosition (state, true, glm::vec2 (1.5f, 1.5f), 1.0f, size, glm::vec2 (0.0f), 1.0f);
+    REQUIRE (state.uniform == glm::vec2 (1.0f, 0.0f));
+    advanceSceneParallaxPosition (state, true, glm::vec2 (0.5f), 0.21f, size, glm::vec2 (5000.0f, -5000.0f), 1.0f);
+    REQUIRE (state.uniform == glm::vec2 (1.0f, 0.0f));
+    // Linux-side, not native-backed: native's perspective size is 0, so its
+    // uniform is degenerate there (documented divergence); this pins only the
+    // easing from the perspective start point 0 with the layer offset's delay
+    // weight, at an arbitrary size.
+    auto eased = initialSceneParallaxPosition (false, size, glm::vec2 (0.0f));
+    REQUIRE (eased.point == glm::vec2 (0.0f));
+    REQUIRE (eased.uniform == glm::vec2 (0.5f));
+    const float weight = sceneParallaxDelayWeight (1.5f, 1.0f / 30.0f);
+    glm::vec2 displacement (0.0f);
+    for (int frame = 0; frame < 3; ++frame) {
+        advanceSceneParallaxPosition (eased, true, glm::vec2 (1.0f, 0.0f), 1.0f, size, glm::vec2 (0.0f), weight);
+        displacement = glm::mix (displacement, glm::vec2 (1.0f), weight);
+    }
+    REQUIRE (eased.uniform.x == Catch::Approx (displacement.x));
+    REQUIRE (eased.uniform.y == Catch::Approx (displacement.y));
+}
+
+TEST_CASE ("g_ParallaxPosition and the layer offset agree on one top-origin cursor", "[scene][parallax]") {
+    // CScene feeds m_mousePosition to both. Native derives both from the same
+    // smoothed point: offset = (root - point) * amount * depth in the y-up
+    // canvas and uniform = point / size. Recovering the
+    // point from the uniform must reproduce the layer offset on both axes.
+    using WallpaperEngine::Render::Wallpapers::advanceSceneParallaxPosition;
+    using WallpaperEngine::Render::Wallpapers::initialSceneParallaxPosition;
+    using WallpaperEngine::Render::Wallpapers::sceneParallaxDisplacementTarget;
+    const glm::vec2 size (2560.0f, 1440.0f);
+    const glm::vec3 root (700.0f, 1000.0f, 0.0f);
+    const float amount = 0.25f, influence = 0.21f;
+    for (const glm::vec2 cursor : {glm::vec2 (0.8133f, 0.25f), glm::vec2 (0.1f, 0.9f), glm::vec2 (0.5f)}) {
+        CAPTURE (cursor.x, cursor.y);
+        auto state = initialSceneParallaxPosition (true, size, glm::vec2 (0.0f));
+        advanceSceneParallaxPosition (state, true, cursor, influence, size, glm::vec2 (0.0f), 1.0f);
+        const glm::vec2 point = state.uniform * size;
+        const glm::vec3 offset = sceneLayerParallaxOffset (root, glm::vec3 (0.0f), glm::vec2 (1.0f),
+            sceneParallaxDisplacementTarget (cursor, amount, influence), size.x, size.y, amount, true, true);
+        REQUIRE (offset.x == Catch::Approx ((root.x - point.x) * amount).margin (1e-3));
+        REQUIRE (-offset.y == Catch::Approx ((root.y - point.y) * amount).margin (1e-3));   // camera Y is negated
+    }
 }
 
 TEST_CASE ("Unparented scene parallax precedes rotated and mirrored object transforms", "[scene][parallax][particle]") {
     // The 2334035201 mouth smoke has Z angle ~pi and the left fog has a
     // negative X scale. Native moves the scene stack before either
-    // object's renderer applies those local transforms.
-    const glm::vec3 eye {-47.67039f, 204.18417f, 0.0f};
+    // object's renderer applies those local transforms. Its authored camera
+    // eye (-47.67, 204.18) is reset to 0 for the root orthographic camera
+    // as at runtime.
+    const glm::vec3 eye {0.0f};
     const glm::vec2 center {0.0f};
     const glm::vec2 right {0.0144f, 0.0f}; // centered cursor .5 * amount .18 * influence .16
     const auto offset = [&] (const glm::vec3& origin, const glm::vec2& displacement) {
-        return sceneParticleParallaxOffset (
-            origin, eye, {1.0f, 1.0f}, displacement, 1920.0f, 1080.0f, 0.18f, true);
+        return sceneLayerParallaxOffset (
+            origin, eye, {1.0f, 1.0f}, displacement, 1920.0f, 1080.0f, 0.18f, true, true);
     };
     for (const auto& [origin, scale, angle] : {
              std::tuple {glm::vec3 (943.53278f, 637.84656f, 0.0f),
@@ -316,18 +631,19 @@ TEST_CASE ("Unparented scene parallax precedes rotated and mirrored object trans
         REQUIRE (delta.x == Catch::Approx (-27.648f).margin (0.001f));
         REQUIRE (delta.y == Catch::Approx (0.0f).margin (0.001f));
     }
+    // Static terms: canvas (origin - eye - size/2) * amount, with the canvas
+    // Y negated into camera space.
     const auto smokeCenter = offset ({943.53278f, 637.84656f, 0.0f}, center);
-    REQUIRE (smokeCenter.x == Catch::Approx (5.61657f).margin (0.002f));
-    REQUIRE (smokeCenter.y == Catch::Approx (-19.14077f).margin (0.002f));
-    // The native cursor uses scene height on Y; the old image/text helper
-    // used scene width and separated them from particles on a 16:9 canvas.
+    REQUIRE (smokeCenter.x == Catch::Approx (-2.96410f).margin (0.002f));
+    REQUIRE (smokeCenter.y == Catch::Approx (-17.61238f).margin (0.002f));
+    // The native cursor uses scene height on Y.
     const auto characterCenter = offset ({960.0f, 540.0f, 0.0f}, center);
     const auto characterTop = offset ({960.0f, 540.0f, 0.0f}, {0.0f, 0.0144f});
-    REQUIRE (characterCenter.x == Catch::Approx (8.58067f).margin (0.002f));
-    REQUIRE (characterCenter.y == Catch::Approx (-36.75315f).margin (0.002f));
+    REQUIRE (characterCenter.x == Catch::Approx (0.0f).margin (0.002f));
+    REQUIRE (characterCenter.y == Catch::Approx (0.0f).margin (0.002f));
     REQUIRE ((characterTop - characterCenter).y == Catch::Approx (-15.552f).margin (0.001f));
-    REQUIRE (sceneParticleParallaxOffset ({943.53278f, 637.84656f, 0.0f}, eye,
-             {0.0f, 0.0f}, right, 1920.0f, 1080.0f, 0.18f, true) == glm::vec3 (0.0f));
+    REQUIRE (sceneLayerParallaxOffset ({943.53278f, 637.84656f, 0.0f}, eye,
+             {0.0f, 0.0f}, right, 1920.0f, 1080.0f, 0.18f, true, true) == glm::vec3 (0.0f));
 }
 
 TEST_CASE ("Named puppet attachments compose live bone and offset before child local", "[scene][transform][puppet]") {

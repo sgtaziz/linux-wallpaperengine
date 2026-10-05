@@ -1395,8 +1395,7 @@ void CImage::setupPasses (const std::function<void (std::shared_ptr<const CFBO>)
 	    // blur composite does the same. Its single first/final copy still uses
 	    // the separate copy geometry and projection route.
 	    if (this->getImage ().model->fullscreen
-	        && (!this->getImage ().model->passthrough || !isFirstPass
-                    || (!m_composesChildren && !getScene ().isChildCompositionScope ()))) {
+	        && (!this->getImage ().model->passthrough || !isFirstPass || copiesTargetInClipSpace ())) {
 	        spacePosition = isFirstPass ? this->getCopySpacePosition () : this->getPassSpacePosition ();
 	        projection = isFirstPass ? &this->m_modelViewProjectionCopy : &this->m_modelViewProjectionPass;
 	        inverseProjection = isFirstPass ? &this->m_modelViewProjectionCopyInverse
@@ -1467,7 +1466,7 @@ void CImage::setupPasses (const std::function<void (std::shared_ptr<const CFBO>)
 	    && (projection == &m_modelViewProjectionScreen || projection == &m_lightingMvp)
 	    && drawTo == this->getScene ().getActiveRenderTarget ()
 	    && !this->getScene ().getCamera ().isOrthogonal ()
-	    && !this->getScene ().isChildCompositionScope ())
+	    && !this->getScene ().isLocalCompositionScope ())
 	    texcoord = texcoord == m_texcoordComposite
                 ? m_texcoordCompositePresented : m_texcoordPassPresented;
 	if (texcoord == m_texcoordDirect)
@@ -1591,12 +1590,17 @@ void CImage::render () { this->renderWithChildren ({}); }
 glm::vec2 CImage::getCompositeTargetSize () const {
     if (m_puppetChannelMesh)
         return glm::vec2 (m_texture->getRealWidth (), m_texture->getRealHeight ());
-    if (m_image.model->fullscreen && m_image.model->passthrough && !m_composesChildren
-        && !getScene ().isChildCompositionScope ()) {
+    if (copiesTargetInClipSpace ()) {
         const glm::vec2 presentation = getScene ().getPresentationTextureSize ();
         if (presentation.x > 0.0f && presentation.y > 0.0f) return presentation;
     }
     return m_loadedTargetSize;
+}
+
+bool CImage::copiesTargetInClipSpace () const {
+    return Render::Wallpapers::sceneFullscreenCopyInClipSpace (
+        m_image.model->fullscreen && m_image.model->passthrough,
+        {getScene ().isChildCompositionScope (), getScene ().isLocalCompositionScope ()});
 }
 
 bool CImage::refreshSizeDependentTargets () {
@@ -1978,14 +1982,11 @@ void CImage::updateScreenSpacePosition () {
     // the authored transform. Rotating the projection would apply it twice.
     glm::mat4 mvp = this->getScene ().getActiveRenderProjection ();
 
-    const glm::vec2 depth = getImage ().parallaxDepth->value->getVec2 ();
-    // Native offsets the scene matrix before an unparented object's
-    // own transform, using its authored origin and camera-relative cursor.
-    // Keep the older grouped path until parent/root inheritance is matched.
-    const glm::vec3 parallax = getImage ().parent
-        ? getScene ().getLayerParallaxOffset (depth)
-        : getScene ().getLayerParallaxOffset (getImage ().origin->value->getVec3 (), depth);
-    mvp = glm::translate (mvp, parallax);
+    // Native translates the scene view by the root ancestor's
+    // offset before this object's own transform. A fullscreen image's final
+    // composite replaces that view with identity.
+    if (!getImage ().model->fullscreen)
+        mvp = glm::translate (mvp, getScene ().getLayerParallaxOffset (getImage ()));
 
     this->m_modelViewProjectionScreen = mvp;
     this->m_modelViewProjectionScreenInverse = glm::inverse (mvp);
@@ -2009,16 +2010,14 @@ void CImage::updateScreenSpacePosition () {
     m_lightingMvpInverse = determinant != 0.0f && std::isfinite (determinant)
         ? glm::inverse (m_lightingMvp) : glm::mat4 (1.0f);
     if (this->getImage ().model->passthrough) {
-	// A root fullscreen passthrough samples the already cropped output
-	// framebuffer. Its copy quad is clip space; applying the authored crop
-	// again would stretch/crop postprocessing a second time.
-	this->m_modelViewProjectionCopy = this->getImage ().model->fullscreen
-            && !m_composesChildren && !getScene ().isChildCompositionScope ()
-            ? glm::mat4 (1.0f) : this->m_modelViewProjectionScreen;
-	this->m_modelViewProjectionCopyInverse = this->m_modelViewProjectionScreenInverse;
-        if (this->getImage ().model->fullscreen
-            && !m_composesChildren && !getScene ().isChildCompositionScope ())
-            this->m_modelViewProjectionCopyInverse = glm::mat4 (1.0f);
+	// A fullscreen passthrough samples the already cropped output framebuffer
+	// (or a fullscreen composer's target of the same size). Its copy quad is
+	// clip space; applying the authored crop again would stretch/crop
+	// postprocessing a second time.
+	const bool clipSpaceCopy = copiesTargetInClipSpace ();
+	this->m_modelViewProjectionCopy = clipSpaceCopy ? glm::mat4 (1.0f) : this->m_modelViewProjectionScreen;
+	this->m_modelViewProjectionCopyInverse = clipSpaceCopy
+	    ? glm::mat4 (1.0f) : this->m_modelViewProjectionScreenInverse;
     }
 }
 

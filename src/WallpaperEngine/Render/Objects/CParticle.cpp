@@ -3940,24 +3940,12 @@ void CParticle::updateMatrices () {
 }
 
 void CParticle::applyParallaxToModelMatrix () {
-    if (!getScene ().getScene ().camera.parallax.enabled->value->getBool ()
-	|| getScene ().getContext ().getApp ().getContext ().settings.mouse.disableparallax) {
-	return;
-    }
-
-    const glm::vec3 parallaxOffset = Wallpapers::sceneParticleParallaxOffset (
-        m_particle.origin->value->getVec3 (), getScene ().getCamera ().getEye (),
-        m_particle.parallaxDepth->value->getVec2 (), *getScene ().getParallaxDisplacement (),
-        static_cast<float> (getScene ().getWidth ()), static_cast<float> (getScene ().getHeight ()),
-        getScene ().getScene ().camera.parallax.amount->value->getFloat (),
-        getScene ().getCamera ().isOrthogonal ());
-    // Native translates the scene stack before dispatching this object's
-    // draw. An unparented emitter's rotation or negative/nonuniform scale
-    // must not rotate or magnify the camera movement (2334035201 fog/smoke).
-    // Preserve the old authored-parent path until root inheritance is mapped.
-    m_modelMatrix = m_particle.parent
-        ? glm::translate (m_modelMatrix, parallaxOffset)
-        : glm::translate (glm::mat4 (1.0f), parallaxOffset) * m_modelMatrix;
+    // Native translates the scene stack before dispatching this
+    // object's draw, from its root ancestor. The emitter's own rotation or
+    // negative/nonuniform scale must not rotate or magnify the camera
+    // movement (2334035201 fog/smoke), nor may a parent's.
+    m_modelMatrix = glm::translate (glm::mat4 (1.0f), getScene ().getLayerParallaxOffset (m_particle))
+        * m_modelMatrix;
 }
 
 void CParticle::updateParticleViewProjection () {
@@ -3987,7 +3975,7 @@ void CParticle::updateParticleViewProjection () {
 	}
     } else {
 	// Orthographic projection from scene camera
-	m_viewProjectionMatrix = getScene ().isChildCompositionScope ()
+	m_viewProjectionMatrix = getScene ().isLocalCompositionScope ()
 	    ? getScene ().getActiveRenderProjection ()
 	    : sceneCamera.isOrthogonal ()
 	        ? sceneCamera.getProjection () * sceneCamera.getRenderLookAt ()
@@ -3999,7 +3987,7 @@ void CParticle::updateParticleViewProjection () {
 	m_eyePosition = sceneCamera.isOrthogonal ()
 	    ? glm::vec3 (0.0f, 0.0f, 2000.0f) : sceneCamera.getEye ();
     }
-    if (!getScene ().isChildCompositionScope ())
+    if (!getScene ().isLocalCompositionScope ())
         m_viewProjectionMatrix = getScene ().getRootRenderClipTransform () * m_viewProjectionMatrix;
 }
 
@@ -4270,7 +4258,7 @@ void CParticle::applyRendererOrientation (size_t rendererIndex) {
             const auto& camera = getScene ().getCamera ();
             std::optional<ParticleCore::FixedRendererBasis> basis;
             if (!m_hasChildParentMatrix || (m_particle.flags & 1u) == 0
-                || !getScene ().isChildCompositionScope ()) {
+                || !getScene ().isLocalCompositionScope ()) {
                 // replaces the current scene matrix with 
                 // before invoking for preset bit 0. The Linux
                 // draw model is that base; local presets retain the full
@@ -4736,7 +4724,7 @@ void CParticle::drawMaterialPasses () {
     ParticlePresentationFrontFace frontFace (
         Wallpapers::particlePresentationReversesWinding (
             getScene ().getCamera ().isOrthogonal (), (m_particle.flags & 1u) != 0,
-            getScene ().isChildCompositionScope (), (m_particle.flags & 4u) != 0));
+            getScene ().isLocalCompositionScope (), (m_particle.flags & 4u) != 0));
     // Keep the current depth-clamp workaround for sprite and rope geometry.
     glEnable (GL_DEPTH_CLAMP);
     const auto& authoredPasses = m_particle.material->material->passes;

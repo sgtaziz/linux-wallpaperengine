@@ -320,7 +320,7 @@ struct CModel::MeshDraw final : CRenderable {
         // composition also carries a local Y reflection in its projection.
         PresentationFrontFace frontFace (
             Wallpapers::modelPresentationReversesWinding (
-                model.getScene ().getCamera ().isOrthogonal (), model.getScene ().isChildCompositionScope ()));
+                model.getScene ().getCamera ().isOrthogonal (), model.getScene ().isLocalCompositionScope ()));
         for (const auto& pass : m_passes) {
             pass->setDestination (model.getScene ().getActiveRenderTarget ());
             pass->setInput (m_texture);

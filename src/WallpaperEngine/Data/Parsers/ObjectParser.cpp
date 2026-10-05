@@ -188,6 +188,8 @@ ObjectUniquePtr ObjectParser::parse (const JSON& it, const Project& project) {
 	    .groupScale = it.user ("scale", project.properties, glm::vec3 (1.0f)),
 	    .groupAngles = it.user ("angles", project.properties, glm::vec3 (0.0f)),
 	    .groupVisible = it.user ("visible", project.properties, true),
+	    // Native stores (1,1); an absent key leaves it untouched.
+	    .parallaxDepth = it.user ("parallaxDepth", project.properties, glm::vec2 (1.0f)),
 	};
     } catch (const std::exception& e) {
 	sLog.error ("Error parsing object base data: ", e.what ());
@@ -217,6 +219,8 @@ ObjectUniquePtr ObjectParser::parse (const JSON& it, const Project& project) {
 	    .groupScale = it.user ("scale", project.properties, glm::vec3 (1.0f)),
 	    .groupAngles = it.user ("angles", project.properties, glm::vec3 (0.0f)),
 	    .groupVisible = it.user ("visible", project.properties, true),
+	    // Native stores (1,1); an absent key leaves it untouched.
+	    .parallaxDepth = it.user ("parallaxDepth", project.properties, glm::vec2 (1.0f)),
 	};
     }
 
@@ -400,7 +404,6 @@ TextUniquePtr ObjectParser::parseText (const JSON& it, const Project& project, O
 	    .brightness = textFloatSetting (it, project, "brightness"),
 	    .alpha = it.user ("alpha", project.properties, 1.0f),
 	    .visible = it.user ("visible", project.properties, true),
-	    .parallaxDepth = it.user ("parallaxDepth", project.properties, glm::vec2 (0.0f)),
 	    .alignment = it.optional ("horizontalalign", it.optional ("alignment", std::string ("center"))),
 	    .verticalalign = it.optional ("verticalalign", std::string ("center")),
             .padding = textPadding (it, project),
@@ -429,7 +432,6 @@ ObjectParser::parseImage (const JSON& it, const Project& project, ObjectData bas
 	    .copyBackground = it.user ("copybackground", properties, true),
 	    .alignment = it.optional ("horizontalalign", it.optional ("alignment", std::string ("center"))),
 	    .size = it.user ("size", properties, defaultSize),
-	    .parallaxDepth = it.user ("parallaxDepth", properties, glm::vec2 (0.0f)),
 	    .colorBlendMode = it.user ("colorBlendMode", properties, 0),
 	    .brightness = it.user ("brightness", properties, 1.0f),
 	    .model = std::move (model),
@@ -601,7 +603,6 @@ ParticleUniquePtr ObjectParser::parseParticle (const JSON& it, const Project& pr
 		    .scale = it.user ("scale", properties, glm::vec3 (1.0f)),
 		    .angles = it.user ("angles", properties, glm::vec3 (0.0f)),
 		    .visible = it.user ("visible", properties, true),
-		    .parallaxDepth = it.user ("parallaxDepth", properties, glm::vec2 (0.0f)),
 		    .particleFile = "",
 		    .animationMode = "sequence",
 		    .sequenceMultiplier = 1.0f,
@@ -952,7 +953,6 @@ ParticleUniquePtr ObjectParser::parseParticle (const JSON& it, const Project& pr
 		.scale = it.user ("scale", properties, glm::vec3 (1.0f)),
 		.angles = it.user ("angles", properties, glm::vec3 (0.0f)),
 		.visible = it.user ("visible", properties, true),
-		.parallaxDepth = it.user ("parallaxDepth", properties, glm::vec2 (0.0f)),
 		.particleFile = particleFile,
 		.animationMode = animationMode,
 		.sequenceMultiplier = sequenceMultiplier,

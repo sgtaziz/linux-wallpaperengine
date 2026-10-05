@@ -3,6 +3,7 @@
 #include "WallpaperEngine/Render/Camera.h"
 #include "ParticleSceneClock.h"
 #include "SceneCursorState.h"
+#include "SceneTransform.h"
 #include "WallpaperEngine/Audio/Drivers/Recorders/SceneSpectrumState.h"
 
 #include "WallpaperEngine/Render/CWallpaper.h"
@@ -14,6 +15,7 @@
 #include <optional>
 #include <random>
 #include <set>
+#include <unordered_map>
 #include <string>
 
 namespace WallpaperEngine::Render {
@@ -60,9 +62,10 @@ public:
     [[nodiscard]] std::optional<glm::vec3> getMouseWorldPosition () const;
     [[nodiscard]] bool isMouseLeftDown () const;
     const glm::vec2* getParallaxDisplacement () const;
-    [[nodiscard]] glm::vec3 getLayerParallaxOffset (const glm::vec2& depth) const;
-    [[nodiscard]] glm::vec3 getLayerParallaxOffset (const glm::vec3& origin,
-                                                   const glm::vec2& depth) const;
+    /** Native g_ParallaxPosition: the smoothed parallax point over the projection size. */
+    const glm::vec2* getParallaxPosition () const;
+    /** Native camera parallax for one object, from its root ancestor, in camera space. */
+    [[nodiscard]] glm::vec3 getLayerParallaxOffset (const Object& object) const;
 
     [[nodiscard]] const std::vector<CObject*>& getObjectsByRenderOrder () const;
     /** Public layer order excludes removals immediately; physical deletion waits for callback completion. */
@@ -120,7 +123,10 @@ public:
     [[nodiscard]] std::shared_ptr<const CFBO> getActiveRenderTarget () const;
     [[nodiscard]] const glm::mat4& getActiveRenderProjection () const;
     [[nodiscard]] const glm::mat4& getRootRenderClipTransform () const { return m_rootRenderClipTransform; }
+    /** Drawing into a composing image's offscreen target. */
     [[nodiscard]] bool isChildCompositionScope () const;
+    /** Under a non-fullscreen composer's local projection (inherited through nesting). */
+    [[nodiscard]] bool isLocalCompositionScope () const;
     [[nodiscard]] bool isMaxAlphaCompositionScope () const;
 
 protected:
@@ -138,6 +144,11 @@ private:
     std::vector<const SceneCamera*> m_sceneCameraObjects;
     Render::CObject* createObject (const Object& object);
     [[nodiscard]] const Object* findObjectData (int id) const;
+    /** Composing ancestor of a scheduled object; present maps the scheduled objects by id. */
+    [[nodiscard]] std::optional<int> compositionOwner (
+        const CObject& object, const std::unordered_map<int, CObject*>& present) const;
+    /** Rebuilds m_composedObjectIds for this frame's draw structure before any object update. */
+    void refreshComposedObjects ();
     void flushDestroyedScriptLayers ();
     void refreshPointLights ();
     void refreshSpotLights ();
@@ -196,8 +207,12 @@ private:
     glm::mat4 m_activeRenderProjection {1.0f};
     glm::mat4 m_rootRenderClipTransform {1.0f};
     bool m_secondaryReflectionStage = false;
-    bool m_childCompositionScope = false;
+    SceneCompositionScope m_compositionScope = {};
     bool m_maxAlphaCompositionScope = false;
+    /** Objects excluded from camera parallax by a non-fullscreen composer above them. */
+    std::set<int> m_composedObjectIds = {};
+    /** Parallax root per object; authored parents are fixed, script layer changes clear it. */
+    mutable std::map<int, const Object*> m_parallaxRoots = {};
     glm::vec2 m_mousePosition = {};
     glm::vec2 m_mousePositionLast = {};
     glm::vec2 m_mousePositionNormalized = {};
@@ -207,6 +222,7 @@ private:
     glm::vec2 m_previousCursorScreenPosition = {};
     SceneCursorState m_cursorState;
     glm::vec2 m_parallaxDisplacement = {};
+    SceneParallaxPosition m_parallaxPosition = {};
     std::shared_ptr<CFBO> _rt_4FrameBuffer = nullptr;
     std::shared_ptr<CFBO> _rt_8FrameBuffer = nullptr;
     std::shared_ptr<CFBO> _rt_Bloom = nullptr;
