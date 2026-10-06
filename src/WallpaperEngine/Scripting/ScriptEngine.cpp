@@ -37,6 +37,7 @@
 #include <optional>
 #include <poll.h>
 #include <ranges>
+#include <set>
 #include <signal.h>
 #include <spawn.h>
 #include <sstream>
@@ -963,8 +964,90 @@ void ScriptEngine::queueModule (const std::string& key, DynamicValue& currentVal
         .objectIndex = objectIndex, .placement = std::move (placement), .queueOrder = m_nextScriptQueueOrder});
     ++m_nextScriptQueueOrder;
 
-    // init/update are deferred until the first scene tick, after all layers
-    // have been constructed and can be found through thisScene.getLayer().
+    // Scripts registered while the scene loads defer init/update to the first
+    // scene tick, after all layers have been constructed and can be found
+    // through thisScene.getLayer(); a created layer's scripts initialize at the
+    // end of createLayer (initializeCreatedModules).
+}
+
+void ScriptEngine::initializeModule (const std::string& key, LoadedModule& module, JSValue& initialUserProperties) {
+    module.initialized = true;
+    JSValue initArgs[] = {this->dynamicToJs (module.value, true, module.angleProperty, module.rgbColorProperty)};
+    JSValue initResult;
+    {
+        // Native initial authored init precedes the loader's camera
+        // pose reset. Later dynamic init and user-properties calls do not.
+        const bool previous = m_initialAuthoredInit;
+        m_initialAuthoredInit = !m_initialSceneTickCompleted
+            && !(module.object && m_scene.isScriptCreatedLayer (*module.object));
+        ScopeGuard initPhase ([this, previous] { m_initialAuthoredInit = previous; });
+        initResult = this->call (module.module, 1, initArgs, "init");
+    }
+    if (JS_IsException (initResult))
+        logJSException (this->m_context, ("tick.init:" + key).c_str ());
+    else jsToDynamicValue (this->m_context, initResult, module.value, key,
+                           module.rgbColorProperty || acceptsRgbColorResult (key), module.angleProperty);
+    JS_FreeValue (this->m_context, initResult);
+    JS_FreeValue (this->m_context, initArgs[0]);
+    // Native sends all current project settings once when the wallpaper
+    // loads. Several authored scripts initialize their frame state here,
+    // after init(value) has captured the initial layer value.
+    if (JS_IsUndefined (initialUserProperties)) {
+        initialUserProperties = userPropertiesValue ();
+        if (JS_IsException (initialUserProperties)) {
+            logJSException (m_context, "tick.userProperties");
+            initialUserProperties = JS_NewObject (m_context);
+        }
+    }
+    JSValue userArgs[] = {JS_DupValue (m_context, initialUserProperties)};
+    JSValue userResult = call (module.module, 1, userArgs, "applyUserProperties");
+    if (JS_IsException (userResult))
+        logJSException (m_context, ("tick.applyUserProperties:" + key).c_str ());
+    JS_FreeValue (m_context, userResult);
+    JS_FreeValue (m_context, userArgs[0]);
+}
+
+void ScriptEngine::updateModule (const std::string& key, LoadedModule& module) {
+    this->m_runningModule = &module;
+    this->activateLayer (module);
+
+    JSValue args[] = { this->dynamicToJs (module.value, true, module.angleProperty, module.rgbColorProperty) };
+    JSValue result = this->call (module.module, 1, args, "update");
+    ScopeGuard guard ([result, args, this] () {
+	JS_FreeValue (this->m_context, result);
+	JS_FreeValue (this->m_context, args[0]);
+    });
+
+    if (JS_IsException (result)) {
+	logJSException (this->m_context, ("tick.update:" + key).c_str ());
+	return;
+    }
+
+    jsToDynamicValue (this->m_context, result, module.value, key,
+                      module.rgbColorProperty || acceptsRgbColorResult (key), module.angleProperty);
+}
+
+void ScriptEngine::initializeCreatedModules (size_t firstQueueOrder) {
+    auto* previousModule = m_runningModule;
+    JSValue previousLayer = JS_GetPropertyStr (m_context, m_globalThis, "thisLayer");
+    JSValue previousObject = JS_GetPropertyStr (m_context, m_globalThis, "thisObject");
+    ScopeGuard restore ([this, previousModule, previousLayer, previousObject] {
+        m_runningModule = previousModule;
+        JS_SetPropertyStr (m_context, m_globalThis, "thisLayer", previousLayer);
+        JS_SetPropertyStr (m_context, m_globalThis, "thisObject", previousObject);
+    });
+    JSValue userProperties = JS_UNDEFINED;
+    ScopeGuard propertiesGuard ([this, &userProperties] { JS_FreeValue (m_context, userProperties); });
+    // A created layer's init may create further layers; those initialize
+    // inside their own createLayer call, so one pass in list order suffices.
+    for (const auto& key : m_dispatchOrder.snapshot ()) {
+        const auto found = m_scriptModules.find (key);
+        if (found == m_scriptModules.end () || found->second.initialized
+            || found->second.queueOrder < firstQueueOrder) continue;
+        m_runningModule = &found->second;
+        activateLayer (found->second);
+        initializeModule (key, found->second, userProperties);
+    }
 }
 
 void ScriptEngine::tick () {
@@ -1004,9 +1087,9 @@ void ScriptEngine::tick () {
 
     // run any pending notifications
 
-    // A module can create a layer whose setup queues another module. Schedule
-    // modules present at the start of the tick, so a child begins on the next
-    // frame. Native init and update both walk the registration list.
+    // Native init and update both walk the registration list. A layer created
+    // by a callback initializes its scripts inside createLayer, so only the
+    // scripts registered while the scene loaded are pending here.
     const std::vector<std::string> scheduled = m_dispatchOrder.snapshot ();
     std::vector<std::string> pendingInit;
     for (const auto& key : scheduled)
@@ -1023,68 +1106,32 @@ void ScriptEngine::tick () {
 	auto& module = found->second;
 	this->m_runningModule = &module;
 	this->activateLayer (module);
-	if (!module.initialized) {
-	    module.initialized = true;
-	    JSValue initArgs[] = {this->dynamicToJs (module.value, true, module.angleProperty, module.rgbColorProperty)};
-	    JSValue initResult;
-            {
-                // Native initial authored init precedes the loader's camera
-                // pose reset. Later dynamic init and user-properties calls do not.
-                const bool previous = m_initialAuthoredInit;
-                m_initialAuthoredInit = !m_initialSceneTickCompleted
-                    && !(module.object && m_scene.isScriptCreatedLayer (*module.object));
-                ScopeGuard initPhase ([this, previous] { m_initialAuthoredInit = previous; });
-                initResult = this->call (module.module, 1, initArgs, "init");
-            }
-	    if (JS_IsException (initResult))
-	        logJSException (this->m_context, ("tick.init:" + key).c_str ());
-	    else jsToDynamicValue (this->m_context, initResult, module.value, key,
-	                           module.rgbColorProperty || acceptsRgbColorResult (key), module.angleProperty);
-	    JS_FreeValue (this->m_context, initResult);
-	    JS_FreeValue (this->m_context, initArgs[0]);
-	    // Native sends all current project settings once when the wallpaper
-	    // loads. Several authored scripts initialize their frame state here,
-	    // after init(value) has captured the initial layer value.
-	    if (JS_IsUndefined (initialUserProperties)) {
-	        initialUserProperties = userPropertiesValue ();
-	        if (JS_IsException (initialUserProperties)) {
-	            logJSException (m_context, "tick.userProperties");
-	            initialUserProperties = JS_NewObject (m_context);
-	        }
-	    }
-	    JSValue userArgs[] = {JS_DupValue (m_context, initialUserProperties)};
-	    JSValue userResult = call (module.module, 1, userArgs, "applyUserProperties");
-	    if (JS_IsException (userResult))
-	        logJSException (m_context, ("tick.applyUserProperties:" + key).c_str ());
-	    JS_FreeValue (m_context, userResult);
-	    JS_FreeValue (m_context, userArgs[0]);
-	}
+	if (!module.initialized) initializeModule (key, module, initialUserProperties);
     }
 
     m_initialSceneTickCompleted = true;
 
-    // update() walks the same native registration order.
-    for (const auto& key : scheduled) {
-	const auto found = m_scriptModules.find (key);
-	if (found == m_scriptModules.end ()) continue;
-	auto& module = found->second;
-	this->m_runningModule = &module;
-	this->activateLayer (module);
-
-	JSValue args[] = { this->dynamicToJs (module.value, true, module.angleProperty, module.rgbColorProperty) };
-	JSValue result = this->call (module.module, 1, args, "update");
-	ScopeGuard guard ([result, args, this] () {
-	    JS_FreeValue (this->m_context, result);
-	    JS_FreeValue (this->m_context, args[0]);
-	});
-
-	if (JS_IsException (result)) {
-	    logJSException (this->m_context, ("tick.update:" + key).c_str ());
-	    continue;
+    // update() walks the same native registration order. The walk
+    // follows the live list, so a script registered by a layer created during
+    // this walk (appended, already initialized) also updates this frame.
+    for (const auto& key : scheduled)
+	if (const auto found = m_scriptModules.find (key); found != m_scriptModules.end ())
+	    updateModule (key, found->second);
+    // Destruction is deferred to the post-tick flush, so the order only grows
+    // during the walk.
+    if (m_dispatchOrder.size () > scheduled.size ()) {
+	std::set<std::string> updated (scheduled.begin (), scheduled.end ());
+	for (bool appended = true; appended;) {
+	    appended = false;
+	    for (const auto& key : m_dispatchOrder.snapshot ()) {
+		const auto found = m_scriptModules.find (key);
+		if (updated.contains (key) || found == m_scriptModules.end () || !found->second.initialized) continue;
+		updated.insert (key);
+		updateModule (key, found->second);
+		appended = true;
+		break;
+	    }
 	}
-
-	jsToDynamicValue (this->m_context, result, module.value, key,
-	                  module.rgbColorProperty || acceptsRgbColorResult (key), module.angleProperty);
     }
     if (m_mediaSource.getMediaInfo ().available) {
         const bool pending = std::ranges::any_of (m_scriptModules, [] (const auto& item) {

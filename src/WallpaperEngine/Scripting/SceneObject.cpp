@@ -596,9 +596,11 @@ JSValue scene_create_layer (JSContext* ctx, JSValueConst this_val, int argc, JSV
         JS_FreeValue (ctx, encoded);
     }
     try {
+        const auto firstQueueOrder = owner->getEngine ().nextQueueOrder ();
         auto* object = owner->getMutableScene ().createScriptLayer (configuration, dynamicModel);
         auto* scriptable = dynamic_cast<ScriptableObject*> (object);
         if (!scriptable) return JS_ThrowTypeError (ctx, "Created layer has no script interface");
+        owner->getEngine ().initializeCreatedModules (firstQueueOrder);
         return owner->getEngine ().getAdapters ().object->instantiate (*scriptable);
     } catch (const std::exception& error) {
         sLog.error ("SceneScript createLayer: ", error.what ());

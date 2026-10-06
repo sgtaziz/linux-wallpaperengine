@@ -100,6 +100,15 @@ public:
     [[nodiscard]] SceneObject* getSceneObject () const { return m_sceneObject.get (); }
     [[nodiscard]] bool isEvaluatingModuleTopLevel () const { return m_evaluatingModuleTopLevel; }
     [[nodiscard]] bool isInitializingAuthoredLayer () const { return m_initialAuthoredInit; }
+    /** The registration position the next queued script will take. */
+    [[nodiscard]] size_t nextQueueOrder () const { return m_nextScriptQueueOrder; }
+    /**
+     * Run init() for the scripts registered since `firstQueueOrder` by a layer
+     * that a script created. Native activates a created layer inside
+     * createLayer, so its init()
+     * has run before createLayer returns. The caller's thisLayer is restored.
+     */
+    void initializeCreatedModules (size_t firstQueueOrder);
     JSValue dynamicToJs (DynamicValue& value, bool detached = false, bool angleProperty = false,
                          bool rgbColorProperty = false) const;
     /** A fresh converted snapshot of the current project user properties. */
@@ -204,6 +213,8 @@ private:
                       ScriptPlacement placement, std::optional<size_t> effectOwner,
                       const ShaderConstantMap* materialOwner);
     void activateLayer (const LoadedModule& module);
+    void initializeModule (const std::string& key, LoadedModule& module, JSValue& userProperties);
+    void updateModule (const std::string& key, LoadedModule& module);
 
     void installBuiltins ();
 

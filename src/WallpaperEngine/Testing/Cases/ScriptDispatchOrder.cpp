@@ -7,6 +7,7 @@
 #include "WallpaperEngine/FileSystem/Container.h"
 #include "WallpaperEngine/Scripting/ScriptDispatchOrder.h"
 
+#include <algorithm>
 #include <memory>
 
 #include <string>
@@ -139,6 +140,14 @@ TEST_CASE ("Scripts created after the scene loaded append in creation order", "[
     order.insert ("alpha_900", {.objectIndex = ScriptDispatchRank::kAppended, .placement = own ("alpha"), .queueOrder = 6});
     order.insert ("origin_2", {.objectIndex = 0, .placement = own ("origin"), .queueOrder = 0});
     REQUIRE (order.snapshot () == std::vector<std::string> {"origin_2", "alpha_3", "visible_900", "alpha_900"});
+    // A layer created during the update walk appends behind the walked list,
+    // so the walk can continue into it in the same frame (follows
+    // the live std::list).
+    const auto walked = order.snapshot ();
+    order.insert ("color_901", {.objectIndex = ScriptDispatchRank::kAppended, .placement = own ("color"), .queueOrder = 7});
+    REQUIRE (order.size () == walked.size () + 1);
+    REQUIRE (std::equal (walked.begin (), walked.end (), order.snapshot ().begin ()));
+    order.erase ("color_901");
     // Removal unlinks a script and keeps the others' order (native list erase).
     order.erase ("alpha_3");
     REQUIRE (order.snapshot () == std::vector<std::string> {"origin_2", "visible_900", "alpha_900"});
