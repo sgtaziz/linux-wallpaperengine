@@ -3074,7 +3074,11 @@ OperatorFunc CParticle::createAlphaFadeOperator (const AlphaFadeOperator& op) {
 
 		float life = p.getLifetimePos ();
 
-		if (life < fadeInTime) {
+		// fadein > fadeout: native ORs the masked ramps, so run its exact
+		// formula for every particle; lifetime 0 keeps the guarded path.
+		if (fadeInTime > fadeOutTime && p.lifetime > 0.0f) {
+		    p.alpha *= ParticleCore::nativeRuntimeAlphaFade (p.age, p.lifetime, fadeInTime, fadeOutTime);
+		} else if (life < fadeInTime) {
 		    float fade = WallpaperEngine::Maths::fadeValue (life, 0.0f, fadeInTime, 0.0f, 1.0f);
 		    p.alpha *= fade;
 		} else if (life > fadeOutTime) {

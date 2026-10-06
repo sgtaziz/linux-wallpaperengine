@@ -1,6 +1,8 @@
 #pragma once
 
+#include <bit>
 #include <cmath>
+#include <cstdint>
 #include <stdexcept>
 
 #if defined(__SSE__)
@@ -48,6 +50,21 @@ inline float nativeRuntimeClamp01 (float value) {
 
 inline float nativeRuntimeLifetimeFraction (float age, float lifetime) {
     return age * nativeRuntimeReciprocal (lifetime);
+}
+
+// opcode 3 (alphafade): masks and ramps use the RCPPS lifetime
+// fraction; the factor is the bitwise OR of the masked fade-in ramp, the
+// masked fade-out ramp and 1.0 when neither mask holds. With fadein > fadeout
+// both masks hold in fadeout < life < fadein and the ramps' bits merge, so the
+// result depends on this CPU's RCPPS approximation exactly as native does.
+inline float nativeRuntimeAlphaFade (float age, float lifetime, float fadeIn, float fadeOut) {
+    const float life = nativeRuntimeLifetimeFraction (age, lifetime);
+    const bool fadingIn = life < fadeIn;
+    const bool fadingOut = fadeOut < life;
+    const uint32_t in = fadingIn ? std::bit_cast<uint32_t> (life * nativeRuntimeReciprocal (fadeIn)) : 0u;
+    const uint32_t out = fadingOut ? std::bit_cast<uint32_t> ((1.0f - life) * nativeRuntimeReciprocal (1.0f - fadeOut)) : 0u;
+    const uint32_t neither = fadingIn || fadingOut ? 0u : std::bit_cast<uint32_t> (1.0f);
+    return std::bit_cast<float> (in | out | neither);
 }
 
 inline float nativeRuntimeSquaredLength (float x, float y, float z) {
