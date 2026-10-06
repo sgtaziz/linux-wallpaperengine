@@ -447,6 +447,41 @@ static JSValue layer_get_transform_matrix (JSContext* ctx, JSValueConst thisValu
     return result;
 }
 
+// Native ILayer.rotateObjectSpace takes one Vec3.
+// native reads an object argument into a zeroed Vec3, replacing only
+// the numeric x, y and z; the components are radians.
+// What native does with a non-object argument is not recovered, so Linux
+// leaves the layer unchanged.
+static JSValue layer_rotate_object_space (JSContext* ctx, JSValueConst thisValue,
+                                          int argc, JSValueConst* argv) {
+    auto* container = scriptableContainer (thisValue);
+    auto* layer = container && container->lifetime ? container->lifetime->object : nullptr;
+    if (!layer) return JS_ThrowTypeError (ctx, "rotateObjectSpace requires a live layer");
+    if (argc < 1 || !JS_IsObject (argv[0])) return JS_UNDEFINED;
+    glm::vec3 rotation (0.0f);
+    for (int component = 0; component < 3; ++component) {
+        const char name[] = {"xyz"[component], '\0'};
+        JSValue part = JS_GetPropertyStr (ctx, argv[0], name);
+        if (JS_IsException (part)) return part;
+        if (JS_IsNumber (part)) {
+            double number = 0.0;
+            if (JS_ToFloat64 (ctx, &number, part) < 0) {
+                JS_FreeValue (ctx, part);
+                return JS_EXCEPTION;
+            }
+            rotation[component] = static_cast<float> (number);
+        }
+        JS_FreeValue (ctx, part);
+    }
+    const auto& properties = layer->getProperties ();
+    const auto it = properties.find ("angles");
+    if (it == properties.end ()) return JS_UNDEFINED;
+    auto& angles = it->second.value;
+    angles.update (WallpaperEngine::Render::Wallpapers::rotateObjectSpaceAngles (angles.getVec3 (), rotation),
+                   DynamicValue::Script);
+    return JS_UNDEFINED;
+}
+
 JSValue scriptableobject_property_get (JSContext* ctx, JSValueConst obj_val, JSAtom atom, JSValueConst receiver) {
     auto* container = scriptableContainer (obj_val);
     if (!container) return JS_ThrowTypeError (ctx, "Invalid layer object");
@@ -473,6 +508,8 @@ JSValue scriptableobject_property_get (JSContext* ctx, JSValueConst obj_val, JSA
         return JS_NewCFunction (ctx, layer_get_parent, name, 0);
     if (std::string_view (name) == "getTransformMatrix")
         return JS_NewCFunction (ctx, layer_get_transform_matrix, name, 0);
+    if (std::string_view (name) == "rotateObjectSpace")
+        return JS_NewCFunction (ctx, layer_rotate_object_space, name, 1);
     if (std::string_view (name) == "getTextureAnimation"
         && dynamic_cast<WallpaperEngine::Render::Objects::CImage*> (container->lifetime->object))
         return JS_NewCFunction (ctx, layer_get_texture_animation, name, 0);

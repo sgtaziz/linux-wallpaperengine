@@ -1503,3 +1503,37 @@ TEST_CASE ("Orthographic cursor unprojection uses the drawn shaken view", "[scen
     REQUIRE (stale->y - world->y == Catch::Approx (2 * shake.offset.y));
     REQUIRE (stale->x == Catch::Approx (world->x));
 }
+
+TEST_CASE ("rotateObjectSpace composes z, y then x object rotations onto the layer basis", "[scene][transform][script]") {
+    using WallpaperEngine::Render::Wallpapers::rotateObjectSpaceAngles;
+    const auto basis = [] (const glm::vec3& angles) {
+        return glm::rotate (glm::rotate (glm::rotate (glm::mat4 (1.0f), angles.z, glm::vec3 (0, 0, 1)),
+                                         angles.y, glm::vec3 (0, 1, 0)), angles.x, glm::vec3 (1, 0, 0));
+    };
+    const auto requireAngles = [] (const glm::vec3& actual, const glm::vec3& expected) {
+        for (int axis = 0; axis < 3; ++axis) REQUIRE (actual[axis] == Catch::Approx (expected[axis]).margin (2e-5f));
+    };
+    // Native applies the argument as Rz*Ry*Rx after the stored
+    // basis, so from zero angles the argument becomes the angles.
+    requireAngles (rotateObjectSpaceAngles (glm::vec3 (0.0f), glm::vec3 (0.3f, 0.5f, 0.7f)), {0.3f, 0.5f, 0.7f});
+    requireAngles (rotateObjectSpaceAngles (glm::vec3 (0.2f, -0.3f, 0.1f), glm::vec3 (0.0f)), {0.2f, -0.3f, 0.1f});
+    // From authored angles the rotations are about the layer's own axes:
+    // values from a float32 transcription.
+    requireAngles (rotateObjectSpaceAngles ({-0.48869f, 0.0f, 0.08727f}, {0.3f, 0.5f, 0.7f}),
+                   {-0.218127f, 0.759729f, 0.474971f});
+    requireAngles (rotateObjectSpaceAngles ({-0.48869f, 0.0f, 0.08727f}, {0.0f, 0.4f, 0.0f}),
+                   {-0.523543f, 0.350999f, -0.108672f});
+    // The stored angles rebuild the composed basis, which differs from the
+    // world-axis (pre-multiplied) rotation.
+    const glm::vec3 authored {0.4f, -0.2f, 0.9f}, rotation {-0.6f, 0.25f, 0.35f};
+    const auto composed = basis (authored) * basis (rotation);
+    const auto rebuilt = basis (rotateObjectSpaceAngles (authored, rotation));
+    const auto world = basis (rotation) * basis (authored);
+    float worldDifference = 0.0f;
+    for (int column = 0; column < 3; ++column)
+        for (int row = 0; row < 3; ++row) {
+            REQUIRE (rebuilt[column][row] == Catch::Approx (composed[column][row]).margin (2e-5f));
+            worldDifference = std::max (worldDifference, std::abs (world[column][row] - composed[column][row]));
+        }
+    REQUIRE (worldDifference > 0.1f);
+}

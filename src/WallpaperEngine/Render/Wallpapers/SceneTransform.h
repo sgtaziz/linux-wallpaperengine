@@ -504,6 +504,28 @@ inline ResolvedSceneTransform localSceneTransform (const Data::Model::Object& ob
     return result;
 }
 
+// Native ILayer.rotateObjectSpace post-multiplies the layer's
+// stored Rz*Ry*Rx basis by one rotation per axis, in the order z, y, x
+// each by that component of the argument in radians. It then
+// stores the angles it extracts from the result: z from column 0, x from the
+// z-unrotated columns 1 and 2, and y from column 0's z against the length of
+// the other two z components.
+inline glm::vec3 rotateObjectSpaceAngles (const glm::vec3& angles, const glm::vec3& rotation) {
+    glm::mat4 basis (1.0f);
+    basis = glm::rotate (basis, angles.z, glm::vec3 (0, 0, 1));
+    basis = glm::rotate (basis, angles.y, glm::vec3 (0, 1, 0));
+    basis = glm::rotate (basis, angles.x, glm::vec3 (1, 0, 0));
+    basis = glm::rotate (basis, rotation.z, glm::vec3 (0, 0, 1));
+    basis = glm::rotate (basis, rotation.y, glm::vec3 (0, 1, 0));
+    basis = glm::rotate (basis, rotation.x, glm::vec3 (1, 0, 0));
+    const float z = std::atan2 (basis[0][1], basis[0][0]);
+    const float sine = std::sin (z);
+    const float cosine = std::cos (z);
+    return {std::atan2 (sine * basis[2][0] - cosine * basis[2][1], cosine * basis[1][1] - sine * basis[1][0]),
+            std::atan2 (-basis[0][2], std::sqrt (basis[2][2] * basis[2][2] + basis[1][2] * basis[1][2])),
+            z};
+}
+
 template <typename FindParent, typename FindAttachment>
 ResolvedSceneTransform resolveSceneTransform (
     const Data::Model::Object& object, FindParent&& findParent, FindAttachment&& findAttachment

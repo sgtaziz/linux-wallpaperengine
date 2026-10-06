@@ -9,6 +9,7 @@
 #include "Modules/MathModule.h"
 #include "Modules/ScriptModule.h"
 #include "Modules/ScriptModuleAssets.h"
+#include "LayerPropertyWrites.h"
 #include "MediaEventPayloads.h"
 #include "ScriptPropertiesObject.h"
 #include "SceneScriptGlobals.h"
@@ -152,6 +153,25 @@ static void jsToDynamicValue (JSContext* ctx, JSValue val, DynamicValue& source,
 
     if (tag == JS_TAG_NULL) {
 	source.update (DynamicValue::UpdateSource::Script);
+	return;
+    }
+
+    // Native passes init and update results through the host-property
+    // converter. A number returned for
+    // a vector property is broadcast to every component and the property
+    // stays a vector; angles skip the degree conversion on this path.
+    const auto sourceType = source.getType ();
+    if (JS_IsNumber (val) && (sourceType == DynamicValue::Vec2 || sourceType == DynamicValue::Vec3
+                              || sourceType == DynamicValue::Vec4)) {
+	const int count = sourceType == DynamicValue::Vec2 ? 2 : sourceType == DynamicValue::Vec3 ? 3 : 4;
+	float components[4] {};
+	if (WallpaperEngine::Scripting::convertLayerVector (ctx, val, count, false, components)
+	    != WallpaperEngine::Scripting::LayerWrite::Assign)
+	    return;
+	if (count == 2) source.update (glm::vec2 (components[0], components[1]), DynamicValue::Script);
+	else if (count == 3) source.update (glm::vec3 (components[0], components[1], components[2]), DynamicValue::Script);
+	else source.update (glm::vec4 (components[0], components[1], components[2],
+	                               rgbColorResult ? source.getVec4 ().a : components[3]), DynamicValue::Script);
 	return;
     }
 
