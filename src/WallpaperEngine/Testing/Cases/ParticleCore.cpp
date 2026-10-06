@@ -1545,8 +1545,9 @@ TEST_CASE ("Vortex variants remain distinct with current orthographic defaults",
     REQUIRE (newVortex->distanceInner->value->getFloat () == 500.0f);
     REQUIRE (newVortex->distanceOuter->value->getFloat () == 650.0f);
     REQUIRE (newVortex->speedInner->value->getFloat () == 2500.0f);
-    REQUIRE (oldVortex->axis->value->getVec3 () == glm::vec3 (1.0f, 0.0f, 0.0f));
-    REQUIRE (newVortex->axis->value->getVec3 () == glm::vec3 (1.0f, 0.0f, 0.0f));
+    // insert axis "0 0 1" when it is omitted.
+    REQUIRE (oldVortex->axis->value->getVec3 () == glm::vec3 (0.0f, 0.0f, 1.0f));
+    REQUIRE (newVortex->axis->value->getVec3 () == glm::vec3 (0.0f, 0.0f, 1.0f));
     const auto perspective = vortexDefaults (false);
     const auto automatic = vortexDefaults (true);
     const auto sized = vortexDefaults (true);
@@ -1688,6 +1689,11 @@ TEST_CASE ("Vortex variants differ in offset and axis transformation", "[particl
              == glm::vec3 (5.0f, 4.0f, 0.0f));
     REQUIRE (vortexCenter (controlPoint, offset, true)
              == glm::vec3 (3.0f, 4.0f, 0.0f));
+    // The control point is already in the reflected simulation basis; the
+    // authored legacy offset must follow it there.
+    REQUIRE (vortexCenter (controlPoint, { 2.0f, 5.0f, -1.0f }, false)
+             == glm::vec3 (5.0f, -1.0f, -1.0f));
+    REQUIRE (vortexCenter (controlPoint, { 2.0f, 5.0f, -1.0f }, true) == controlPoint);
     REQUIRE (vortexAxis (glm::vec3 (1.0f, 0.0f, 0.0f), basis, false)
              == glm::vec3 (1.0f, 0.0f, 0.0f));
     REQUIRE (vortexAxis (glm::vec3 (1.0f, 0.0f, 0.0f), basis, true)
@@ -1695,14 +1701,34 @@ TEST_CASE ("Vortex variants differ in offset and axis transformation", "[particl
     basis[0] = glm::vec3 (0.0f, 2.0f, 0.0f);
     REQUIRE (vortexAxis (glm::vec3 (1.0f, 0.0f, 0.0f), basis, true)
              == glm::vec3 (0.0f, 2.0f, 0.0f));
+    // Squared length 0.0004 is below the 0.001 threshold: native packs +Z.
     REQUIRE (normalizedVortexAxis ({ 0.0f, 0.02f, 0.0f })
-             == glm::vec3 (1.0f, 0.0f, 0.0f));
+             == glm::vec3 (0.0f, 0.0f, 1.0f));
     REQUIRE (normalizedVortexAxis ({ 0.0f, 0.04f, 0.0f })
              == glm::vec3 (0.0f, 1.0f, 0.0f));
     REQUIRE (vortexControlPointIndex (0) == 0);
     REQUIRE (vortexControlPointIndex (7) == 7);
     REQUIRE (vortexControlPointIndex (8) == 7);
     REQUIRE (vortexControlPointIndex (-1) == 7);
+}
+
+TEST_CASE ("Legacy vortex tangent keeps the unit-radial cross product magnitude", "[particle][vortex]") {
+    // Opcode 0x0f multiplies the radial by rsqrt(length^2) and crosses it with
+    // the unit axis without renormalizing. In simulation space the equivalent
+    // is converted axis cross converted radial over the radial length.
+    const glm::vec3 axis = toSimulationVector ({ 0.0f, 0.0f, 1.0f });
+    const auto inPlane = vortexLegacyTangent (toSimulationVector ({ 3.0f, 4.0f, 0.0f }), axis);
+    REQUIRE (std::abs (glm::length (inPlane) - 1.0f) < 0.000001f);
+    REQUIRE (glm::length (inPlane - vortexTangent (toSimulationVector ({ 3.0f, 4.0f, 0.0f }), axis))
+             < 0.000001f);
+    // A radial 4 units along the axis and 3 across it spins at 3/5 speed.
+    const glm::vec3 nativeRadial { 3.0f, 0.0f, 4.0f };
+    const auto offPlane = vortexLegacyTangent (toSimulationVector (nativeRadial), axis);
+    const glm::vec3 nativeTangent = glm::cross (nativeRadial / 5.0f, glm::vec3 (0.0f, 0.0f, 1.0f));
+    REQUIRE (glm::length (offPlane - toSimulationVector (nativeTangent)) < 0.000001f);
+    REQUIRE (std::abs (glm::length (offPlane) - 0.6f) < 0.000001f);
+    REQUIRE (vortexLegacyTangent (glm::vec3 (0.0f), axis) == glm::vec3 (0.0f));
+    REQUIRE (vortexLegacyTangent ({ 0.0f, 0.0f, 2.0f }, axis) == glm::vec3 (0.0f));
 }
 
 TEST_CASE ("Vortex v2 ring interpolation and pull use separate transition bands", "[particle][vortex]") {
@@ -4284,16 +4310,15 @@ TEST_CASE ("Native particle scene clock retains double precision and wraps on fl
 
 TEST_CASE ("Native turbulent birth uses one-dimensional gradient and phase-before-speed draws",
            "[particle][turbulent-birth]") {
-    using WallpaperEngine::Render::Utils::nativeParticleGradientNoise;
+    using WallpaperEngine::Render::Utils::nativeBirthParticleGradientNoise;
     using WallpaperEngine::Render::Utils::nativeTurbulentBirthVelocity;
     // Independently derived from the matching table by
     for (const auto [coordinate, expected] : std::array<std::pair<float, float>, 5> {{
              {0.125f, 0.3698422015f}, {-0.25f, -0.5559886098f},
              {1.5f, 0.1874707043f}, {10.125f, 0.0401031300f},
              {255.5f, -0.1874707043f}}}) {
-        const auto value = nativeParticleGradientNoise (coordinate);
-        REQUIRE (value.has_value ());
-        REQUIRE (*value == Catch::Approx (expected).margin (0.000002f));
+        REQUIRE (nativeBirthParticleGradientNoise (coordinate)
+                 == Catch::Approx (expected).margin (0.000002f));
     }
     const auto vapor = nativeTurbulentBirthVelocity (
         .22103399f, .5f, 0.0f, 0.0f, 250.0f, 0.0f, 1.25f, .5f,
@@ -4309,7 +4334,43 @@ TEST_CASE ("Native turbulent birth uses one-dimensional gradient and phase-befor
     REQUIRE (oblique->x == Catch::Approx (7.6423755f).margin (.002f));
     REQUIRE (oblique->y == Catch::Approx (241.53067f).margin (.002f));
     REQUIRE (oblique->z == Catch::Approx (506.56149f).margin (.002f));
-    REQUIRE_FALSE (nativeParticleGradientNoise (std::numeric_limits<float>::infinity ()).has_value ());
+    REQUIRE_FALSE (nativeTurbulentBirthVelocity (
+        .375f, .625f, 0.0f, .1f, 5.0f, 25.0f, std::numeric_limits<float>::infinity (),
+        1.0f, 1.0f, 0.0f, {0, 1, 0}, {0, 0, 1}).has_value ());
+}
+
+TEST_CASE ("Native turbulent birth matches original opcode 9 with rate-scaled timescale",
+           "[particle][turbulent-birth]") {
+    using WallpaperEngine::Render::Utils::nativeTurbulentBirthVelocity;
+    // Expected bits come from the original 2.8.42 case 9 run after
+    // patch opcode 2, seed 5489: one birth draw, then phase and speed draws.
+    const auto draw = [] (std::mt19937& rng) {
+        (void) nativeRandomUnit (rng);
+        const float phase = WallpaperEngine::Maths::randomFloat (rng, 0.0f, 1.0f);
+        return std::pair { phase, WallpaperEngine::Maths::randomFloat (rng, 0.0f, 1.0f) };
+    };
+    // The patched record timescale is rate * authored, with rate clamped to 0.01.
+    REQUIRE (std::bit_cast<uint32_t> (instanceRateTimeScale (1.0f, 0.2f)) == 0x3e4ccccdu);
+    REQUIRE (instanceRateTimeScale (3.0f, 0.001f) == 0.01f * 3.0f);
+    std::mt19937 smoke (5489);
+    const auto [smokePhase, smokeSpeed] = draw (smoke);
+    const auto slowed = nativeTurbulentBirthVelocity (
+        smokePhase, smokeSpeed, 0.0f, 0.1f, 250.0f, 10.0f, 3.25f,
+        instanceRateTimeScale (1.0f, 0.2f), 0.1f, 0.0f, {0, 1, 0}, {0, 0, 1});
+    REQUIRE (slowed.has_value ());
+    REQUIRE (std::bit_cast<uint32_t> (slowed->x) == std::bit_cast<uint32_t> (-0x1.7136c2p+3f));
+    REQUIRE (std::bit_cast<uint32_t> (slowed->y) == std::bit_cast<uint32_t> (0x1.02cd06p+8f));
+    // has no domain bound: at coordinate 1.2e6 native still adds a
+    // finite velocity (the oracle's velocity stream starts at 1).
+    std::mt19937 edge (5489);
+    (void) draw (edge);
+    const auto [edgePhase, edgeSpeed] = draw (edge);
+    const auto distant = nativeTurbulentBirthVelocity (
+        edgePhase, edgeSpeed, 0.0f, 0.1f, 5.0f, 25.0f, 0x1.86a002p+18f,
+        3.0f, 1.0f, 0.0f, {0, 1, 0}, {0, 0, 1});
+    REQUIRE (distant.has_value ());
+    REQUIRE (std::bit_cast<uint32_t> (1.0f + distant->x) == std::bit_cast<uint32_t> (-0x1.2974cap+4f));
+    REQUIRE (std::bit_cast<uint32_t> (1.0f + distant->y) == std::bit_cast<uint32_t> (0x1.6ae892p+4f));
 }
 
 TEST_CASE ("Birth noise kernels match captured native instruction bit vectors",
@@ -4364,10 +4425,8 @@ TEST_CASE ("Birth noise kernels match captured native instruction bit vectors",
         const float value = nativeBirthParticleFBMNoise (input, 2.0f, 3);
         if (std::isnan (input)) REQUIRE (std::isnan (value));
         else REQUIRE (value == input);
-        REQUIRE_FALSE (nativeParticleGradientNoise (input).has_value ());
     }
-    REQUIRE_FALSE (nativeParticleGradientNoise (1.0e6f).has_value ());
-    REQUIRE (std::bit_cast<uint32_t> (*nativeParticleGradientNoise (0.125f)) == 0x3ebd5bf5u);
+    REQUIRE (std::bit_cast<uint32_t> (nativeBirthParticleGradientNoise (0.125f)) == 0x3ebd5bf5u);
     // Existing seeded runtime kernels retain their accepted values/count policy.
     REQUIRE (remapSimplexNoise (0x3e800000u, 0.3f) == Catch::Approx (0.6666548f));
     REQUIRE (remapFBMNoise (0x3e800000u, 0.3f, 0) == remapFBMNoise (0x3e800000u, 0.3f, 1));
