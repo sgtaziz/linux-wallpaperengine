@@ -75,7 +75,8 @@ public:
     [[nodiscard]] static glm::mat4 makePerspectiveProjectionForScene (
         float width, float height, float authoredFov, float authoredNearZ, float authoredFarZ);
     [[nodiscard]] static glm::mat4 makeOrthogonalProjectionForScene (
-        float width, float height, float authoredNearZ, float authoredFarZ, const glm::vec3& eye);
+        float width, float height, float authoredNearZ, float authoredFarZ, const glm::vec3& eye,
+        float authoredZoom = 1.0f);
 
     [[nodiscard]] const glm::vec3& getCenter () const;
     [[nodiscard]] const glm::vec3& getEye () const;

@@ -705,6 +705,72 @@ TEST_CASE ("Script camera roll preserves native canvas-before-view zoom ordering
     }
 }
 
+TEST_CASE ("Unscripted orthographic projection applies general zoom about the canvas center",
+           "[scene][camera][script]") {
+    using WallpaperEngine::Render::Camera;
+    // Native scales every orthographic frame by general zoom
+    // times the camera-transform zoom, whether or not a script ever
+    // called setCameraTransforms. An authored general zoom must therefore move
+    // the unscripted camera exactly like the scripted path.
+    const glm::vec2 output (1280, 960);
+    const glm::vec3 centeredMarker (-80, 50, 0); // Authored marker (80,70), canvas 320x240.
+    const glm::vec3 eye (0.0f);
+    const auto view = glm::lookAt (eye, glm::vec3 (0, 0, -1), glm::vec3 (0, 1, 0));
+    const auto screen = [&] (const glm::mat4& projection) {
+        const auto clip = projection * view * glm::vec4 (centeredMarker, 1);
+        return (glm::vec2 (clip) / clip.w * 0.5f + 0.5f) * output;
+    };
+    // The same composite zoom as the native scripted fixture (1.5 x 1.25).
+    const auto zoomed = screen (Camera::makeOrthogonalProjectionForScene (320, 240, 0, 1000, eye, 1.875f));
+    REQUIRE (std::abs (zoomed.x - 39.5f) < 0.6f);
+    REQUIRE (std::abs (zoomed.y - 854.5f) < 0.6f);
+    const Camera::Transforms identity {{{0, 0, 0}, {0, 0, -1}, {0, 1, 0}}, 1.5f};
+    const auto scripted = Camera::makeProjectionForTransforms (320, 240, 50, 0, 1000, identity, true, 1.25f)
+        * Camera::renderLookAtForTransforms (identity.pose, true, 320, 240);
+    const auto scriptedClip = scripted * glm::vec4 (centeredMarker, 1);
+    const auto scriptedScreen = (glm::vec2 (scriptedClip) / scriptedClip.w * 0.5f + 0.5f) * output;
+    REQUIRE (std::abs (zoomed.x - scriptedScreen.x) < 0.01f);
+    REQUIRE (std::abs (zoomed.y - scriptedScreen.y) < 0.01f);
+    // A unit zoom keeps the existing unscripted projection.
+    REQUIRE (Camera::makeOrthogonalProjectionForScene (320, 240, 0, 1000, eye, 1.0f)
+             == Camera::makeOrthogonalProjectionForScene (320, 240, 0, 1000, eye));
+    // The canvas center stays fixed under zoom.
+    const auto center = Camera::makeOrthogonalProjectionForScene (320, 240, 0, 1000, eye, 1.53f)
+        * view * glm::vec4 (0, 0, 0, 1);
+    REQUIRE (std::abs (center.x) < 1e-6f);
+    REQUIRE (std::abs (center.y) < 1e-6f);
+}
+
+TEST_CASE ("Unscripted orthographic zoom scales the shaken view like native canvas-before-view zoom",
+           "[scene][camera][shake]") {
+    using WallpaperEngine::Render::Camera;
+    using WallpaperEngine::Render::Wallpapers::sceneAuthoredToCamera;
+    const auto flip = glm::scale (glm::mat4 (1), glm::vec3 (1, -1, 1));
+    const Camera::Pose root {{0, 0, 0}, {0, 0, -1}, {0, 1, 0}};
+    for (const auto size : {glm::vec2 (768, 432), glm::vec2 (311, 197)}) {
+        const glm::vec3 half (size.x * .5f, size.y * .5f, 0);
+        for (const auto& shake : {Camera::Shake {}, Camera::Shake {true, glm::vec3 (3.5f, -2.25f, 0)}}) {
+            const auto pose = shake.apply (root);
+            // zooms the projection after shook the view,
+            // so the shake translation is scaled with the canvas about its center.
+            const float zoom = 1.07f;
+            const auto nativeVP = glm::ortho (0.f, size.x, 0.f, size.y, -2000.f, 2000.f)
+                * glm::translate (glm::mat4 (1), half) * glm::scale (glm::mat4 (1), glm::vec3 (zoom, zoom, 1))
+                * glm::translate (glm::mat4 (1), -half) * glm::lookAt (pose.eye, pose.center, pose.up);
+            const auto glVP = Camera::makeOrthogonalProjectionForScene (
+                size.x, size.y, 0, 1000, shake.active ? pose.eye - shake.offset : pose.eye, zoom)
+                * (shake.active ? Camera::untransformedOrthogonalRenderLookAt (pose, shake, size.x, size.y)
+                                : glm::lookAt (pose.eye, pose.center, pose.up));
+            for (const auto point : {glm::vec4 (10, 80, 0, 1), glm::vec4 (size.x * .75f, size.y * .2f, 17, 1)}) {
+                const auto actual = flip * glVP * sceneAuthoredToCamera (size.x, size.y, true) * point;
+                const auto expected = nativeVP * point;
+                for (int axis = 0; axis < 4; ++axis)
+                    REQUIRE (actual[axis] == Catch::Approx (expected[axis]).margin (1e-5f));
+            }
+        }
+    }
+}
+
 TEST_CASE ("Camera API parser copies permissive vectors without coercing components", "[scene][camera][script]") {
     using WallpaperEngine::Scripting::readSceneCameraTransforms;
     JSRuntime* runtime = JS_NewRuntime ();
