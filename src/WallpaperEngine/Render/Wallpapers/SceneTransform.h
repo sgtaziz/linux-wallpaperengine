@@ -219,6 +219,18 @@ inline glm::vec2 sceneParallaxDisplacementTarget (glm::vec2 cursor, float amount
     return (cursor - glm::vec2 (0.5f)) * amount * influence;
 }
 
+// The pixel native's pointer is formed from: GetCursorPos and
+// ScreenToClient give an integer client POINT, which converts to
+// float before the divide, so the pointer moves in whole
+// pixels. Wayland reports subpixel positions. Takes the bottom-origin
+// framebuffer cursor and returns the top-origin viewport fraction of the
+// pixel it lies in, clamped to the viewport.
+inline glm::dvec2 sceneClientPixelFraction (glm::dvec2 framebufferCursor, const glm::ivec4& viewport) {
+    const double x = std::floor (framebufferCursor.x - viewport.x);
+    const double y = std::floor (viewport.y + viewport.w - framebufferCursor.y);
+    return {std::clamp (x / viewport.z, 0.0, 1.0), std::clamp (y / viewport.w, 0.0, 1.0)};
+}
+
 // Native: the client cursor over the viewport size (
 // ScreenToClient / divps), bound as g_PointerPosition
 // and scaled by the full projection size for camera parallax (,

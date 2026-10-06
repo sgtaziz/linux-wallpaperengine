@@ -903,11 +903,9 @@ void CScene::updateMouse (const glm::ivec4& viewport) {
     this->m_mousePositionNormalized.x = uvs.ustart + mouseX * (uvs.uend - uvs.ustart);
     this->m_mousePositionNormalized.y = uvs.vstart + normalizedMouseY * (uvs.vend - uvs.vstart);
 
-    // Invert previous normalization of Y to match what the shader expects
-    double mouseY = 1.0 - normalizedMouseY;
-
+    // The shader pointer is top-origin, in native's whole client pixels.
     this->m_mousePosition = sceneViewportCursor (
-        glm::vec2 (mouseX, mouseY), uvs.ustart, uvs.uend, uvs.vstart, uvs.vend);
+        glm::vec2 (sceneClientPixelFraction (position, viewport)), uvs.ustart, uvs.uend, uvs.vstart, uvs.vend);
 }
 
 void CScene::dispatchCursorEvents () {
