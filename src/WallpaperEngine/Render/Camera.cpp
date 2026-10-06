@@ -74,6 +74,31 @@ void Camera::advanceFrame (float dt, const std::vector<const SceneCamera*>& came
     m_frameZoom = m_scriptTransforms.zoom;
     m_pose = m_scriptTransforms.pose;
     m_runtimeOverride = false;
+    // Native is every camera object's own tick (active bit and parent
+    // chain, then the path list): it advances the queue and overwrites the
+    // object's local origin/angles, whether or not the object is later chosen.
+    const auto findParent = [this] (int id) -> const Object* {
+        const auto* parent = m_scene.getObject (id);
+        return parent ? &parent->getObject () : nullptr;
+    };
+    const auto findAttachment = [this] (const Object& parent, const std::string& attachment) {
+        return m_scene.getPuppetAttachmentTransform (parent.id, attachment);
+    };
+    for (const auto* camera : cameras) {
+        if (camera->paths.empty ()) continue;
+        const auto resolved = Wallpapers::resolveSceneTransform (*camera, findParent, findAttachment);
+        if (!resolved.visible) continue;
+        auto& state = m_objectPaths.try_emplace (camera, camera->paths).first->second;
+        const auto defaults = poseForWorldCamera (resolved.authoredMatrix);
+        // Native default center is 5 units along the view direction of the current world matrix.
+        const glm::vec3 forward = glm::normalize (defaults.eye - defaults.center);
+        const auto frame = advanceCameraObjectPaths (state, camera->sequentialQueue, m_scene.getParticleRandom (),
+            dt, m_isOrthogonal, {defaults.eye, defaults.eye - forward * 5.0f, glm::normalize (defaults.up)});
+        if (!frame) continue;
+        camera->origin->value->update (frame->eye, DynamicValue::Script);
+        camera->groupAngles->value->update (
+            cameraObjectAnglesForPose (frame->eye, frame->center, frame->up), DynamicValue::Script);
+    }
     for (auto it = cameras.rbegin (); it != cameras.rend (); ++it) {
         const auto* camera = *it;
         const auto resolved = Wallpapers::resolveSceneTransform (*camera,
@@ -89,6 +114,12 @@ void Camera::advanceFrame (float dt, const std::vector<const SceneCamera*>& came
         m_pose = poseForWorldCamera (resolved.authoredMatrix);
         m_frameFov = camera->fov->value->getFloat ();
         m_frameZoom = camera->zoom->value->getFloat ();
+        // Native takes zoom and fov from the current path item when
+        // the object has a valid current index, else from the object itself.
+        if (const auto* state = objectPathState (*camera); state && state->hasCurrent ()) {
+            m_frameFov = state->fov;
+            m_frameZoom = state->zoom;
+        }
         break;
     }
     if (!m_activeObject) {
@@ -114,6 +145,12 @@ void Camera::forgetCamera (const SceneCamera& camera) {
     // Destruction after scripts must not invalidate this frame's cached pose,
     // FOV or zoom. Admission is reconsidered at the next outer update.
     if (m_activeObject == &camera) m_activeObject = nullptr;
+    m_objectPaths.erase (&camera);
+}
+
+const CameraObjectPathState* Camera::objectPathState (const SceneCamera& camera) const {
+    const auto found = m_objectPaths.find (&camera);
+    return found == m_objectPaths.end () ? nullptr : &found->second;
 }
 
 const glm::vec3& Camera::getCenter () const { return m_pose.center; }

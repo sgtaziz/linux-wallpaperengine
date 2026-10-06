@@ -186,12 +186,28 @@ public:
     ~SceneModel () override = default;
 };
 
+/**
+ * One entry of a camera object's "paths" file: a timeline
+ * (options.fps/length/mode/startpaused) whose center/eye/up tracks have three
+ * channels each, plus optional scalar zoom and fov tracks. Tracks without keys
+ * leave the corresponding default untouched.
+ */
+struct SceneCameraObjectPath {
+    PropertyAnimation timeline;
+    std::array<PropertyAnimation, 3> vectors; // center, eye, up (channels c0..c2)
+    PropertyAnimation zoom;
+    PropertyAnimation fov;
+};
+
 /** Camera scene object; its pose and FOV can override the root scene camera. */
 struct SceneCameraData {
     std::string mode;
     std::string path;
     UserSettingUniquePtr fov;
     UserSettingUniquePtr zoom;
+    /** Native: "queuemode" is an enum {random = 0, sequential = 1}; anything else is random. */
+    bool sequentialQueue = false;
+    std::vector<SceneCameraObjectPath> paths;
 };
 
 class SceneCamera : public Object, public SceneCameraData {
