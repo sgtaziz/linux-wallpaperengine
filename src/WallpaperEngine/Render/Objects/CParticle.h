@@ -256,6 +256,7 @@ private:
     [[nodiscard]] DynamicValue* countOverrideValue () const;
     [[nodiscard]] DynamicValue* alphaOverrideValue () const;
     [[nodiscard]] DynamicValue* speedOverrideValue () const;
+    [[nodiscard]] DynamicValue* rateOverrideValue () const;
     [[nodiscard]] glm::vec3 instanceBirthRgbGain () const;
     [[nodiscard]] glm::vec3 instanceTintedColorEndpoint (const glm::vec3& authored) const;
     const Particle& m_particle;

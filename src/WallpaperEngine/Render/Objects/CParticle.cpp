@@ -604,6 +604,10 @@ DynamicValue* CParticle::speedOverrideValue () const {
     return sharedInstanceOverrideValue (&ParticleInstanceOverride::speed);
 }
 
+DynamicValue* CParticle::rateOverrideValue () const {
+    return sharedInstanceOverrideValue (&ParticleInstanceOverride::rate);
+}
+
 glm::vec3 CParticle::instanceBirthRgbGain () const {
     const CParticle* root = instanceOverrideOwner ();
     return ParticleCore::particleInstanceBirthRgbGain (
@@ -2537,6 +2541,7 @@ InitializerFunc CParticle::createTurbulentVelocityRandomInitializer (const Turbu
     // Native opcode-6 speed-range patches read the shared instance context
     // passed to static/event children.
     DynamicValue* speedOverride = speedOverrideValue ();
+    DynamicValue* rateOverride = rateOverrideValue ();
     const auto& projection = getScene ().getScene ().camera.projection;
     const glm::vec2 sceneSpeedDefaults = ParticleCore::turbulentVelocitySpeedDefaults (
         projection.isOrthogonal);
@@ -2546,7 +2551,7 @@ InitializerFunc CParticle::createTurbulentVelocityRandomInitializer (const Turbu
     const bool patchSpeedRange = (m_particle.flags & 0x10u) == 0;
     const auto* audioInitializer = &init;
     return [this, speedMin, speedMax, offsetVal, scaleVal, forwardVal,
-            timeScaleVal, phaseMinVal, phaseMaxVal, rightVal, speedOverride,
+            timeScaleVal, phaseMinVal, phaseMaxVal, rightVal, speedOverride, rateOverride,
             sceneSpeedDefaults, speedMinDefault, speedMaxDefault, patchSpeedRange,
             audioInitializer] (ParticleInstance& p) {
         // Native consumes phase then speed from the shared
@@ -2565,10 +2570,10 @@ InitializerFunc CParticle::createTurbulentVelocityRandomInitializer (const Turbu
         const auto velocity = Utils::nativeTurbulentBirthVelocity (
             phaseRandom, speedRandom, phaseMin, (phaseMaxVal->getFloat () - phaseMin) * phaseGain,
             speedRange.x, speedRange.y - speedRange.x, sceneTime,
-            timeScaleVal->getFloat (), scaleVal->getFloat (), offsetVal->getFloat (),
-            forwardVal->getVec3 (), rightVal->getVec3 ());
+            ParticleCore::instanceRateTimeScale (timeScaleVal->getFloat (), rateOverride->getFloat ()),
+            scaleVal->getFloat (), offsetVal->getFloat (), forwardVal->getVec3 (), rightVal->getVec3 ());
         if (!velocity) {
-            sLog.error ("Particle turbulent birth outside bounded gradient domain: ", m_particle.name);
+            sLog.error ("Particle turbulent birth angle is not finite: ", m_particle.name);
             return;
         }
         const glm::vec3 simulationVelocity = m_birthInitializerBasis
@@ -3191,6 +3196,7 @@ OperatorFunc CParticle::createTurbulenceOperator (const TurbulenceOperator& op) 
     DynamicValue* phaseMinValue = op.phaseMin->value.get ();
     DynamicValue* phaseMaxValue = op.phaseMax->value.get ();
     DynamicValue* speedOverride = speedOverrideValue ();
+    DynamicValue* rateOverride = rateOverrideValue ();
     const auto* blend = op.blendEnvelope ? &*op.blendEnvelope : nullptr;
     const auto& projection = getScene ().getScene ().camera.projection;
     const auto sceneDefaults = ParticleCore::turbulenceDefaults (projection.isOrthogonal);
@@ -3200,7 +3206,7 @@ OperatorFunc CParticle::createTurbulenceOperator (const TurbulenceOperator& op) 
     const bool bindSpeed = (m_particle.flags & 0x10u) == 0;
 
     return [this, scaleValue, speedMinValue, speedMaxValue, timeScaleValue,
-            maskValue, phaseMinValue, phaseMaxValue, speedOverride, blend,
+            maskValue, phaseMinValue, phaseMaxValue, speedOverride, rateOverride, blend,
             sceneDefaults, useSceneDefaults, bindSpeed, audioOperator = &op, reportedUnbounded = false] (
                std::vector<ParticleInstance>& particles, uint32_t count,
                const std::vector<ControlPointData>&, float,
@@ -3215,7 +3221,9 @@ OperatorFunc CParticle::createTurbulenceOperator (const TurbulenceOperator& op) 
         const float speedDelta = (authoredSpeedMax - authoredSpeedMin) * speedGain;
         const float phaseDelta = phaseMaxValue->getFloat () - phaseMinValue->getFloat ();
         const float scale = useSceneDefaults.scale ? sceneDefaults.scale : scaleValue->getFloat ();
-        const float timeScale = useSceneDefaults.timeScale ? sceneDefaults.timeScale : timeScaleValue->getFloat ();
+        const float timeScale = ParticleCore::instanceRateTimeScale (
+            useSceneDefaults.timeScale ? sceneDefaults.timeScale : timeScaleValue->getFloat (),
+            rateOverride->getFloat ());
         const glm::vec3 mask = useSceneDefaults.mask ? sceneDefaults.mask : maskValue->getVec3 ();
         const float sceneTime = getScene ().getParticleSceneTime ();
         const auto envelope = operatorEnvelope (blend);
@@ -3303,7 +3311,7 @@ OperatorFunc CParticle::createVortexOperator (const VortexOperator& op) {
 
 	glm::vec3 axis = axisValue->getVec3 ();
 	glm::vec3 offset = offsetValue->getVec3 ();
-	// Both factories normalize the authored axis (or fall back to +X) before
+	// Both factories normalize the authored axis (or fall back to +Z) before
 	// v2 transforms it by the active control-point basis. Do not renormalize
 	// afterward: the native interpreter consumes the transformed components.
 	axis = ParticleCore::normalizedVortexAxis (axis);
@@ -3329,7 +3337,7 @@ OperatorFunc CParticle::createVortexOperator (const VortexOperator& op) {
 	    center = ParticleCore::vortexCenter (cp.position, offset, v2);
 	    axis = ParticleCore::vortexAxis (axis, cp.basis, v2);
 	} else {
-	    center = v2 ? glm::vec3 (0.0f) : offset;
+	    center = v2 ? glm::vec3 (0.0f) : ParticleCore::toSimulationVector (offset);
 	}
 
 	for (uint32_t i = 0; i < count; i++) {
@@ -3366,7 +3374,8 @@ OperatorFunc CParticle::createVortexOperator (const VortexOperator& op) {
 	    }
 
 	    // Compute tangent direction (perpendicular to both axis and radial vector)
-	    glm::vec3 tangent = ParticleCore::vortexTangent (radialVector, axis);
+	    glm::vec3 tangent = v2 ? ParticleCore::vortexTangent (radialVector, axis)
+	        : ParticleCore::vortexLegacyTangent (radialVector, axis);
 	    // A zero tangent does not suppress the v2 radial correction or ring pull.
 
 	    // Calculate spin speed and apply forces based on mode

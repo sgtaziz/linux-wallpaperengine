@@ -1609,7 +1609,8 @@ ParticleOperatorUniquePtr ObjectParser::parseParticleOperator (
 	    },
 	    it.optional ("controlpoint", 0),
 	    it.optional ("flags", 0), // 1 = infinite axis, 2 = maintain distance, 4 = ring shape
-	    it.user ("axis", properties, glm::vec3 (1.0f, 0.0f, 0.0f)),
+	    // insert axis "0 0 1" for both variants.
+	    it.user ("axis", properties, glm::vec3 (0.0f, 0.0f, 1.0f)),
 	    it.user ("offset", properties, glm::vec3 (0.0f)), it.user ("distanceinner", properties, 500.0f),
 	    it.user ("distanceouter", properties, 650.0f), it.user ("speedinner", properties, 2500.0f),
 	    it.user ("speedouter", properties, 0.0f), it.user ("centerforce", properties, 1.0f),

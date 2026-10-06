@@ -33,7 +33,8 @@ inline constexpr std::array<uint8_t, 256> nativeParticleGradientTable {
     0xde, 0x72, 0x43, 0x1d, 0x18, 0x48, 0xf3, 0x8d, 0x80, 0xc3, 0x4e, 0x42, 0xd7, 0x3d, 0x9c, 0xb4,
 };
 
-// Birth remap transforms 5/6 with unchecked IEEE results.
+// Birth remap transforms 5/6 and opcode 9 with unchecked IEEE
+// results; it is one-dimensional, unrelated to the turbulence simplex.
 // Emulate CVTTSS2SI's masked-invalid sentinel without an undefined C++ cast,
 // then perform the native wrapping predecessor and low-byte table lookup.
 inline float nativeBirthParticleGradientNoise (float coordinate) {
@@ -73,29 +74,6 @@ inline float nativeBirthParticleFBMNoise (float coordinate, float frequency, int
     return total / amplitudeSum;
 }
 
-// Native is one-dimensional gradient noise, unrelated to the
-// 3D simplex primitive used by the turbulence operator.
-inline std::optional<float> nativeParticleGradientNoise (float coordinate) {
-    if (!std::isfinite (coordinate) || std::abs (coordinate) >= 1.0e6f)
-        return std::nullopt; // preserve the accepted bounded opcode-9 evaluation policy
-    const int cell = static_cast<int> (std::floor (coordinate));
-    const float fraction = coordinate - static_cast<float> (cell);
-    const float previous = fraction - 1.0f;
-    const auto gradient = [] (uint8_t hash) {
-        const float magnitude = static_cast<float> ((hash & 7u) + 1u);
-        return (hash & 8u) ? -magnitude : magnitude;
-    };
-    const float g0 = gradient (nativeParticleGradientTable[static_cast<uint8_t> (cell)]);
-    const float g1 = gradient (nativeParticleGradientTable[static_cast<uint8_t> (cell + 1)]);
-    float a0 = 1.0f - fraction * fraction;
-    a0 *= a0;
-    a0 *= a0;
-    float a1 = 1.0f - previous * previous;
-    a1 *= a1;
-    a1 *= a1;
-    return ((g1 * previous) * a1 + (g0 * fraction) * a0) * 0.395f;
-}
-
 // Native initializer opcode 9: phase and speed each consume one independent
 // scene MT draw. Work in authored XYZ; callers reflect the result into Linux
 // particle storage. No direction normalization or XY projection occurs here.
@@ -104,9 +82,9 @@ inline std::optional<glm::vec3> nativeTurbulentBirthVelocity (
     float speedMin, float speedDelta, float sceneTime, float timeScale,
     float scale, float offset, glm::vec3 forward, glm::vec3 right) {
     const float coordinate = ((phaseRandom * phaseDelta + phaseMin) + sceneTime) * timeScale;
-    const auto noise = nativeParticleGradientNoise (coordinate);
-    if (!noise) return std::nullopt;
-    const float angle = ((*noise * glm::pi<float> ()) * scale) + offset;
+    // without a domain bound.
+    const float noise = nativeBirthParticleGradientNoise (coordinate);
+    const float angle = ((noise * glm::pi<float> ()) * scale) + offset;
     if (!std::isfinite (angle) || glm::dot (right, right) == 0.0f)
         return std::nullopt;
     const glm::vec3 rotated = glm::mat3 (glm::rotate (

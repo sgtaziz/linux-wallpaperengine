@@ -611,19 +611,15 @@ inline glm::vec3 vortexV2RadialCorrection (glm::vec3 currentRadial, glm::vec3 pr
         * centerForce / time.integration);
 }
 
-inline glm::vec3 vortexCenter (glm::vec3 controlPointPosition,
-                               glm::vec3 authoredOffset, bool v2) {
-    return controlPointPosition + (v2 ? glm::vec3 (0.0f) : authoredOffset);
-}
-
 inline glm::vec3 vortexAxis (glm::vec3 authoredAxis, glm::mat3 controlPointBasis, bool v2) {
     return v2 ? controlPointBasis * authoredAxis : authoredAxis;
 }
 
+// Both factories fall back to +Z below a squared length of 0.001
 inline glm::vec3 normalizedVortexAxis (glm::vec3 authoredAxis) {
     const float lengthSquared = glm::dot (authoredAxis, authoredAxis);
     return lengthSquared >= 0.001f && std::isfinite (lengthSquared)
-        ? authoredAxis / std::sqrt (lengthSquared) : glm::vec3 (1.0f, 0.0f, 0.0f);
+        ? authoredAxis / std::sqrt (lengthSquared) : glm::vec3 (0.0f, 0.0f, 1.0f);
 }
 
 // The native radial cross axis term changes handedness under the renderer's
@@ -635,6 +631,13 @@ inline glm::vec3 toSimulationVector (glm::vec3 authored) {
 
 inline glm::vec3 toAuthoredVector (glm::vec3 simulation) {
     return toSimulationVector (simulation); // Y reflection is its own inverse
+}
+
+// Opcode 0x0f adds the authored offset to the local CP translation; v2 has no
+// offset field. Both enter the reflected simulation basis together.
+inline glm::vec3 vortexCenter (glm::vec3 controlPointPosition,
+                               glm::vec3 authoredOffset, bool v2) {
+    return controlPointPosition + (v2 ? glm::vec3 (0.0f) : toSimulationVector (authoredOffset));
 }
 
 // Native local control-point translation is authored alongside emitter origin.
@@ -710,6 +713,14 @@ inline glm::vec3 vortexTangent (glm::vec3 radial, glm::vec3 axis) {
     const float length = glm::length (tangent);
     return length > 0.001f && std::isfinite (length)
         ? tangent / length : glm::vec3 (0.0f);
+}
+
+// Opcode 0x0f crosses the unit radial with the unit axis and
+// does not renormalize, so a radial off the axis plane spins slower.
+inline glm::vec3 vortexLegacyTangent (glm::vec3 radial, glm::vec3 axis) {
+    const float length = glm::length (radial);
+    return length > 0.0f && std::isfinite (length)
+        ? glm::cross (axis, radial) / length : glm::vec3 (0.0f);
 }
 
 inline int vortexControlPointIndex (int authoredIndex) {
@@ -1364,6 +1375,12 @@ inline void restoreOperatorStreams (float& alpha, float& size, float initialAlph
 // the node clock. This does not change an emitter's authored births/second.
 inline float nodeRate (float authoredRate) {
     return std::isfinite (authoredRate) ? std::max (authoredRate, 0.01f) : 0.01f;
+}
+
+// always emits patch opcode 2 for turbulentvelocityrandom and
+// turbulence: timescale *= the clamped instance rate.
+inline float instanceRateTimeScale (float authoredTimeScale, float instanceRate) {
+    return nodeRate (instanceRate) * authoredTimeScale;
 }
 
 struct EmitterScheduleConfig {
