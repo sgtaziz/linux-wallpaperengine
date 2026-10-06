@@ -3681,6 +3681,46 @@ TEST_CASE ("Rope trail history follows surviving particles and samples once per 
     REQUIRE (history.at (1, 0) == glm::vec3 (102.0f, 202.0f, 302.0f));
 }
 
+TEST_CASE ("Rope trail uvscrolling pins the texture to the world", "[particle][rope]") {
+    // writes the trail position of history point k as
+    // k - scroll, the per-slot u16 counter that every history sample bumps; ZR-1b
+    // measured the stripes world-pinned natively and head-locked without it.
+    RopeTrailHistory history (2, 4);
+    history.born (0, { 0.0f, 0.0f, 0.0f });
+    history.born (1, { 1.0f, 0.0f, 0.0f });
+    REQUIRE (history.scrolls[0] == 0);
+    history.sample (0, { 1.0f, 0.0f, 0.0f });
+    history.sample (0, { 2.0f, 0.0f, 0.0f });
+    REQUIRE (history.scrolls[0] == 2);
+    history.reorder ({ 1, 0 });
+    REQUIRE (history.scrolls[0] == 0);
+    REQUIRE (history.scrolls[1] == 2);
+    history.compact (0, 1);
+    REQUIRE (history.scrolls[0] == 2);
+    history.born (0, { 0.0f, 0.0f, 0.0f });
+    REQUIRE (history.scrolls[0] == 0);
+
+    const float maxCount = ropeTrailScrollMaxCount (4, 1.0f);
+    for (uint16_t scroll = 0; scroll < 3; ++scroll) {
+        for (uint32_t segment = 1; segment < 3; ++segment) {
+            // One more sample shifts every history point one segment back and
+            // bumps the counter, so each point keeps its texture coordinate.
+            const auto before = ropeTrailSegmentUV (segment, 4.0f, maxCount, 0.5f, true, scroll);
+            const auto after = ropeTrailSegmentUV (segment + 1, 4.0f, maxCount, 0.5f, true, scroll + 1);
+            REQUIRE (after.start == Catch::Approx (before.start));
+            REQUIRE (after.end == Catch::Approx (before.end));
+        }
+    }
+    // Without uvscrolling the counter does not exist natively: the plain mode
+    // stays head-locked whatever the history has sampled.
+    const auto plain = ropeTrailSegmentUV (2, 4.0f, 3.5f, 0.5f, false, 0);
+    const auto sampled = ropeTrailSegmentUV (2, 4.0f, 3.5f, 0.5f, false, 7);
+    REQUIRE (sampled.start == plain.start);
+    REQUIRE (sampled.end == plain.end);
+    REQUIRE (ropeTrailPosition (3, 5, true) == -2.0f);
+    REQUIRE (ropeTrailPosition (3, 5, false) == 3.0f);
+}
+
 TEST_CASE ("Rope trail allocation covers independent history rows", "[particle][rope][boundary]") {
     const auto geometry = ropeTrailGeometry (3, 4, 2.0f, 26);
     REQUIRE (geometry.has_value ());

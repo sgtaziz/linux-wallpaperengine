@@ -46,6 +46,10 @@ inline std::vector<ScriptPropertyBinding> scriptPropertyBindings (const Sound& s
         {"angles", *sound.groupAngles->value},
     };
     if (sound.volume && sound.volume->value) result.push_back ({"volume", *sound.volume->value});
+    // attenuation and mindistance are host float properties
+    // of the same table; the sound only reads them at play().
+    if (sound.attenuation && sound.attenuation->value) result.push_back ({"attenuation", *sound.attenuation->value});
+    if (sound.minDistance && sound.minDistance->value) result.push_back ({"mindistance", *sound.minDistance->value});
     return result;
 }
 
