@@ -1,5 +1,6 @@
 #include "CText.h"
 #include "TextRaster.h"
+#include "TextDrawState.h"
 #include "TextCodepoints.h"
 #include "TextShaping.h"
 #include "TextLayout.h"
@@ -1173,6 +1174,7 @@ void CText::render () {
         glActiveTexture (GL_TEXTURE0);
     }
 
+    applyTextDrawState ();
     glBindVertexArray (m_vao);
     glDrawArrays (GL_TRIANGLES, 0, 6);
     if (useEffects) {
@@ -1193,6 +1195,7 @@ void CText::render () {
 	glUniform1i (m_uEffectFinal, 1);
 	glActiveTexture (GL_TEXTURE0);
 	glBindTexture (GL_TEXTURE_2D, effected->getTextureID (0));
+	applyTextDrawState ();
 	glBindVertexArray (m_vao);
 	glDrawArrays (GL_TRIANGLES, 0, 6);
     }
