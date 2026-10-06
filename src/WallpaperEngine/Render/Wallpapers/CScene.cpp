@@ -201,7 +201,7 @@ CScene::CScene (
     // The native scene loader reads the general table before the object list,
     // so general-setting scripts and animations are queued ahead of layers.
     for (const auto& binding : Scripting::sceneGeneralScriptBindings (*scene))
-        this->m_scriptEngine->queueSceneScript (std::string ("general_") + binding.name, binding.value);
+        this->m_scriptEngine->queueSceneScript (std::string ("general_") + binding.name, binding.value, binding.name);
 
     // create all objects based off their dependencies
     for (const auto& object : scene->objects) {
@@ -1058,6 +1058,16 @@ glm::vec3 CScene::getLayerParallaxOffset (const Object& object) const {
 }
 
 const std::vector<CObject*>& CScene::getObjectsByRenderOrder () const { return this->m_objectsByRenderOrder; }
+
+std::optional<int64_t> CScene::sceneObjectIndex (const CObject& object) const {
+    // Native creates loaded objects in their scene.json array order; layers a
+    // script creates are not in that array.
+    if (isScriptCreatedLayer (object)) return std::nullopt;
+    const auto& objects = getScene ().objects;
+    for (size_t index = 0; index < objects.size (); ++index)
+        if (objects[index]->id == object.getId ()) return static_cast<int64_t> (index);
+    return std::nullopt;
+}
 
 bool CScene::isScriptCreatedLayer (const CObject& object) const {
     return m_scriptObjectData.contains (object.getId ());

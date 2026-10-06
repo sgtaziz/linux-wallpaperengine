@@ -8,6 +8,7 @@
 #include "Modules/ScriptModule.h"
 #include "Modules/ScriptModuleAssets.h"
 #include "SceneObject.h"
+#include "ScriptDispatchOrder.h"
 
 #include <chrono>
 #include <future>
@@ -112,7 +113,7 @@ public:
      * @return The modified value from update(), or a copy of currentValue on error
      */
     void queueScript (const std::string& key, DynamicValue& currentValue, ScriptableObject& object,
-                      std::optional<size_t> effectOwner = std::nullopt,
+                      ScriptPlacement placement, std::optional<size_t> effectOwner = std::nullopt,
                       const ShaderConstantMap* materialOwner = nullptr);
     /**
      * Queue the script or property animation of a scene general setting.
@@ -124,7 +125,7 @@ public:
      * thisLayer and thisObject are undefined while these modules run. No
      * installed general-setting script reads them.
      */
-    void queueSceneScript (const std::string& key, DynamicValue& currentValue);
+    void queueSceneScript (const std::string& key, DynamicValue& currentValue, std::string jsonKey);
 
     /**
      * Runs a frame tick in the javascript engine. Dispatches any pending events,
@@ -200,7 +201,8 @@ public:
 private:
     JSValue call (JSValue module, int argc, JSValueConst argv[], const char* name);
     void queueModule (const std::string& key, DynamicValue& currentValue, ScriptableObject* object,
-                      std::optional<size_t> effectOwner, const ShaderConstantMap* materialOwner);
+                      ScriptPlacement placement, std::optional<size_t> effectOwner,
+                      const ShaderConstantMap* materialOwner);
     void activateLayer (const LoadedModule& module);
 
     void installBuiltins ();
@@ -227,6 +229,8 @@ private:
     std::map<std::string, std::unique_ptr<Modules::ScriptModule>> m_modules = {};
     std::unique_ptr<Modules::ScriptModuleAssets> m_moduleAssets;
     std::map<std::string, LoadedModule> m_scriptModules = {};
+    // Every callback walks the modules in native registration order.
+    ScriptDispatchOrder m_dispatchOrder;
     size_t m_nextScriptQueueOrder = 0;
     struct AnimatedValue { DynamicValue* value; const ScriptableObject* object; };
     std::map<std::string, AnimatedValue> m_animatedValues = {};

@@ -370,6 +370,7 @@ ScriptEngine::~ScriptEngine () {
     this->m_scriptPropertiesObject.reset ();
     this->m_modules.clear ();
     this->m_scriptModules.clear ();
+    m_dispatchOrder.clear ();
 
     // QuickJS may keep layer/vector objects in module/global cycles until
     // context or runtime destruction. Release retained JS handles now, but
@@ -397,7 +398,10 @@ ScriptEngine::~ScriptEngine () {
 void ScriptEngine::shutdown () {
     m_animatedValues.clear ();
     if (!this->m_context || this->m_scriptModules.empty ()) return;
-    for (auto& module : this->m_scriptModules | std::views::values) {
+    for (const auto& key : m_dispatchOrder.snapshot ()) {
+	const auto found = m_scriptModules.find (key);
+	if (found == m_scriptModules.end ()) continue;
+	auto& module = found->second;
 	this->m_runningModule = &module;
 	this->activateLayer (module);
 	JSValue result = this->call (module.module, 0, nullptr, "destroy");
@@ -408,6 +412,7 @@ void ScriptEngine::shutdown () {
 	JS_FreeValue (this->m_context, module.thisObject);
     }
     this->m_scriptModules.clear ();
+    m_dispatchOrder.clear ();
     this->m_runningModule = nullptr;
     JS_SetPropertyStr (this->m_context, this->m_globalThis, "thisLayer", JS_UNDEFINED);
     JS_SetPropertyStr (this->m_context, this->m_globalThis, "thisObject", JS_UNDEFINED);
@@ -436,6 +441,7 @@ void ScriptEngine::unregisterObject (const ScriptableObject& object) {
 	JS_FreeValue (this->m_context, it->second.module);
 	JS_FreeValue (this->m_context, it->second.layer);
 	JS_FreeValue (this->m_context, it->second.thisObject);
+	m_dispatchOrder.erase (it->first);
 	it = this->m_scriptModules.erase (it);
     }
     JS_FreeValue (this->m_context, activeLayer);
@@ -467,8 +473,10 @@ void ScriptEngine::destroyObjectModules (const ScriptableObject& object) {
         }
     });
     std::vector<std::string> keys;
-    for (const auto& [key, module] : m_scriptModules)
-        if (module.object == &object) keys.push_back (key);
+    for (const auto& key : m_dispatchOrder.snapshot ())
+        if (const auto found = m_scriptModules.find (key);
+            found != m_scriptModules.end () && found->second.object == &object)
+            keys.push_back (key);
     for (const auto& key : keys) {
         const auto found = m_scriptModules.find (key);
         if (found == m_scriptModules.end ()) continue;
@@ -487,8 +495,10 @@ void ScriptEngine::dispatchCursorEvent (const ScriptableObject& object, const ch
                                         const glm::vec3& world, const glm::vec3& local) {
     if (!m_context) return;
     std::vector<std::string> keys;
-    for (const auto& [key, module] : m_scriptModules)
-        if (module.object == &object) keys.push_back (key);
+    for (const auto& key : m_dispatchOrder.snapshot ())
+        if (const auto found = m_scriptModules.find (key);
+            found != m_scriptModules.end () && found->second.object == &object)
+            keys.push_back (key);
     auto* previousModule = m_runningModule;
     JSValue previousLayer = JS_GetPropertyStr (m_context, m_globalThis, "thisLayer");
     JSValue previousObject = JS_GetPropertyStr (m_context, m_globalThis, "thisObject");
@@ -820,18 +830,18 @@ void ScriptEngine::activateLayer (const LoadedModule& module) {
 }
 
 void ScriptEngine::queueScript (const std::string& key, DynamicValue& currentValue,
-                                ScriptableObject& object, std::optional<size_t> effectOwner,
-                                const ShaderConstantMap* materialOwner) {
-    queueModule (key, currentValue, &object, effectOwner, materialOwner);
+                                ScriptableObject& object, ScriptPlacement placement,
+                                std::optional<size_t> effectOwner, const ShaderConstantMap* materialOwner) {
+    queueModule (key, currentValue, &object, std::move (placement), effectOwner, materialOwner);
 }
 
-void ScriptEngine::queueSceneScript (const std::string& key, DynamicValue& currentValue) {
-    queueModule (key, currentValue, nullptr, std::nullopt, nullptr);
+void ScriptEngine::queueSceneScript (const std::string& key, DynamicValue& currentValue, std::string jsonKey) {
+    queueModule (key, currentValue, nullptr, ScriptPlacement {.key = std::move (jsonKey)}, std::nullopt, nullptr);
 }
 
 void ScriptEngine::queueModule (const std::string& key, DynamicValue& currentValue,
-                                ScriptableObject* object, std::optional<size_t> effectOwner,
-                                const ShaderConstantMap* materialOwner) {
+                                ScriptableObject* object, ScriptPlacement placement,
+                                std::optional<size_t> effectOwner, const ShaderConstantMap* materialOwner) {
     if (currentValue.getAnimation ())
         m_animatedValues.try_emplace (key, AnimatedValue {&currentValue, object});
     const auto source = currentValue.getScriptSource ();
@@ -945,6 +955,12 @@ void ScriptEngine::queueModule (const std::string& key, DynamicValue& currentVal
 	return;
     }
     ownerGuard.cancel ();
+    // General settings, then scene objects by array index; layers created by
+    // scripts are appended.
+    const auto objectIndex = !object ? ScriptDispatchRank::kGeneral
+        : m_scene.sceneObjectIndex (*object).value_or (ScriptDispatchRank::kAppended);
+    m_dispatchOrder.insert (key, ScriptDispatchRank {
+        .objectIndex = objectIndex, .placement = std::move (placement), .queueOrder = m_nextScriptQueueOrder});
     ++m_nextScriptQueueOrder;
 
     // init/update are deferred until the first scene tick, after all layers
@@ -990,21 +1006,13 @@ void ScriptEngine::tick () {
 
     // A module can create a layer whose setup queues another module. Schedule
     // modules present at the start of the tick, so a child begins on the next
-    // frame regardless of its lexical key order in the map.
-    std::vector<std::string> scheduled;
-    scheduled.reserve (m_scriptModules.size ());
-    for (const auto& item : m_scriptModules) scheduled.push_back (item.first);
-    // Initialize the frozen set in registration order. An authored child can
-    // snapshot a value initialized by its parent even when its property name
-    // sorts first lexically (for example color_928 before scale_920).
+    // frame. Native init and update both walk the registration list.
+    const std::vector<std::string> scheduled = m_dispatchOrder.snapshot ();
     std::vector<std::string> pendingInit;
     for (const auto& key : scheduled)
         if (const auto found = m_scriptModules.find (key);
             found != m_scriptModules.end () && !found->second.initialized)
             pendingInit.push_back (key);
-    std::sort (pendingInit.begin (), pendingInit.end (), [this] (const auto& left, const auto& right) {
-        return m_scriptModules.at (left).queueOrder < m_scriptModules.at (right).queueOrder;
-    });
     JSValue initialUserProperties = JS_UNDEFINED;
     ScopeGuard propertiesGuard ([this, &initialUserProperties] {
         JS_FreeValue (m_context, initialUserProperties);
@@ -1055,8 +1063,7 @@ void ScriptEngine::tick () {
 
     m_initialSceneTickCompleted = true;
 
-    // Keep the established update order; only the one-time initialization
-    // phase needs authored construction dependencies.
+    // update() walks the same native registration order.
     for (const auto& key : scheduled) {
 	const auto found = m_scriptModules.find (key);
 	if (found == m_scriptModules.end ()) continue;
@@ -1099,9 +1106,10 @@ void ScriptEngine::notifyScreenResize (int width, int height) {
     }
     ScopeGuard sizeGuard ([this, size] { JS_FreeValue (m_context, size); });
     std::vector<std::string> scheduled;
-    scheduled.reserve (m_scriptModules.size ());
-    for (const auto& [key, module] : m_scriptModules)
-        if (module.initialized) scheduled.push_back (key);
+    for (const auto& key : m_dispatchOrder.snapshot ())
+        if (const auto found = m_scriptModules.find (key);
+            found != m_scriptModules.end () && found->second.initialized)
+            scheduled.push_back (key);
     for (const auto& key : scheduled) {
         const auto found = m_scriptModules.find (key);
         if (found == m_scriptModules.end ()) continue;
@@ -1161,9 +1169,7 @@ void ScriptEngine::notifyMediaUpdate (const Media::MediaSource::MediaInfo& media
     JSValue mediaTimelineArgs[] = { events.timeline () };
     JSValue mediaThumbnailArgs[] = { events.thumbnail () };
 
-	std::vector<std::string> scheduled;
-	scheduled.reserve (m_scriptModules.size ());
-	for (const auto& item : m_scriptModules) scheduled.push_back (item.first);
+	const std::vector<std::string> scheduled = m_dispatchOrder.snapshot ();
 	for (const auto& key : scheduled) {
 	    const auto found = m_scriptModules.find (key);
 	    if (found == m_scriptModules.end ()) continue;
