@@ -1176,8 +1176,14 @@ void CText::render () {
     }
 
     applyTextDrawState ();
-    glBindVertexArray (m_vao);
-    glDrawArrays (GL_TRIANGLES, 0, 6);
+    {
+	// The offscreen effect target has no scene depth: never test there.
+	const bool depthTest = !useEffects
+	    && textDepthTestEnabled (getScene ().getCamera ().isOrthogonal (), m_text.depthTest);
+	const TextDepthState depthState (depthTest);
+	glBindVertexArray (m_vao);
+	glDrawArrays (GL_TRIANGLES, 0, 6);
+    }
     if (useEffects) {
 	const auto effected = runEffects ();
 	glBindFramebuffer (GL_FRAMEBUFFER, sceneTarget->getFramebuffer ());
@@ -1197,6 +1203,8 @@ void CText::render () {
 	glActiveTexture (GL_TEXTURE0);
 	glBindTexture (GL_TEXTURE_2D, effected->getTextureID (0));
 	applyTextDrawState ();
+	const TextDepthState depthState (
+	    textDepthTestEnabled (getScene ().getCamera ().isOrthogonal (), m_text.depthTest));
 	glBindVertexArray (m_vao);
 	glDrawArrays (GL_TRIANGLES, 0, 6);
     }

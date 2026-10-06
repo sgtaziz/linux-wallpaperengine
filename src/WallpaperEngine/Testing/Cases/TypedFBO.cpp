@@ -2,6 +2,8 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/generators/catch_generators.hpp>
 
+#include <tuple>
+
 #include "WallpaperEngine/Render/FBOProvider.h"
 #include "WallpaperEngine/Render/DepthTarget.h"
 #include "WallpaperEngine/Render/FramebufferCapture.h"
@@ -2061,5 +2063,44 @@ TEST_CASE ("Shipped lit image shaders compile live tube loops", "[render][shader
         for (const char* uniform : {"g_LTube_Color", "g_LTube_OriginA", "g_LTube_OriginB"})
             REQUIRE (glGetUniformLocation (program, uniform) >= 0);
         glDeleteProgram (program);
+    }
+}
+
+TEST_CASE ("Text depth state follows the native rule and never writes depth", "[render][text]") {
+    using WallpaperEngine::Render::Objects::TextDepthState;
+    using WallpaperEngine::Render::Objects::textDepthTestEnabled;
+    // Native: tested only in a perspective scene with depthtest not "disabled".
+    REQUIRE (textDepthTestEnabled (false, true));
+    REQUIRE_FALSE (textDepthTestEnabled (false, false));
+    REQUIRE_FALSE (textDepthTestEnabled (true, true));
+    REQUIRE_FALSE (textDepthTestEnabled (true, false));
+
+    SurfacelessGL gl;
+    REQUIRE (gl.ready);
+    const auto state = [] () {
+	GLint func = 0;
+	glGetIntegerv (GL_DEPTH_FUNC, &func);
+	GLboolean mask = GL_FALSE;
+	glGetBooleanv (GL_DEPTH_WRITEMASK, &mask);
+	return std::tuple<bool, GLint, bool> (glIsEnabled (GL_DEPTH_TEST) == GL_TRUE, func, mask == GL_TRUE);
+    };
+    // A model pass leaves test off/on and depthwrite on; text must not inherit either.
+    for (const bool before : {false, true}) {
+	for (const bool test : {false, true}) {
+	    if (before) glEnable (GL_DEPTH_TEST); else glDisable (GL_DEPTH_TEST);
+	    glDepthFunc (GL_GREATER);
+	    glDepthMask (GL_TRUE);
+	    {
+		const TextDepthState scope (test);
+		const auto [enabled, func, mask] = state ();
+		REQUIRE (enabled == test);
+		if (test) REQUIRE (func == GL_LEQUAL);
+		REQUIRE_FALSE (mask);
+	    }
+	    const auto [enabled, func, mask] = state ();
+	    REQUIRE (enabled == before);
+	    REQUIRE (func == GL_GREATER);
+	    REQUIRE (mask);
+	}
     }
 }

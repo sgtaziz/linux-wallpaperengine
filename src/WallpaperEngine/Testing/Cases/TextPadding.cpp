@@ -216,6 +216,21 @@ TEST_CASE ("Text row-limit ellipsis is an authored opt-in flag", "[scene][parser
     REQUIRE_FALSE (dynamic_cast<const Text&> (*disabled).limitUseEllipsis->value->getBool ());
 }
 
+TEST_CASE ("Text depthtest defaults to enabled and only \"disabled\" turns it off", "[scene][parser]") {
+    using WallpaperEngine::Data::JSON::JSON;
+    using WallpaperEngine::Data::Model::Project;
+    using WallpaperEngine::Data::Model::Text;
+    using WallpaperEngine::Data::Parsers::ObjectParser;
+    Project project {};
+    // Native maps "enabled" to 0 and "disabled" to 1.
+    const auto depth = [&project] (const char* json) {
+        return dynamic_cast<const Text&> (*ObjectParser::parse (JSON::parse (json), project)).depthTest;
+    };
+    REQUIRE (depth (R"({"id":91,"name":"default","text":"A"})"));
+    REQUIRE (depth (R"({"id":92,"name":"enabled","text":"A","depthtest":"enabled"})"));
+    REQUIRE_FALSE (depth (R"({"id":93,"name":"disabled","text":"A","depthtest":"disabled"})"));
+}
+
 TEST_CASE ("Text opaque background retains its gate and RGB independently of padding", "[scene][parser]") {
     using WallpaperEngine::Data::JSON::JSON;
     using WallpaperEngine::Data::Model::Project;
