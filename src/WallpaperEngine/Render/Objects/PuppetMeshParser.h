@@ -134,6 +134,16 @@ struct PuppetAnimationHeader {
     std::vector<PuppetClipHeader> clips;
 };
 
+// Puppet UVs address the image (u = x / width + 0.5). A raw texture stored
+// padded past the image keeps the image at the top left, so the UVs scale
+// into that region, as image quads do. A texture stored at the image size
+// (an embedded PNG/JPEG) and an animated atlas keep their UVs.
+inline std::array<float, 2> puppetTexcoordScale (uint32_t realWidth, uint32_t realHeight,
+                                                 uint32_t storedWidth, uint32_t storedHeight, bool animated) {
+    if (animated || storedWidth == 0 || storedHeight == 0) return {1.0f, 1.0f};
+    return {static_cast<float> (realWidth) / storedWidth, static_cast<float> (realHeight) / storedHeight};
+}
+
 PuppetMeshData parsePuppetFirstMesh (std::span<const uint8_t> bytes);
 PuppetMeshesData parsePuppetMeshes (std::span<const uint8_t> bytes);
 PuppetSkeletonData parsePuppetFirstSkeleton (std::span<const uint8_t> bytes, const PuppetMeshData& mesh);
