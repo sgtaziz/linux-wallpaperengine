@@ -22,12 +22,17 @@ CSound::CSound (Wallpapers::CScene& scene, const Sound& sound) :
     ) {
     for (const auto& binding : Scripting::scriptPropertyBindings (sound))
 	this->registerProperty (binding.name, binding.value);
+    this->latchDistance ();
     if (this->audioEnabled ()) m_controller.initialize (this->currentVolume ());
 }
 
 CSound::~CSound () { this->releaseClip (); }
 
 bool CSound::audioEnabled () const { return this->getContext ().getApp ().getContext ().settings.audio.enabled; }
+
+void CSound::latchDistance () {
+    m_distance.play (m_sound.attenuation->value->getFloat (), m_sound.minDistance->value->getFloat ());
+}
 
 float CSound::currentVolume () const { return m_sound.volume ? m_sound.volume->value->getFloat () : 1.0f; }
 
@@ -98,7 +103,7 @@ void CSound::updateMonoRouting (Audio::AudioStream& stream) const {
 	camera.getEye (), camera.getCenter (), camera.getUp (), camera.isOrthogonal (), camera.getWidth (),
 	camera.getHeight ()
     );
-    const auto gains = Audio::spatialMonoGains (origin, listener, m_sound.minDistance, m_sound.attenuation);
+    const auto gains = Audio::spatialMonoGains (origin, listener, m_distance.minDistance, m_distance.attenuation);
     stream.setMonoChannelGains (gains.left, gains.right);
 }
 
@@ -110,6 +115,7 @@ void CSound::tick (float sceneDelta) {
 }
 
 void CSound::play () {
+    this->latchDistance ();
     if (this->audioEnabled ()) m_controller.play (this->currentVolume ());
 }
 

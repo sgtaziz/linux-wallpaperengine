@@ -260,8 +260,9 @@ struct SoundData {
     float maxTime = 5.0f;
     bool startSilent = false;
     bool spatialization = false;
-    float attenuation = 1.0f;
-    float minDistance = 1.0f;
+    /** Scriptable layer properties; applied only at the next play(). */
+    UserSettingUniquePtr attenuation;
+    UserSettingUniquePtr minDistance;
 };
 
 class Sound : public Object, public SoundData {

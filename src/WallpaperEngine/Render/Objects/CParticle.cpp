@@ -4394,12 +4394,13 @@ void CParticle::buildRopeTrail () {
 	// the renderer's reciprocal UV scale for in_ParticleTrailLength.
 	const float trailLength = ParticleCore::ropeTrailUVLength (
 	    m_ropeTrailHistory.counts[particle], m_ropeUVScale);
-	buildRopePoints (points, static_cast<uint32_t> (points.size ()), trailLength);
+	buildRopePoints (points, static_cast<uint32_t> (points.size ()), trailLength,
+	                 m_ropeTrailHistory.scrolls[particle]);
     }
 }
 
 void CParticle::buildRopePoints (const std::vector<ParticleInstance>& points,
-                                  uint32_t aliveCount, float nativeTrailLength) {
+                                  uint32_t aliveCount, float nativeTrailLength, uint16_t trailScroll) {
     if (aliveCount < 2 || m_passes.empty ()) {
 	return;
     }
@@ -4572,7 +4573,8 @@ void CParticle::buildRopePoints (const std::vector<ParticleInstance>& points,
 	const glm::vec3 rightEnd = ParticleCore::ropeInterpolatedRight (
 	    nativeRights.start, nativeRights.end, fractionEnd);
 
-	const float trailPosition = m_useTrailRenderer ? static_cast<float> (originalSegment)
+	const float trailPosition = m_useTrailRenderer
+	    ? ParticleCore::ropeTrailPosition (originalSegment, trailScroll, m_ropeUVScrolling)
 	    : static_cast<float> (originalSegment) + ordinaryUV.positionOffset;
 	float cpuUVStart = 0.0f;
 	float cpuUVEnd = 0.0f;
@@ -4582,7 +4584,7 @@ void CParticle::buildRopePoints (const std::vector<ParticleInstance>& points,
 		m_ropeUVScrolling
 		    ? ParticleCore::ropeTrailScrollMaxCount (m_ropeSegments, m_ropeUVScale)
 		    : static_cast<float> (m_ropeSegments) - 0.5f,
-		phase, m_ropeUVScrolling);
+		phase, m_ropeUVScrolling, trailScroll);
 	    cpuUVStart = ParticleCore::ropeTrailSubsegmentUV (
 		uv, static_cast<float> (subsegment) / static_cast<float> (subdivision));
 	    cpuUVEnd = ParticleCore::ropeTrailSubsegmentUV (

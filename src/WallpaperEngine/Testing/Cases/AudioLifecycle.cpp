@@ -450,8 +450,8 @@ TEST_CASE ("Sound object retains authored playback settings", "[audio][parser]")
     REQUIRE (sound->maxTime == 2.5f);
     REQUIRE (sound->startSilent);
     REQUIRE (sound->spatialization);
-    REQUIRE (sound->attenuation == 0.75f);
-    REQUIRE (sound->minDistance == 12.0f);
+    REQUIRE (sound->attenuation->value->getFloat () == 0.75f);
+    REQUIRE (sound->minDistance->value->getFloat () == 12.0f);
 
     auto single = data;
     single["sound"] = "one.wav";
@@ -475,8 +475,8 @@ TEST_CASE ("Sound object defaults follow the native constructor", "[audio][parse
     REQUIRE_FALSE (sound->playbackmode.has_value ());
     REQUIRE (sound->minTime == 1.0f);
     REQUIRE (sound->maxTime == 5.0f);
-    REQUIRE (sound->minDistance == 1.0f);
-    REQUIRE (sound->attenuation == 1.0f);
+    REQUIRE (sound->minDistance->value->getFloat () == 1.0f);
+    REQUIRE (sound->attenuation->value->getFloat () == 1.0f);
     REQUIRE_FALSE (sound->spatialization);
     REQUIRE_FALSE (sound->startSilent);
 }
@@ -935,6 +935,34 @@ TEST_CASE ("Spatialized mono gains follow the recovered native law", "[audio][sp
     const auto onTop = spatialMonoGains ({ 0, 0, 600 }, flat, 1, 1);
     REQUIRE (onTop.left == kNonSpatialMonoGains.left);
     REQUIRE (onTop.right == kNonSpatialMonoGains.right);
+}
+
+TEST_CASE ("Script writes to attenuation and mindistance apply at the next play", "[audio][spatial]") {
+    using namespace WallpaperEngine::Audio;
+    // ZR-2 on native 2.8.42: S1 at (-480, 360, 0) in the c14 scene, authored
+    // mindistance 0.1 and attenuation 1. The script writes attenuation 4,
+    // plays, writes mindistance 1, plays; the measured levels were 0.1, 0.1,
+    // 0.0270, 0.0270 and 1.0 times the unattenuated clip.
+    const auto flat = soundListenerForCamera ({ 0, 0, 0 }, { 0, 0, -1 }, { 0, 1, 0 }, true, 1280, 720);
+    const auto level = [&] (const SoundDistanceLatch& latch) {
+        const auto gains = spatialMonoGains ({ -480, 360, 0 }, flat, latch.minDistance, latch.attenuation);
+        const auto open = spatialMonoGains ({ -480, 360, 0 }, flat, 1000.0f, 1.0f);
+        return std::sqrt (gains.left * gains.left + gains.right * gains.right)
+            / std::sqrt (open.left * open.left + open.right * open.right);
+    };
+    float attenuation = 1.0f;
+    float minDistance = 0.1f;
+    SoundDistanceLatch latch;
+    latch.play (attenuation, minDistance);
+    REQUIRE (std::abs (level (latch) - 0.1f) < 1e-3f);
+    attenuation = 4.0f; // the write alone changes nothing
+    REQUIRE (std::abs (level (latch) - 0.1f) < 1e-3f);
+    latch.play (attenuation, minDistance);
+    REQUIRE (std::abs (level (latch) - 0.02703f) < 1e-3f);
+    minDistance = 1.0f;
+    REQUIRE (std::abs (level (latch) - 0.02703f) < 1e-3f);
+    latch.play (attenuation, minDistance);
+    REQUIRE (std::abs (level (latch) - 1.0f) < 1e-3f);
 }
 
 TEST_CASE ("Clip selection skips missing and invalid files without retrying forever", "[audio][schedule]") {

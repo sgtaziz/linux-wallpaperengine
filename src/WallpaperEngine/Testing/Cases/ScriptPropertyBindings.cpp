@@ -242,7 +242,11 @@ TEST_CASE ("Sound layers queue base transform scripts alongside volume", "[scrip
     REQUIRE (object->is<Sound> ());
     const auto& sound = *object->as<Sound> ();
     const auto bindings = bindingMap (scriptPropertyBindings (sound));
-    REQUIRE (bindings.size () == 4);
+    REQUIRE (bindings.size () == 6);
+    // lists attenuation and mindistance beside volume; ZR-2 showed
+    // a script write reaching them natively at the next play().
+    REQUIRE (bindings.at ("attenuation") == sound.attenuation->value.get ());
+    REQUIRE (bindings.at ("mindistance") == sound.minDistance->value.get ());
     REQUIRE (bindings.at ("origin") == sound.origin->value.get ());
     REQUIRE (bindings.at ("scale") == sound.groupScale->value.get ());
     REQUIRE (bindings.at ("angles") == sound.groupAngles->value.get ());

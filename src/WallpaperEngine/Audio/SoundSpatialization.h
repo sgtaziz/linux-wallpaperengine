@@ -72,6 +72,22 @@ inline float inverseDistanceClampedGain (float distance, float referenceDistance
 }
 
 /**
+ * Native applies a sound layer's attenuation (rolloff) and mindistance
+ * (reference distance) to its voices only inside play() (, called
+ * ); the per-frame update moves the position alone.
+ * Script writes therefore stay pending until the next play().
+ */
+struct SoundDistanceLatch {
+    float attenuation { 1.0f };
+    float minDistance { 1.0f };
+
+    void play (float pendingAttenuation, float pendingMinDistance) {
+        attenuation = pendingAttenuation;
+        minDistance = pendingMinDistance;
+    }
+};
+
+/**
  * Spatial gains for a mono clip whose world origin is @p origin
  * The pan uses the unit direction toward the
  * source: Y is its lateral component toward screen-left and F its

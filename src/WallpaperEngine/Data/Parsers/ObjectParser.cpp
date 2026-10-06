@@ -374,8 +374,8 @@ SoundUniquePtr ObjectParser::parseSound (const JSON& it, const Project& project,
 	    .maxTime = it.optional<float> ("maxtime", 5.0f),
 	    .startSilent = it.optional<bool> ("startsilent", false),
 	    .spatialization = it.optional<bool> ("spatialization", false),
-	    .attenuation = it.optional<float> ("attenuation", 1.0f),
-	    .minDistance = it.optional<float> ("mindistance", 1.0f),
+	    .attenuation = it.user ("attenuation", project.properties, 1.0f),
+	    .minDistance = it.user ("mindistance", project.properties, 1.0f),
 	}
     );
 }

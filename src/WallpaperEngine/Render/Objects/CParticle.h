@@ -212,7 +212,7 @@ protected:
     void buildRope ();
     void buildRopeTrail ();
     void buildRopePoints (const std::vector<ParticleInstance>& points, uint32_t count,
-                           float nativeTrailLength = 0.0f);
+                           float nativeTrailLength = 0.0f, uint16_t trailScroll = 0);
     void spawnChild (size_t descriptor, const ParticleInstance* parent, bool follow);
     [[nodiscard]] size_t activeChildNodes (size_t descriptor) const;
     void processChildEvents (const std::vector<ParticleInstance>& expired,

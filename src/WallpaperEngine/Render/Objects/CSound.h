@@ -2,6 +2,7 @@
 
 #include "WallpaperEngine/Audio/AudioStream.h"
 #include "WallpaperEngine/Audio/SoundPlaybackPolicy.h"
+#include "WallpaperEngine/Audio/SoundSpatialization.h"
 #include "WallpaperEngine/Render/CObject.h"
 #include "WallpaperEngine/Scripting/ScriptableObject.h"
 
@@ -40,11 +41,14 @@ private:
     [[nodiscard]] std::optional<float> clipDuration () const override;
 
     [[nodiscard]] float currentVolume () const;
+    void latchDistance ();
     [[nodiscard]] bool audioEnabled () const;
     /** Mono clips: native spatial pan and distance gain, or the non-spatial routing level. */
     void updateMonoRouting (Audio::AudioStream& stream) const;
 
     const Sound& m_sound;
+    /** Values native applied at the last play(); script writes stay pending until the next one. */
+    Audio::SoundDistanceLatch m_distance;
     std::optional<int> m_streamId;
     std::unique_ptr<Audio::AudioStream> m_stream;
     Audio::SoundLayerController m_controller;

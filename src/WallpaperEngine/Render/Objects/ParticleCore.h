@@ -1586,15 +1586,20 @@ struct RopeTrailHistory {
     uint32_t segments { 0 };
     std::vector<glm::vec3> positions;
     std::vector<uint16_t> counts;
+    // Native keeps a u16 sample counter per slot when uvscrolling is
+    // set; the trail position of history point k is k - scroll.
+    std::vector<uint16_t> scrolls;
 
     RopeTrailHistory () = default;
     RopeTrailHistory (uint32_t capacity, uint32_t count)
-        : segments (count), positions (static_cast<size_t> (capacity) * count), counts (capacity, 0) {}
+        : segments (count), positions (static_cast<size_t> (capacity) * count), counts (capacity, 0),
+          scrolls (capacity, 0) {}
 
     void born (uint32_t index, const glm::vec3& position) {
         auto row = positions.begin () + static_cast<size_t> (index) * segments;
         std::fill_n (row, segments, position);
         counts[index] = 1;
+        scrolls[index] = 0;
     }
 
     void compact (uint32_t destination, uint32_t source) {
@@ -1602,6 +1607,7 @@ struct RopeTrailHistory {
         std::copy_n (positions.begin () + static_cast<size_t> (source) * segments, segments,
                      positions.begin () + static_cast<size_t> (destination) * segments);
         counts[destination] = counts[source];
+        scrolls[destination] = scrolls[source];
     }
 
     // Keep each particle's history row attached when the compacted active
@@ -1609,14 +1615,17 @@ struct RopeTrailHistory {
     void reorder (const std::vector<uint32_t>& sourceAtDestination) {
         std::vector<glm::vec3> rows (sourceAtDestination.size () * segments);
         std::vector<uint16_t> rowCounts (sourceAtDestination.size ());
+        std::vector<uint16_t> rowScrolls (sourceAtDestination.size ());
         for (size_t destination = 0; destination < sourceAtDestination.size (); ++destination) {
             const auto source = sourceAtDestination[destination];
             std::copy_n (positions.begin () + static_cast<size_t> (source) * segments,
                          segments, rows.begin () + destination * segments);
             rowCounts[destination] = counts[source];
+            rowScrolls[destination] = scrolls[source];
         }
         std::copy (rows.begin (), rows.end (), positions.begin ());
         std::copy (rowCounts.begin (), rowCounts.end (), counts.begin ());
+        std::copy (rowScrolls.begin (), rowScrolls.end (), scrolls.begin ());
     }
 
     void sample (uint32_t index, const glm::vec3& position) {
@@ -1624,6 +1633,7 @@ struct RopeTrailHistory {
         std::move_backward (row, row + segments - 1, row + segments);
         *row = position;
         counts[index] = static_cast<uint16_t> (std::min<uint32_t> (segments, counts[index] + 1));
+        ++scrolls[index];
     }
 
     template <typename PositionAt>
@@ -1674,6 +1684,12 @@ inline float ropeTrailFade (uint32_t segment, uint32_t segments,
     return std::sin (normalized * 3.141f);
 }
 
+// Scroll mode pins the texture to the world: native writes
+// the trail position of history point k as k - scroll, the plain mode as k.
+inline float ropeTrailPosition (uint32_t segment, uint16_t scroll, bool scrolling) {
+    return static_cast<float> (segment) - (scrolling ? static_cast<float> (scroll) : 0.0f);
+}
+
 struct RopeTrailUV {
     float start;
     float end;
@@ -1687,14 +1703,15 @@ inline RopeTrailUV ropeOrdinarySegmentUV (uint32_t segment, RopeOrdinaryUV uv) {
 }
 
 inline RopeTrailUV ropeTrailSegmentUV (uint32_t segment, float trailLength,
-                                      float maxCount, float phase, bool scrolling) {
+                                      float maxCount, float phase, bool scrolling,
+                                      uint16_t scroll = 0) {
     float usable;
     float minimum;
     float delta;
     if (scrolling) {
         usable = maxCount;
         if (usable == 0.0f) return {};
-        minimum = 1.0f - static_cast<float> (segment) / usable;
+        minimum = 1.0f - ropeTrailPosition (segment, scroll, scrolling) / usable;
         delta = -1.0f / usable;
         if (segment == 0) {
             minimum += delta * (1.0f - phase);
