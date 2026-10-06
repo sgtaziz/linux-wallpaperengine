@@ -218,11 +218,10 @@ private:
     std::set<int> m_composedObjectIds = {};
     /** Parallax root per object; authored parents are fixed, script layer changes clear it. */
     mutable std::map<int, const Object*> m_parallaxRoots = {};
+    /** Native: the viewport-fraction cursor for g_PointerPosition and camera parallax, uncropped. */
     glm::vec2 m_mousePosition = {};
     glm::vec2 m_mousePositionLast = {};
     glm::vec2 m_mousePositionNormalized = {};
-    /** Camera parallax cursor: the viewport fraction native reads, in m_mousePosition's orientation, uncropped. */
-    glm::vec2 m_parallaxCursor = {};
     glm::vec2 m_mouseScreenPosition = {};
     bool m_mouseLeftDown = false;
     bool m_cursorInputInitialized = false;

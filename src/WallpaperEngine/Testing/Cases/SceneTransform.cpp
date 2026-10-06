@@ -581,7 +581,7 @@ TEST_CASE ("g_ParallaxPosition follows the native smoothed parallax point", "[sc
 }
 
 TEST_CASE ("g_ParallaxPosition and the layer offset agree on one top-origin cursor", "[scene][parallax]") {
-    // CScene feeds m_parallaxCursor to both. Native derives both from the same
+    // CScene feeds m_mousePosition to both. Native derives both from the same
     // smoothed point: offset = (root - point) * amount * depth in the y-up
     // canvas and uniform = point / size. Recovering the
     // point from the uniform must reproduce the layer offset on both axes.
@@ -612,7 +612,7 @@ TEST_CASE ("Camera parallax sweeps the full canvas of a cover-cropped scene", "[
     using WallpaperEngine::Render::WallpaperState;
     using WallpaperEngine::Render::Wallpapers::advanceSceneParallaxPosition;
     using WallpaperEngine::Render::Wallpapers::initialSceneParallaxPosition;
-    using WallpaperEngine::Render::Wallpapers::sceneParallaxCursor;
+    using WallpaperEngine::Render::Wallpapers::sceneViewportCursor;
     using WallpaperEngine::Render::Wallpapers::sceneParallaxDisplacementTarget;
     const float amount = 0.16f, influence = 0.18f;
     const glm::vec3 root (2000.0f, 720.0f, 0.0f);
@@ -624,7 +624,7 @@ TEST_CASE ("Camera parallax sweeps the full canvas of a cover-cropped scene", "[
         REQUIRE (uv.ustart == Catch::Approx (0.12791f).margin (1e-4));
         REQUIRE (uv.uend == Catch::Approx (0.87209f).margin (1e-4));
         const auto cursor = [&] (glm::vec2 viewport) {
-            return sceneParallaxCursor (viewport, uv.ustart, uv.uend, uv.vstart, uv.vend);
+            return sceneViewportCursor (viewport, uv.ustart, uv.uend, uv.vstart, uv.vend);
         };
         const auto offset = [&] (glm::vec2 viewport) {
             return sceneLayerParallaxOffset (root, glm::vec3 (0.0f), glm::vec2 (2.0f),
@@ -660,7 +660,7 @@ TEST_CASE ("Camera parallax sweeps the full canvas of a cover-cropped scene", "[
         const glm::vec2 viewport (0.23f, 0.71f);
         const glm::vec2 scene (uv.ustart + viewport.x * (uv.uend - uv.ustart),
                                uv.vstart + viewport.y * (uv.vend - uv.vstart));
-        const glm::vec2 parallax = sceneParallaxCursor (viewport, uv.ustart, uv.uend, uv.vstart, uv.vend);
+        const glm::vec2 parallax = sceneViewportCursor (viewport, uv.ustart, uv.uend, uv.vstart, uv.vend);
         REQUIRE (parallax.x == Catch::Approx (scene.x));
         REQUIRE (parallax.y == Catch::Approx (scene.y));
     }
@@ -705,6 +705,114 @@ TEST_CASE ("Easing the eye and the cursor term separately equals easing native's
                                                              size.x, size.y, amount, true, true);
         REQUIRE (separate.x == Catch::Approx ((root.x - point.point.x) * amount * 2.0f).margin (1e-3));
         REQUIRE (-separate.y == Catch::Approx ((root.y - point.point.y) * amount * 2.0f).margin (1e-3));
+    }
+}
+
+TEST_CASE ("Effect texture projection unprojects the viewport pointer into native layer UV", "[scene][pointer]") {
+    // Native 2.8.42 probe (, ptrprobe band 6/7): the
+    // xray-style (inverse * (pointer * 2 - 1, Y flipped)).xy / w * 0.5 is the
+    // pointer's offset from the layer's on-screen centre over its on-screen
+    // size, Y up, for cover-cropped and uncropped canvases alike. The Linux
+    // path is end to end for Wayland/GLFW output: the output state has vflip,
+    // updateMouse forms the pointer with sceneViewportCursor from the top-origin
+    // viewport fraction, and the layer MVP is the root crop (CScene builds it
+    // from a vflip-free state) * scene ortho * canvas-to-camera * layer.
+    using WallpaperEngine::Render::Camera;
+    using WallpaperEngine::Render::WallpaperState;
+    using WallpaperEngine::Render::Wallpapers::imageEffectTextureProjection;
+    using WallpaperEngine::Render::Wallpapers::sceneAuthoredToCamera;
+    using WallpaperEngine::Render::Wallpapers::scenePresentationClipTransform;
+    using WallpaperEngine::Render::Wallpapers::sceneViewportCursor;
+    const auto unproject = [] (const glm::mat4& projection, glm::vec2 pointer) {
+        const glm::vec4 p = glm::inverse (projection) * glm::vec4 (pointer.x * 2 - 1, (1 - pointer.y) * 2 - 1, 0, 1);
+        return glm::vec2 (p.x, p.y) / p.w * 0.5f;
+    };
+    struct Case { glm::vec2 canvas, origin, size, pointer, native; };
+    for (const auto& c : {
+             // Partial layers: native measured (-1.2307, 1.0666), (-1.0182, 1.0666), (0.0980, -0.1000), (-1.2307, 0.9000).
+             Case {{1920, 1080}, {1190.4f, 410.4f}, {576, 324}, {0.25f, 0.3f}, {-1.2333f, 1.0667f}},
+             Case {{3440, 1440}, {2132.8f, 547.2f}, {1032, 432}, {0.25f, 0.3f}, {-1.0202f, 1.0667f}},
+             Case {{3440, 1440}, {2132.8f, 547.2f}, {1032, 432}, {0.7f, 0.65f}, {0.0961f, -0.1f}},
+             Case {{1920, 1440}, {1190.4f, 547.2f}, {576, 432}, {0.25f, 0.3f}, {-1.2333f, 0.9f}},
+             // Full canvas: native measured (-0.1855, 0.2000) and (0.2008, -0.1125).
+             Case {{3440, 1440}, {1720, 720}, {3440, 1440}, {0.25f, 0.3f}, {-0.186f, 0.2f}},
+             Case {{1920, 1440}, {960, 720}, {1920, 1440}, {0.7f, 0.65f}, {0.2f, -0.1125f}}}) {
+        CAPTURE (c.canvas.x, c.canvas.y, c.origin.x, c.pointer.x, c.pointer.y);
+        WallpaperState output (WallpaperState::TextureUVsScaling::DefaultUVs, 0);
+        output.updateState ({0, 0, 1280, 720}, true, static_cast<int> (c.canvas.x), static_cast<int> (c.canvas.y));
+        const auto outputUv = output.getTextureUVs ();
+        const glm::vec2 pointer = sceneViewportCursor (c.pointer, outputUv.ustart, outputUv.uend, outputUv.vstart, outputUv.vend);
+        WallpaperState presentation (WallpaperState::TextureUVsScaling::DefaultUVs, 0);
+        presentation.updateState ({0, 0, 1280, 720}, false, static_cast<int> (c.canvas.x), static_cast<int> (c.canvas.y));
+        const auto uv = presentation.getTextureUVs ();
+        const glm::mat4 mvp = scenePresentationClipTransform ({uv.ustart, uv.uend, uv.vstart, uv.vend})
+            * Camera::makeOrthogonalProjectionForScene (c.canvas.x, c.canvas.y, 0.0f, 10000.0f, glm::vec3 (0.0f));
+        const glm::mat4 layerMvp = mvp * sceneAuthoredToCamera (c.canvas.x, c.canvas.y, true)
+            * glm::translate (glm::mat4 (1.0f), glm::vec3 (c.origin, 0.0f));
+        const glm::vec2 uvOffset = unproject (imageEffectTextureProjection (layerMvp, c.size), pointer);
+        REQUIRE (uvOffset.x == Catch::Approx (c.native.x).margin (1e-3));
+        REQUIRE (uvOffset.y == Catch::Approx (c.native.y).margin (1e-3));
+    }
+}
+
+TEST_CASE ("Final-pass MVP inverse unprojects the viewport pointer into native layer-local px", "[scene][pointer]") {
+    // Native binds g_ModelViewProjectionMatrix(Inverse) from the live
+    // stack, which the final image draw sets to the layer node: the inverse maps
+    // the clip-space pointer to layer-local px (Y up, before the node's scale and
+    // rotation). Pointer probe 12, 13 measured
+    // 0.5 * local for unscaled layers; the scaled and rotated cases follow the
+    // native node model, with the layer's on-screen axes taken from the scene
+    // geometry Linux draws (which matches native).
+    using WallpaperEngine::Render::Camera;
+    using WallpaperEngine::Render::WallpaperState;
+    using WallpaperEngine::Render::Wallpapers::imageLayerModelViewProjection;
+    using WallpaperEngine::Render::Wallpapers::sceneAuthoredToCamera;
+    using WallpaperEngine::Render::Wallpapers::scenePointForCamera;
+    using WallpaperEngine::Render::Wallpapers::scenePresentationClipTransform;
+    using WallpaperEngine::Render::Wallpapers::sceneViewportCursor;
+    struct Case { glm::vec2 canvas, origin, scale; float angle; glm::vec2 pointer; std::optional<glm::vec2> measured; };
+    for (const auto& c : {
+             // Native measured raw * 2: PU Q1 F (-478.6, 216.0), PU Q1 P (-709.0, 345.6), PU Q2 P (155.0, -32.4), PW Q1 P (-1050.8, 460.8).
+             Case {{1920, 1080}, {960, 540}, {1, 1}, 0.0f, {0.25f, 0.3f}, glm::vec2 (-478.6f, 216.0f)},
+             Case {{1920, 1080}, {1190.4f, 410.4f}, {1, 1}, 0.0f, {0.25f, 0.3f}, glm::vec2 (-709.0f, 345.6f)},
+             Case {{1920, 1080}, {1190.4f, 410.4f}, {1, 1}, 0.0f, {0.7f, 0.65f}, glm::vec2 (155.0f, -32.4f)},
+             Case {{3440, 1440}, {2132.8f, 547.2f}, {1, 1}, 0.0f, {0.25f, 0.3f}, glm::vec2 (-1050.8f, 460.8f)},
+             // Scaled and rotated plain layers (fixture v4 S and R), predicted from the native node model.
+             Case {{1920, 1080}, {480, 756}, {1.5f, 0.75f}, 0.0f, {0.3f, 0.35f}, std::nullopt},
+             Case {{3440, 1440}, {756.8f, 432}, {1, 1}, 0.5236f, {0.25f, 0.6f}, std::nullopt}}) {
+        CAPTURE (c.canvas.x, c.origin.x, c.scale.x, c.angle, c.pointer.x, c.pointer.y);
+        WallpaperState output (WallpaperState::TextureUVsScaling::DefaultUVs, 0);
+        output.updateState ({0, 0, 1280, 720}, true, static_cast<int> (c.canvas.x), static_cast<int> (c.canvas.y));
+        const auto outputUv = output.getTextureUVs ();
+        const glm::vec2 pointer = sceneViewportCursor (c.pointer, outputUv.ustart, outputUv.uend, outputUv.vstart, outputUv.vend);
+        WallpaperState presentation (WallpaperState::TextureUVsScaling::DefaultUVs, 0);
+        presentation.updateState ({0, 0, 1280, 720}, false, static_cast<int> (c.canvas.x), static_cast<int> (c.canvas.y));
+        const auto uv = presentation.getTextureUVs ();
+        const glm::mat4 mvp = scenePresentationClipTransform ({uv.ustart, uv.uend, uv.vstart, uv.vend})
+            * Camera::makeOrthogonalProjectionForScene (c.canvas.x, c.canvas.y, 0.0f, 10000.0f, glm::vec3 (0.0f));
+        Object layer (node (1, {}, glm::vec3 (c.origin, 0.0f), glm::vec3 (c.scale, 1.0f), c.angle));
+        const auto world = resolveSceneTransform (layer, [] (int) -> const Object* { return nullptr; }).authoredMatrix;
+        const glm::mat4 layerMvp = mvp * sceneAuthoredToCamera (c.canvas.x, c.canvas.y, true) * world;
+        const glm::vec4 p = glm::inverse (imageLayerModelViewProjection (layerMvp))
+            * glm::vec4 (pointer.x * 2 - 1, (1 - pointer.y) * 2 - 1, 0, 1);
+        const glm::vec2 local = glm::vec2 (p) / p.w;
+        // Native: the pointer's canvas position (Y up) relative to the layer centre, in the layer's on-screen axes,
+        // over the node scale. The on-screen local +X axis comes from the drawn geometry (camera Y is canvas Y down).
+        const glm::vec2 visible = glm::vec2 (c.canvas.x, c.canvas.y) * glm::vec2 (uv.uend - uv.ustart, std::abs (uv.vend - uv.vstart));
+        const glm::vec2 cursorCanvas ((c.canvas.x - visible.x) * 0.5f + c.pointer.x * visible.x,
+                                      c.canvas.y - ((c.canvas.y - visible.y) * 0.5f + c.pointer.y * visible.y));
+        const glm::vec3 a = scenePointForCamera (glm::vec3 (world * glm::vec4 (0, 0, 0, 1)), c.canvas.x, c.canvas.y, true);
+        const glm::vec3 b = scenePointForCamera (glm::vec3 (world * glm::vec4 (1, 0, 0, 1)), c.canvas.x, c.canvas.y, true);
+        const glm::vec2 ex = glm::normalize (glm::vec2 (b.x - a.x, -(b.y - a.y)));
+        const glm::vec2 ey (-ex.y, ex.x);
+        const glm::vec2 d = cursorCanvas - c.origin;
+        const glm::vec2 expected = glm::vec2 (glm::dot (d, ex), glm::dot (d, ey)) / c.scale;
+        REQUIRE (local.x == Catch::Approx (expected.x).margin (0.5));
+        REQUIRE (local.y == Catch::Approx (expected.y).margin (0.5));
+        if (c.measured) {
+            REQUIRE (local.x == Catch::Approx (c.measured->x).margin (2.0));
+            REQUIRE (local.y == Catch::Approx (c.measured->y).margin (2.0));
+        }
     }
 }
 

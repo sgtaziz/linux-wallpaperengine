@@ -49,6 +49,7 @@ public:
     void setPosition (GLuint position);
     void setModelViewProjectionMatrix (const glm::mat4* projection);
     void setModelViewProjectionMatrixInverse (const glm::mat4* projection);
+    void setEffectTextureProjectionMatrix (const glm::mat4* projection, const glm::mat4* inverse);
     void setModelMatrix (const glm::mat4* model);
     void setNormalModelMatrix (const glm::mat3* normalModel);
     void setViewProjectionMatrix (const glm::mat4* viewProjection);
@@ -212,6 +213,10 @@ private:
     const glm::mat4* m_modelViewProjectionMatrix;
     const glm::mat4* m_modelViewProjectionMatrixInverse;
     const glm::mat4* m_modelMatrix;
+    glm::mat4 m_identityMatrix {1.0f};
+    /** Native: the owning layer's clip from its [-1,1] extent; identity without one. */
+    const glm::mat4* m_effectTextureProjectionMatrix = &m_identityMatrix;
+    const glm::mat4* m_effectTextureProjectionMatrixInverse = &m_identityMatrix;
     glm::mat3 m_identityNormalModelMatrix {1.0f};
     const glm::mat3* m_normalModelMatrix = &m_identityNormalModelMatrix;
     const glm::mat4* m_viewProjectionMatrix;

@@ -193,6 +193,9 @@ private:
     glm::mat4 m_viewProjectionMatrix = {};
     GLuint m_lightingLocalPosition = GL_NONE;
     glm::mat4 m_lightingWorld {1.0f};
+    glm::mat4 m_effectTextureProjection {1.0f};
+    glm::mat4 m_effectTextureProjectionInverse {1.0f};
+    glm::mat4 m_layerModelViewProjectionInverse {1.0f};
     glm::mat3 m_lightingNormal {1.0f};
     glm::mat4 m_lightingViewProjection {1.0f};
     glm::mat4 m_lightingMvp {1.0f};

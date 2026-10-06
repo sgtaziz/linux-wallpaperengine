@@ -684,6 +684,11 @@ void CPass::setModelViewProjectionMatrixInverse (const glm::mat4* projection) {
     this->m_modelViewProjectionMatrixInverse = projection;
 }
 
+void CPass::setEffectTextureProjectionMatrix (const glm::mat4* projection, const glm::mat4* inverse) {
+    this->m_effectTextureProjectionMatrix = projection ? projection : &m_identityMatrix;
+    this->m_effectTextureProjectionMatrixInverse = inverse ? inverse : &m_identityMatrix;
+}
+
 void CPass::setModelMatrix (const glm::mat4* model) { this->m_modelMatrix = model; }
 
 void CPass::setNormalModelMatrix (const glm::mat3* normalModel) {
@@ -1144,8 +1149,8 @@ void CPass::setupUniforms () {
     this->addUniform ("g_PointerPosition", scene.getMousePosition ());
     this->addUniform ("g_PointerPositionLast", scene.getMousePositionLast ());
     this->addUniform ("g_ParallaxPosition", scene.getParallaxPosition ());
-    this->addUniform ("g_EffectTextureProjectionMatrix", glm::mat4 (1.0));
-    this->addUniform ("g_EffectTextureProjectionMatrixInverse", glm::mat4 (1.0));
+    this->addUniform ("g_EffectTextureProjectionMatrix", &this->m_effectTextureProjectionMatrix);
+    this->addUniform ("g_EffectTextureProjectionMatrixInverse", &this->m_effectTextureProjectionMatrixInverse);
     this->addUniform ("g_TexelSize", &m_sceneTexelSize);
     this->addUniform ("g_TexelSizeHalf", &m_sceneTexelSizeHalf);
     this->addUniform ("g_Screen", &m_sceneScreen);

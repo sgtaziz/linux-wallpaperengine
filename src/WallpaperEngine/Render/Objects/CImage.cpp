@@ -1482,8 +1482,22 @@ void CImage::setupPasses (const std::function<void (std::shared_ptr<const CFBO>)
 	    pass->setTexCoord (texcoord, m_texcoordCopyTopV, m_texcoordCopyBottomV);
 	else
 	    pass->setTexCoord (texcoord);
+	// Native binds both MVP uniforms from the live stack, which the
+	// final image draw sets to the layer node; its inverse maps the
+	// clip-space pointer to layer-local px. The scene-space vertices keep the
+	// scene MVP, so only the inverse of a plain root-scope final pass changes.
+	const bool nativeLayerSpace = !getImage ().model->fullscreen && !getImage ().model->passthrough
+	    && !m_hasPuppetMesh && !getScene ().isLocalCompositionScope ();
+	if (nativeLayerSpace && projection == &m_modelViewProjectionScreen)
+	    inverseProjection = &m_layerModelViewProjectionInverse;
 	pass->setModelViewProjectionMatrix (projection);
 	pass->setModelViewProjectionMatrixInverse (inverseProjection);
+	// Native gives every effect step of the layer the same texture
+	// projection. Only plain root-scope image layers are evidenced (pointer
+	// probe); fullscreen, passthrough (compose/project), puppet and composed
+	// child layers keep the identity until their native mapping is measured.
+	pass->setEffectTextureProjectionMatrix (nativeLayerSpace ? &m_effectTextureProjection : nullptr,
+	    nativeLayerSpace ? &m_effectTextureProjectionInverse : nullptr);
 	if (std::next (cur) == end)
 	    glColorMask (true, true, true, this->getScene ().isChildCompositionScope ());
 	// Native passthrough layers with copybackground=false clear their base
@@ -2009,6 +2023,11 @@ void CImage::updateScreenSpacePosition () {
     const float determinant = glm::determinant (m_lightingMvp);
     m_lightingMvpInverse = determinant != 0.0f && std::isfinite (determinant)
         ? glm::inverse (m_lightingMvp) : glm::mat4 (1.0f);
+    m_effectTextureProjection = Wallpapers::imageEffectTextureProjection (m_lightingMvp, m_size);
+    m_effectTextureProjectionInverse = Wallpapers::inverseFiniteTransform (m_effectTextureProjection)
+        .value_or (glm::mat4 (1.0f));
+    m_layerModelViewProjectionInverse = Wallpapers::inverseFiniteTransform (
+        Wallpapers::imageLayerModelViewProjection (m_lightingMvp)).value_or (glm::mat4 (1.0f));
     if (this->getImage ().model->passthrough) {
 	// A fullscreen passthrough samples the already cropped output framebuffer
 	// (or a fullscreen composer's target of the same size). Its copy quad is

@@ -219,13 +219,13 @@ inline glm::vec2 sceneParallaxDisplacementTarget (glm::vec2 cursor, float amount
     return (cursor - glm::vec2 (0.5f)) * amount * influence;
 }
 
-// The cursor both parallax consumers receive. Native reads it as a
-// fraction of the viewport (, the g_PointerPosition
-// field) and scales it by the full projection size, so
-// a cover-cropped canvas still sweeps its whole width. The scene cursor is
-// instead remapped into the visible UV band; keep only that band's axis
-// orientation, which leaves an uncropped scene unchanged.
-inline glm::vec2 sceneParallaxCursor (glm::vec2 viewportCursor, float ustart, float uend, float vstart, float vend) {
+// Native: the client cursor over the viewport size (
+// ScreenToClient / divps), bound as g_PointerPosition
+// and scaled by the full projection size for camera parallax (,
+// ). A cover-cropped canvas therefore still sweeps its
+// whole width. Keep only the visible UV band's axis orientation, which leaves
+// an uncropped scene's cursor unchanged.
+inline glm::vec2 sceneViewportCursor (glm::vec2 viewportCursor, float ustart, float uend, float vstart, float vend) {
     return {uend >= ustart ? viewportCursor.x : 1.0f - viewportCursor.x,
             vend >= vstart ? viewportCursor.y : 1.0f - viewportCursor.y};
 }
@@ -236,6 +236,24 @@ inline glm::vec2 sceneParallaxCursor (glm::vec2 viewportCursor, float ustart, fl
 // bit-exact; sceneLayerParallaxOffset takes it in place of the live eye.
 inline glm::vec2 easeSceneParallaxEye (glm::vec2 previous, glm::vec2 eye, float weight) {
     return previous + (eye - previous) * weight;
+}
+
+// The layer MVP shaders see when they unproject g_PointerPosition (as
+// pointer * 2 - 1 with Y flipped), which native maps to layer-local px. On
+// Wayland/GLFW output (vflip) m_mousePosition is top-origin like native
+// and the scene's GL clip Y runs opposite to that pointer clip Y, so
+// the layer MVP is reflected once more in Y. X11 output keeps a Y-up
+// m_mousePosition (pre-existing), which this does not cover.
+inline glm::mat4 imageLayerModelViewProjection (const glm::mat4& layerMvp) {
+    return glm::scale (glm::mat4 (1.0f), glm::vec3 (1.0f, -1.0f, 1.0f)) * layerMvp;
+}
+
+// Native g_EffectTextureProjectionMatrix: the
+// layer's MVP with its X/Y rows scaled by half the layer size, so it maps the
+// layer's [-1,1] extent to clip space. Effects such as xray and cursorripple
+// unproject the pointer through its inverse into layer UV.
+inline glm::mat4 imageEffectTextureProjection (const glm::mat4& layerMvp, glm::vec2 size) {
+    return imageLayerModelViewProjection (layerMvp) * glm::scale (glm::mat4 (1.0f), glm::vec3 (size * 0.5f, 1.0f));
 }
 
 inline float sceneParallaxDelayWeight (float delay, float frameDelta) {
