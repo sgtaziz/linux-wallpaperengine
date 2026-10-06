@@ -92,6 +92,7 @@ public:
 
     // Callers dispatch from a copy so that scripts added or removed by a
     // callback do not disturb the walk.
+    [[nodiscard]] size_t size () const { return m_entries.size (); }
     [[nodiscard]] std::vector<std::string> snapshot () const {
         std::vector<std::string> names;
         names.reserve (m_entries.size ());
