@@ -1177,19 +1177,19 @@ std::ifstream fixture (const char* name) {
 
 TEST_CASE ("Fixed particle renderer axes follow native factory basis", "[particle][renderer]") {
     const auto oblique = fixedRendererBasis ({3.0f, 4.0f, 0.0f});
-    REQUIRE (oblique.right.x == Catch::Approx (0.6f));
-    REQUIRE (oblique.right.y == Catch::Approx (0.8f));
+    REQUIRE (oblique.axis.x == Catch::Approx (0.6f));
+    REQUIRE (oblique.axis.y == Catch::Approx (0.8f));
     REQUIRE (oblique.up.x == Catch::Approx (-0.8f));
     REQUIRE (oblique.up.y == Catch::Approx (0.6f));
     const auto singular = fixedRendererBasis ({0.0f, 1.0f, 0.0f});
-    REQUIRE (singular.right.y == 1.0f);
+    REQUIRE (singular.axis.y == 1.0f);
     REQUIRE (singular.up.z == -1.0f);
     // @ stores (0, 1, 0) for a zero/absent axis; the
     // native upright default-axis sprite renders as the explicit axis-Y one.
     const auto defaultAxis = fixedRendererBasis ({0.0f, 0.0f, 0.0f});
-    REQUIRE (defaultAxis.right == singular.right);
+    REQUIRE (defaultAxis.axis == singular.axis);
     REQUIRE (defaultAxis.up == singular.up);
-    REQUIRE (defaultAxis.right.y == 1.0f);
+    REQUIRE (defaultAxis.axis.y == 1.0f);
     REQUIRE (defaultAxis.up.z == -1.0f);
     // Nonuniform scale survives the native M^T M path; a 90-degree rotation
     // cancels only when renderer flag bit 0 is clear.
@@ -1198,12 +1198,30 @@ TEST_CASE ("Fixed particle renderer axes follow native factory basis", "[particl
     rotatedScale[1] = {-3.0f, 0.0f, 0.0f};
     const auto local = fixedRendererLocalBasis ({3.0f, 4.0f, 0.0f}, rotatedScale, false);
     REQUIRE (local);
-    REQUIRE (local->right.x == Catch::Approx (0.31622777f));
-    REQUIRE (local->right.y == Catch::Approx (-0.9486833f));
+    REQUIRE (local->forward->x == Catch::Approx (0.31622777f));
+    REQUIRE (local->forward->y == Catch::Approx (-0.9486833f));
     const auto skipped = fixedRendererLocalBasis ({3.0f, 4.0f, 0.0f}, rotatedScale, true);
     REQUIRE (skipped);
-    REQUIRE (skipped->right.x == Catch::Approx (-0.66436384f));
-    REQUIRE (skipped->right.y == Catch::Approx (-0.74740932f));
+    REQUIRE (skipped->forward->x == Catch::Approx (-0.66436384f));
+    REQUIRE (skipped->forward->y == Catch::Approx (-0.74740932f));
+    // sets right = up x forward, so an
+    // in-plane axis leaves the sprite edge-on to an orthographic camera.
+    REQUIRE (local->right.z == Catch::Approx (-1.0f));
+    REQUIRE (skipped->right.z == Catch::Approx (-1.0f));
+}
+
+TEST_CASE ("Fixed particle renderer axis is the sprite forward", "[particle][renderer]") {
+    // 2370927443 Rain_Splash_Drops: fixed, axis "0 0 1", renderer flags 1,
+    // child stack scaled 0.2. Linux drew it edge-on with right = (0, 0, 1);
+    // native uploads forward (0, 0, 1) and right = up x forward = (1, 0, 0),
+    // seen here in the Y-reflected orthographic particle space.
+    const auto drops = fixedRendererLocalBasis ({0.0f, 0.0f, 1.0f}, glm::mat3 (0.2f), true);
+    REQUIRE (drops);
+    REQUIRE (drops->right.x == Catch::Approx (1.0f));
+    REQUIRE (drops->right.y == Catch::Approx (0.0f).margin (1e-6f));
+    REQUIRE (drops->right.z == Catch::Approx (0.0f).margin (1e-6f));
+    REQUIRE (drops->up.y == Catch::Approx (-1.0f));
+    REQUIRE (drops->forward->z == Catch::Approx (1.0f));
 }
 
 TEST_CASE ("Upright renderer projects view-right against authored or fixed up", "[particle][renderer]") {

@@ -177,13 +177,19 @@ inline float flag4OrthographicEyeDistance (float fovDegrees, float orthoYScale) 
 struct FixedRendererBasis {
     glm::vec3 right;
     glm::vec3 up;
+    std::optional<glm::vec3> forward;
 };
 
-inline FixedRendererBasis fixedRendererBasis (glm::vec3 axis) {
-    // Factory: the authored axis becomes the renderer's right
-    // vector. Its up vector is Y projected off that axis, except the
-    // singular +/-Y case where the factory chooses -Z. A zero or absent
-    // axis is replaced by (0, 1, 0).
+struct FixedRendererFactoryAxes {
+    glm::vec3 axis;
+    glm::vec3 up;
+};
+
+inline FixedRendererFactoryAxes fixedRendererBasis (glm::vec3 axis) {
+    // Factory stores the normalized authored axis and an up
+    // vector: Y projected off that axis, except the singular +/-Y
+    // case where the factory chooses -Z. A zero or absent axis is replaced
+    // by (0, 1, 0).
     const float length = glm::length (axis);
     axis = length > 0.0f && std::isfinite (length)
         ? axis / length : glm::vec3 (0.0f, 1.0f, 0.0f);
@@ -195,23 +201,28 @@ inline FixedRendererBasis fixedRendererBasis (glm::vec3 axis) {
 
 inline std::optional<FixedRendererBasis> fixedRendererLocalBasis (
     glm::vec3 authoredAxis, const glm::mat3& reflectedSceneLinear, bool skipWorldTransform) {
-    // default flags first multiply the authored basis by the
-    // scene-stack linear matrix M; flag bit 0 skips that step. Every path
-    // then multiplies by M^T and normalizes right/up independently.
+    // mode 2: the factory axis is the sprite's forward (,
+    // bound as g_OrientationForward), not its right. Default
+    // flags first multiply axis and up by the scene-stack linear matrix M;
+    // flag bit 0 skips that step. Every path then multiplies by M^T,
+    // normalizes, and sets right = normalize(up x forward). The Y
+    // reflection reverses cross handedness, so here right = forward x up.
     const auto authored = fixedRendererBasis (authoredAxis);
-    glm::vec3 right (authored.right.x, -authored.right.y, authored.right.z);
+    glm::vec3 forward (authored.axis.x, -authored.axis.y, authored.axis.z);
     glm::vec3 up (authored.up.x, -authored.up.y, authored.up.z);
     if (!skipWorldTransform) {
-        right = reflectedSceneLinear * right;
+        forward = reflectedSceneLinear * forward;
         up = reflectedSceneLinear * up;
     }
-    right = glm::transpose (reflectedSceneLinear) * right;
+    forward = glm::transpose (reflectedSceneLinear) * forward;
     up = glm::transpose (reflectedSceneLinear) * up;
-    const float rightLength = glm::length (right);
+    const glm::vec3 right = glm::cross (forward, up);
+    const float forwardLength = glm::length (forward);
     const float upLength = glm::length (up);
-    if (!std::isfinite (rightLength) || !std::isfinite (upLength)
-        || rightLength <= 0.0f || upLength <= 0.0f) return std::nullopt;
-    return FixedRendererBasis {right / rightLength, up / upLength};
+    const float rightLength = glm::length (right);
+    if (!std::isfinite (forwardLength) || !std::isfinite (upLength) || !std::isfinite (rightLength)
+        || forwardLength <= 0.0f || upLength <= 0.0f || rightLength <= 0.0f) return std::nullopt;
+    return FixedRendererBasis {right / rightLength, up / upLength, forward / forwardLength};
 }
 
 inline std::optional<FixedRendererBasis> uprightRendererLocalBasis (
@@ -223,7 +234,7 @@ inline std::optional<FixedRendererBasis> uprightRendererLocalBasis (
     // component of view-right along that up, then M^T returns local axes.
     const auto factory = fixedRendererBasis (authoredAxis);
     const glm::vec3 reflectedAxis (
-        factory.right.x, -factory.right.y, factory.right.z);
+        factory.axis.x, -factory.axis.y, factory.axis.z);
     const glm::vec3 worldUp = skipWorldTransform
         ? sceneWorldUp
         : reflectedSceneLinear * reflectedAxis;
@@ -235,7 +246,7 @@ inline std::optional<FixedRendererBasis> uprightRendererLocalBasis (
     const float upLength = glm::length (up);
     if (!std::isfinite (rightLength) || !std::isfinite (upLength)
         || rightLength <= 0.0f || upLength <= 0.0f) return std::nullopt;
-    return FixedRendererBasis {right / rightLength, up / upLength};
+    return FixedRendererBasis {right / rightLength, up / upLength, std::nullopt};
 }
 
 struct ScreenRendererBasis {
