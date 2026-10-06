@@ -13,6 +13,7 @@
 #include "WallpaperEngine/Render/Objects/ImageCompositeSteps.h"
 #include "WallpaperEngine/Render/Objects/ImageQuadUV.h"
 #include "WallpaperEngine/Render/Objects/ImageCompositeSampler.h"
+#include "WallpaperEngine/Render/Objects/TextDrawState.h"
 #include "WallpaperEngine/Render/SceneReflectionMipmaps.h"
 #include "WallpaperEngine/Data/Model/Project.h"
 #include "WallpaperEngine/Data/Model/Wallpaper.h"
@@ -673,6 +674,30 @@ std::array<float, 4> readRGBA (const CFBO& fbo, GLint x = 0, GLint y = 0) {
     return pixel;
 }
 } // namespace
+
+TEST_CASE ("Text draw state clears a model pass's culling and leaves depth state alone", "[render][text]") {
+    using WallpaperEngine::Render::Objects::applyTextDrawState;
+    SurfacelessGL gl;
+    REQUIRE (gl.ready);
+    // A preceding model pass (cullmode normal, depthtest/depthwrite enabled)
+    // leaves this state behind; text must never inherit the culling.
+    glEnable (GL_CULL_FACE);
+    glEnable (GL_DEPTH_TEST);
+    glDepthFunc (GL_ALWAYS);
+    glDepthMask (GL_TRUE);
+    applyTextDrawState ();
+    REQUIRE_FALSE (glIsEnabled (GL_CULL_FACE));
+    REQUIRE (glIsEnabled (GL_DEPTH_TEST));
+    GLint func = 0;
+    glGetIntegerv (GL_DEPTH_FUNC, &func);
+    REQUIRE (func == GL_ALWAYS);
+    GLboolean mask = GL_FALSE;
+    glGetBooleanv (GL_DEPTH_WRITEMASK, &mask);
+    REQUIRE (mask == GL_TRUE);
+    glDisable (GL_DEPTH_TEST);
+    applyTextDrawState ();
+    REQUIRE_FALSE (glIsEnabled (GL_DEPTH_TEST));
+}
 
 TEST_CASE ("Scene D16 depth target remains complete through resize", "[render][depth]") {
     SurfacelessGL gl;
