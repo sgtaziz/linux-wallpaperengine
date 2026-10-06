@@ -95,6 +95,8 @@ inline std::vector<ScriptPropertyBinding> sceneGeneralScriptBindings (
 
 struct MaterialConstantBinding {
     std::string key;
+    size_t passIndex;
+    std::string name;
     DynamicValue& value;
     const WallpaperEngine::Data::Model::ShaderConstantMap& constants;
 };
@@ -113,8 +115,8 @@ inline std::vector<MaterialConstantBinding> imageMaterialScriptBindings (const I
         const auto& constants = passes[passIndex]->constants;
         for (const auto& [name, setting] : constants)
             if (setting && setting->value)
-                result.push_back ({"pass" + std::to_string (passIndex) + "_constant_" + name, *setting->value,
-                                   constants});
+                result.push_back ({"pass" + std::to_string (passIndex) + "_constant_" + name, passIndex, name,
+                                   *setting->value, constants});
     }
     return result;
 }

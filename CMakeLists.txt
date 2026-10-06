@@ -573,6 +573,7 @@ set(COMMON_SOURCES
     src/WallpaperEngine/Scripting/SceneObject.h
     src/WallpaperEngine/Scripting/SceneObject.cpp
     src/WallpaperEngine/Scripting/ScriptEngine.h
+    src/WallpaperEngine/Scripting/ScriptDispatchOrder.h
     src/WallpaperEngine/Scripting/ScriptPropertiesObject.h
     src/WallpaperEngine/Scripting/ScriptPropertiesObject.cpp
     src/WallpaperEngine/Scripting/ScriptEngine.cpp
@@ -648,6 +649,7 @@ if(BUILD_TESTING)
     target_sources(tests PRIVATE src/WallpaperEngine/Testing/Cases/TextureParser.cpp)
     target_sources(tests PRIVATE src/WallpaperEngine/Testing/Cases/PuppetMeshParser.cpp)
     target_sources(tests PRIVATE src/WallpaperEngine/Testing/Cases/ScriptPropertyBindings.cpp)
+    target_sources(tests PRIVATE src/WallpaperEngine/Testing/Cases/ScriptDispatchOrder.cpp)
     target_sources(tests PRIVATE src/WallpaperEngine/Testing/Cases/WorkshopScriptAssetPath.cpp)
     target_sources(tests PRIVATE src/WallpaperEngine/Testing/Cases/PropertyAnimation.cpp)
     target_compile_definitions(tests PRIVATE PARTICLE_CORE_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/docs/reports/scene-parity-2026-09-26/particle-core-fixtures")

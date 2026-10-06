@@ -135,23 +135,30 @@ CText::CText (Wallpapers::CScene& scene, const Text& text) :
 	const auto& effect = text.effects[effectIndex];
 	const std::string prefix = "textEffect" + std::to_string (effectIndex)
 	    + "_object" + std::to_string (getId ()) + "_";
-	auto queue = [this, &prefix] (const std::string& suffix, DynamicValue& value) {
-	    getScene ().getScriptEngine ().queueScript (prefix + suffix, value, *this);
+	// Native binds the effect's keys, then each pass in order with
+	// its constantshadervalues sorted.
+	auto queue = [this, &prefix, effectIndex] (const std::string& suffix, DynamicValue& value, uint32_t pass,
+	                                         const std::string& jsonKey) {
+	    getScene ().getScriptEngine ().queueScript (prefix + suffix, value, *this,
+	        Scripting::ScriptPlacement {.phase = Scripting::ScriptPhase::AfterOwn,
+	                                    .group = static_cast<uint32_t> (effectIndex), .subgroup = pass,
+	                                    .key = jsonKey});
 	};
-	queue ("visible", *effect->visible->value);
+	queue ("visible", *effect->visible->value, 0, "visible");
 	for (size_t passIndex = 0; passIndex < effect->effect->passes.size (); ++passIndex) {
 	    const auto& pass = effect->effect->passes[passIndex];
 	    if (!pass->material) continue;
 	    for (size_t materialIndex = 0; materialIndex < (*pass->material)->passes.size (); ++materialIndex) {
 		for (const auto& [name, value] : (*pass->material)->passes[materialIndex]->constants)
 		    queue ("pass" + std::to_string (passIndex) + "_material"
-		           + std::to_string (materialIndex) + "_constant_" + name, *value->value);
+		           + std::to_string (materialIndex) + "_constant_" + name, *value->value,
+		           static_cast<uint32_t> (passIndex + 1), name);
 	    }
 	}
 	for (size_t passIndex = 0; passIndex < effect->passOverrides.size (); ++passIndex) {
 	    for (const auto& [name, value] : effect->passOverrides[passIndex]->constants)
 		queue ("override" + std::to_string (passIndex)
-		       + "_constant_" + name, *value->value);
+		       + "_constant_" + name, *value->value, static_cast<uint32_t> (passIndex + 1), name);
 	}
     }
 }

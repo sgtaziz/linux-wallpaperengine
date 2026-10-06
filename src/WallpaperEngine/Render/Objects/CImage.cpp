@@ -175,9 +175,11 @@ CImage::CImage (Wallpapers::CScene& scene, const Image& image) :
 	const auto& layer = image.animationLayers[layerIndex];
 	const std::string prefix = "imageAnimationLayer" + std::to_string (layerIndex)
 	    + "_object" + std::to_string (getId ()) + "_";
-	auto queue = [this, &prefix] (const char* suffix, const UserSettingUniquePtr& setting) {
+	auto queue = [this, &prefix, layerIndex] (const char* suffix, const UserSettingUniquePtr& setting) {
 	    if (setting && setting->value)
-		getScene ().getScriptEngine ().queueScript (prefix + suffix, *setting->value, *this);
+		getScene ().getScriptEngine ().queueScript (prefix + suffix, *setting->value, *this,
+		    Scripting::ScriptPlacement {.phase = Scripting::ScriptPhase::AnimationLayers,
+		                                .group = static_cast<uint32_t> (layerIndex), .key = suffix});
 	};
 	queue ("rate", layer->rate);
 	queue ("visible", layer->visible);
@@ -190,6 +192,8 @@ CImage::CImage (Wallpapers::CScene& scene, const Image& image) :
     for (const auto& binding : Scripting::imageMaterialScriptBindings (image))
 	getScene ().getScriptEngine ().queueScript (
 	    "imageMaterial_object" + std::to_string (getId ()) + "_" + binding.key, binding.value, *this,
+	    Scripting::ScriptPlacement {.phase = Scripting::ScriptPhase::BeforeLoad,
+	                                .group = static_cast<uint32_t> (binding.passIndex), .key = binding.name},
 	    std::nullopt, &binding.constants);
     // Image effect settings also retain their own DynamicValues. Queue their
     // scripts with this image as thisLayer so instance-specific constants can
@@ -198,28 +202,35 @@ CImage::CImage (Wallpapers::CScene& scene, const Image& image) :
 	const auto& effect = image.effects[effectIndex];
 	const std::string prefix = "imageEffect" + std::to_string (effectIndex)
 	    + "_object" + std::to_string (getId ()) + "_";
+	// Native binds the effect's keys (:165), then each pass in
+	// order with its constantshadervalues sorted.
 	auto queue = [this, &prefix, effectIndex] (const std::string& suffix, const UserSettingUniquePtr& setting,
-	                                         bool effectOwner = false,
+	                                         uint32_t pass, const std::string& jsonKey, bool effectOwner = false,
 	                                         const ShaderConstantMap* materialOwner = nullptr) {
 	    if (setting && setting->value)
 		getScene ().getScriptEngine ().queueScript (
 		    prefix + suffix, *setting->value, *this,
+		    Scripting::ScriptPlacement {.phase = Scripting::ScriptPhase::AfterOwn,
+		                                .group = static_cast<uint32_t> (effectIndex), .subgroup = pass,
+		                                .key = jsonKey},
 		    effectOwner ? std::optional<size_t> (effectIndex) : std::nullopt, materialOwner);
 	};
-	queue ("visible", effect->visible, true);
+	queue ("visible", effect->visible, 0, "visible", true);
 	for (size_t passIndex = 0; passIndex < effect->effect->passes.size (); ++passIndex) {
 	    const auto& pass = effect->effect->passes[passIndex];
 	    if (!pass->material) continue;
 	    for (size_t materialIndex = 0; materialIndex < (*pass->material)->passes.size (); ++materialIndex) {
 		for (const auto& [name, setting] : (*pass->material)->passes[materialIndex]->constants)
 		    queue ("pass" + std::to_string (passIndex) + "_material"
-		           + std::to_string (materialIndex) + "_constant_" + name, setting, false,
+		           + std::to_string (materialIndex) + "_constant_" + name, setting,
+		           static_cast<uint32_t> (passIndex + 1), name, false,
 		           &(*pass->material)->passes[materialIndex]->constants);
 	    }
 	}
 	for (size_t passIndex = 0; passIndex < effect->passOverrides.size (); ++passIndex) {
 	    for (const auto& [name, setting] : effect->passOverrides[passIndex]->constants)
-		queue ("override" + std::to_string (passIndex) + "_constant_" + name, setting, false,
+		queue ("override" + std::to_string (passIndex) + "_constant_" + name, setting,
+		       static_cast<uint32_t> (passIndex + 1), name, false,
 		       &effect->passOverrides[passIndex]->constants);
 	}
     }

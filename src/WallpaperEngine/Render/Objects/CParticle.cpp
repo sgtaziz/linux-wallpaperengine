@@ -364,10 +364,19 @@ CParticle::CParticle (Wallpapers::CScene& scene, const Particle& particle, uint3
     }
     for (const auto& binding : Scripting::scriptPropertyBindings (particle))
 	this->registerProperty (binding.name, binding.value);
+    // Native binds instanceoverride in the constructor, before
+    // the layer's own keys. Where it binds particle-system field scripts is not
+    // recovered; they keep their creation order after the own keys.
     Scripting::forEachParticleScriptSetting (particle,
         [this] (const std::string& name, DynamicValue& value) {
+            static constexpr std::string_view instance = "instance_";
+            const bool instanceOverride = name.starts_with (instance);
             getScene ().getScriptEngine ().queueScript (
-                "particle" + std::to_string (getId ()) + "_" + name, value, *this);
+                "particle" + std::to_string (getId ()) + "_" + name, value, *this,
+                instanceOverride
+                    ? Scripting::ScriptPlacement {.phase = Scripting::ScriptPhase::BeforeLoad,
+                                                  .key = name.substr (instance.size ())}
+                    : Scripting::ScriptPlacement {.phase = Scripting::ScriptPhase::AfterOwn});
         });
 
     if (!m_material.passes.empty ()) this->detectTexture ();
