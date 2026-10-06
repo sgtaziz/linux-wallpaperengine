@@ -265,8 +265,11 @@ ObjectUniquePtr ObjectParser::parse (const JSON& it, const Project& project) {
 	if (path.empty ()) throw std::invalid_argument ("Scene model path must not be empty");
 	const int skin = it.optional ("skin", 0);
 	if (skin < 0) throw std::invalid_argument ("Scene model skin must be nonnegative");
+	const auto animationLayers = it.optional ("animationlayers");
 	return std::make_unique<SceneModel> (std::move (basedata), SceneModelData {.path = path, .skin = skin,
-            .castShadow = it.user ("castshadow", project.properties, true)});
+            .castShadow = it.user ("castshadow", project.properties, true),
+            .animationLayers = animationLayers.has_value () ? parseAnimationLayers (*animationLayers, project)
+                                                            : std::vector<ImageAnimationLayerUniquePtr> {}});
     } else if (cameraIt != it.end () && cameraIt->is_string ()) {
 	return std::make_unique<SceneCamera> (std::move (basedata), SceneCameraData {
 	    .mode = cameraIt->get<std::string> (),

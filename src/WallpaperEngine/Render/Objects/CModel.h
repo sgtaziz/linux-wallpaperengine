@@ -3,6 +3,7 @@
 #include "WallpaperEngine/Data/Model/Object.h"
 #include "WallpaperEngine/Render/CObject.h"
 #include "WallpaperEngine/Scripting/ScriptableObject.h"
+#include "ModelPuppetPose.h"
 #include "ParticleModelCollision.h"
 
 #include <glm/glm.hpp>
@@ -37,6 +38,7 @@ public:
 private:
     void rebuildDynamic ();
     void updateDynamic ();
+    void preparePuppetPose ();
     [[nodiscard]] glm::mat4 authoredWorld () const;
     [[nodiscard]] bool castsShadow () const;
     struct MeshDraw;
@@ -54,6 +56,10 @@ private:
     glm::mat3 m_normalModel {1.0f};
     std::optional<PuppetSkeletonData> m_skeleton;
     std::vector<glm::mat4> m_currentGlobals;
+    /** Present only when the object authors animationlayers and the mdl has clips. */
+    std::optional<PuppetAnimationHeader> m_animation;
+    ModelPuppetLayers m_layers;
+    uint32_t m_poseFrame = UINT32_MAX;
     std::optional<PuppetSkeletonData::EmissionBound> m_collisionFallbackBound;
 };
 

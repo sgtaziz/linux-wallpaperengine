@@ -175,6 +175,8 @@ struct SceneModelData {
     int skin = 0;
     UserSettingUniquePtr castShadow;
     std::shared_ptr<DynamicModelData> dynamic;
+    /** Native reads the same animationlayers objects as an image puppet. */
+    std::vector<ImageAnimationLayerUniquePtr> animationLayers;
 };
 
 class SceneModel : public Object, public SceneModelData {
