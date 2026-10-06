@@ -191,6 +191,8 @@ struct FakeClipPlayer final : WallpaperEngine::Audio::SoundClipPlayer {
         return true;
     }
     void releaseClip () override { active = false; }
+    void latchDistance () override { ++latches; }
+    int latches = 0;
     [[nodiscard]] bool hasClip () const override { return active; }
     [[nodiscard]] bool clipFinished () const override { return finished; }
     void setClipPaused (bool clipPaused) override { paused = clipPaused; }
@@ -963,6 +965,40 @@ TEST_CASE ("Script writes to attenuation and mindistance apply at the next play"
     REQUIRE (std::abs (level (latch) - 0.02703f) < 1e-3f);
     latch.play (attenuation, minDistance);
     REQUIRE (std::abs (level (latch) - 1.0f) < 1e-3f);
+}
+
+TEST_CASE ("Timer, loop and volume restarts latch script distance writes like a play", "[audio][spatial]") {
+    // Native runs (attenuation and mindistance) every time its scheduler body runs, and the
+    // per-frame update, the volume callback and the loop-end repick all enter it, so only a layer that does not
+    // start or resume a voice leaves the pending script writes alone.
+    using Policy = WallpaperEngine::Audio::SoundPlaybackPolicy;
+    FakeClipPlayer player;
+    player.duration = 0.5f;
+    WallpaperEngine::Audio::SoundLayerController layer (Policy ("random", true, 1.0f, 1.0f, 1), 1, player, 5);
+    layer.initialize (1.0f);
+    REQUIRE (player.latches == 0); // startsilent: nothing runs at layer init
+    layer.tick (0.1f, 1.0f);
+    REQUIRE (player.latches == 0);
+    layer.play (1.0f);
+    REQUIRE (player.starts.size () == 1);
+    REQUIRE (player.latches == 1);
+    // The 1.5 s schedule timer (0.5 s clip + 1.0 s wait) restarts the clip by itself.
+    for (int frame = 0; frame < 14; ++frame) layer.tick (0.1f, 1.0f);
+    REQUIRE (player.starts.size () == 1);
+    REQUIRE (player.latches == 1);
+    layer.tick (0.1f, 1.0f);
+    REQUIRE (player.starts.size () == 2);
+    REQUIRE (player.latches == 2);
+
+    // A multi-file loop repicks at the end of its clip.
+    FakeClipPlayer loopPlayer;
+    WallpaperEngine::Audio::SoundLayerController loop (Policy ("loop", false, 0.0f, 0.0f, 2), 2, loopPlayer, 5);
+    loop.initialize (1.0f);
+    REQUIRE (loopPlayer.latches == 1);
+    loopPlayer.finished = true;
+    loop.tick (0.1f, 1.0f);
+    REQUIRE (loopPlayer.starts.size () == 2);
+    REQUIRE (loopPlayer.latches == 2);
 }
 
 TEST_CASE ("Clip selection skips missing and invalid files without retrying forever", "[audio][schedule]") {

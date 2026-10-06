@@ -41,7 +41,7 @@ private:
     [[nodiscard]] std::optional<float> clipDuration () const override;
 
     [[nodiscard]] float currentVolume () const;
-    void latchDistance ();
+    void latchDistance () override;
     [[nodiscard]] bool audioEnabled () const;
     /** Mono clips: native spatial pan and distance gain, or the non-spatial routing level. */
     void updateMonoRouting (Audio::AudioStream& stream) const;

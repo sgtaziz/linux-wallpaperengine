@@ -227,6 +227,13 @@ std::optional<size_t> startOneOf (size_t count, std::set<size_t>& failed, Rng& r
 class SoundClipPlayer {
 public:
     virtual ~SoundClipPlayer () = default;
+    /**
+     * Native re-applies the layer's attenuation and mindistance
+     * every time its scheduler body runs, so a clip started or
+     * resumed by a timer, a loop end or a volume change also picks up pending
+     * script writes. Called before the voice is started or resumed.
+     */
+    virtual void latchDistance () { }
     /** Create a new decoder for the clip, positioned at its start, and start mixing it. */
     virtual bool startClip (size_t index, bool repeat, float volume) = 0;
     virtual void releaseClip () = 0;
@@ -282,6 +289,7 @@ public:
 
 private:
     void apply (SoundPlaybackPolicy::Action action, float volume) {
+        if (action != SoundPlaybackPolicy::Action::None) m_player.latchDistance ();
         if (action == SoundPlaybackPolicy::Action::StartNew) {
             m_player.releaseClip ();
             m_repeating = m_policy.loopsInDecoder ();
