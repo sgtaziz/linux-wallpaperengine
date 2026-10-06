@@ -4293,9 +4293,10 @@ void CParticle::applyRendererOrientation (size_t rendererIndex) {
             if (basis) {
                 m_orientationRight = basis->right;
                 m_orientationUp = basis->up;
+                // Fixed renderers upload the factory axis as forward.
                 // Reflection reverses cross handedness: cross(FR,FU)
                 // equals F(up_native x right_native), the native forward.
-                const auto forward = glm::cross (basis->right, basis->up);
+                const auto forward = basis->forward.value_or (glm::cross (basis->right, basis->up));
                 const float length = glm::length (forward);
                 if (std::isfinite (length) && length > 0.0f)
                     m_orientationForward = forward / length;
