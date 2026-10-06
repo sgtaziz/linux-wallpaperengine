@@ -211,7 +211,8 @@ void Camera::setOrthogonalProjection (const float width, const float height) {
                                        Transforms {m_pose, m_frameZoom}, true,
                                        m_camera.projection.zoom ? m_camera.projection.zoom->value->getFloat () : 1.0f)
         : makeOrthogonalProjectionForScene (width, height, getNearZ (), getFarZ (),
-                                            m_shake.active ? getEye () - m_shake.offset : getEye ());
+                                            m_shake.active ? getEye () - m_shake.offset : getEye (),
+                                            m_camera.projection.zoom ? m_camera.projection.zoom->value->getFloat () : 1.0f);
     this->m_isOrthogonal = true;
     m_renderLookat = (m_hasScriptTransforms || m_runtimeTransforms)
         ? renderLookAtForTransforms (m_pose, true, width, height)
@@ -303,11 +304,15 @@ glm::mat4 Camera::makePerspectiveProjectionForScene (
 }
 
 glm::mat4 Camera::makeOrthogonalProjectionForScene (
-    float width, float height, float, float, const glm::vec3& eye) {
+    float width, float height, float, float, const glm::vec3& eye, float authoredZoom) {
     // Native uses fixed -2000/+2000 planes when scene bit8 is
     // orthographic. Authored nearz/farz remain available to perspective
     // consumers; applying them here clips XYZ-rotated quads crossing z=0.
+    // Every orthographic frame, also scales XY
+    // about the canvas center by general zoom times the camera
+    // transform zoom; the latter is 1 on this untransformed path.
     auto projection = glm::ortho<float> (
-        -width / 2.0f, width / 2.0f, -height / 2.0f, height / 2.0f, -2000.0f, 2000.0f);
+        -width / 2.0f, width / 2.0f, -height / 2.0f, height / 2.0f, -2000.0f, 2000.0f)
+        * glm::scale (glm::mat4 (1.0f), glm::vec3 (authoredZoom, authoredZoom, 1.0f));
     return glm::translate (projection, eye);
 }
