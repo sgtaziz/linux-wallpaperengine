@@ -6,7 +6,9 @@
 #include <glm/vec3.hpp>
 
 #include "WallpaperEngine/Data/Model/Wallpaper.h"
+#include "CameraObjectPaths.h"
 #include "CameraPath.h"
+#include <unordered_map>
 
 namespace WallpaperEngine::Render::Wallpapers {
 class CScene;
@@ -47,6 +49,8 @@ public:
     [[nodiscard]] static Pose poseForRootCamera (const SceneData::Camera& camera);
     void advanceFrame (float dt, const std::vector<const SceneCamera*>& cameras);
     void forgetCamera (const SceneCamera& camera);
+    /** Active-path state of a camera object that has ticked at least once (tests). */
+    [[nodiscard]] const CameraObjectPathState* objectPathState (const SceneCamera& camera) const;
     [[nodiscard]] static Pose poseForWorldCamera (const glm::mat4& world);
     void setTransforms (const glm::vec3* eye, const glm::vec3* center,
                         const glm::vec3* up, const float* zoom);
@@ -121,6 +125,8 @@ private:
     const SceneData::Camera& m_camera;
     const SceneCamera* m_activeObject;
     CameraPathCursor m_pathCursor;
+    /** Native per-object queue state, created at a camera object's first visible tick. */
+    std::unordered_map<const SceneCamera*, CameraObjectPathState> m_objectPaths;
     float m_frameFov = 50;
     float m_frameZoom = 1;
     bool m_runtimeOverride = false;

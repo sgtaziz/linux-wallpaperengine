@@ -13,59 +13,12 @@ namespace {
 std::unique_ptr<WallpaperEngine::Data::Model::PropertyAnimation> parseAnimation (const json& source) {
     using Animation = WallpaperEngine::Data::Model::PropertyAnimation;
     if (!source.is_object ()) return nullptr;
-    const auto options = source.find ("options");
-    if (options == source.end () || !options->is_object ()) return nullptr;
-    const auto fps = options->find ("fps");
-    const auto length = options->find ("length");
-    if (fps == options->end () || length == options->end () || !fps->is_number () ||
-        !length->is_number ()) return nullptr;
     auto result = std::make_unique<Animation> ();
-    result->fps = fps->get<float> ();
-    result->length = length->get<int> ();
-    if (!(result->fps > 0.0f) || !std::isfinite (result->fps) || result->length <= 0 ||
-        !std::isfinite (result->duration ())) return nullptr;
-    if (const auto name = options->find ("name"); name != options->end () && name->is_string ())
-        result->name = name->get<std::string> ();
-    if (const auto mode = options->find ("mode"); mode != options->end () && mode->is_string ()) {
-        const auto value = mode->get<std::string> ();
-        if (value == "single") result->mode = Animation::Mode::Single;
-        else if (value == "mirror") result->mode = Animation::Mode::Mirror;
-    }
-    if (const auto paused = options->find ("startpaused"); paused != options->end () && paused->is_boolean ())
-        result->paused = paused->get<bool> ();
+    if (!DynamicValueParser::parseAnimationOptions (source, *result)) return nullptr;
     for (size_t channel = 0; channel < result->channels.size (); ++channel) {
         const auto authored = source.find ("c" + std::to_string (channel));
-        if (authored == source.end () || !authored->is_array ()) continue;
-        auto& keys = result->channels[channel];
-        int previous = -1;
-        for (const auto& item : *authored) {
-            if (!item.is_object ()) continue;
-            const auto frame = item.find ("frame");
-            const auto value = item.find ("value");
-            if (frame == item.end () || value == item.end () || !frame->is_number () ||
-                !value->is_number ()) continue;
-            Animation::Key key;
-            key.frame = frame->get<int> ();
-            key.value = value->get<float> ();
-            if (key.frame <= previous || !std::isfinite (key.value)) continue;
-            auto parseHandle = [&item] (const char* name, Animation::Handle& output) {
-                const auto authoredHandle = item.find (name);
-                if (authoredHandle == item.end () || !authoredHandle->is_object ()) return;
-                const auto enabled = authoredHandle->find ("enabled");
-                if (enabled != authoredHandle->end () && enabled->is_boolean () && !enabled->get<bool> ()) return;
-                output.enabled = true;
-                const auto x = authoredHandle->find ("x");
-                const auto y = authoredHandle->find ("y");
-                if (x != authoredHandle->end () && x->is_number ()) output.x = x->get<float> ();
-                if (y != authoredHandle->end () && y->is_number ()) output.y = y->get<float> ();
-            };
-            parseHandle ("back", key.back);
-            parseHandle ("front", key.front);
-            if (const auto constant = item.find ("step"); constant != item.end () && constant->is_boolean ())
-                key.constant = constant->get<bool> ();
-            keys.push_back (key);
-            previous = key.frame;
-        }
+        if (authored == source.end ()) continue;
+        DynamicValueParser::parseAnimationKeys (*authored, result->channels[channel]);
     }
     return result;
 }
@@ -137,6 +90,65 @@ bool isStringComboOption (const std::string& script, const std::string& property
     }
     return false;
 }
+}
+
+bool DynamicValueParser::parseAnimationOptions (const json& source, Model::PropertyAnimation& result) {
+    using Animation = Model::PropertyAnimation;
+    if (!source.is_object ()) return false;
+    const auto options = source.find ("options");
+    if (options == source.end () || !options->is_object ()) return false;
+    const auto fps = options->find ("fps");
+    const auto length = options->find ("length");
+    if (fps == options->end () || length == options->end () || !fps->is_number () ||
+        !length->is_number ()) return false;
+    result.fps = fps->get<float> ();
+    result.length = length->get<int> ();
+    if (!(result.fps > 0.0f) || !std::isfinite (result.fps) || result.length <= 0 ||
+        !std::isfinite (result.duration ())) return false;
+    if (const auto name = options->find ("name"); name != options->end () && name->is_string ())
+        result.name = name->get<std::string> ();
+    if (const auto mode = options->find ("mode"); mode != options->end () && mode->is_string ()) {
+        const auto value = mode->get<std::string> ();
+        if (value == "single") result.mode = Animation::Mode::Single;
+        else if (value == "mirror") result.mode = Animation::Mode::Mirror;
+    }
+    if (const auto paused = options->find ("startpaused"); paused != options->end () && paused->is_boolean ())
+        result.paused = paused->get<bool> ();
+    return true;
+}
+
+void DynamicValueParser::parseAnimationKeys (const json& authored, std::vector<Model::PropertyAnimation::Key>& keys) {
+    using Animation = Model::PropertyAnimation;
+    if (!authored.is_array ()) return;
+    int previous = -1;
+    for (const auto& item : authored) {
+        if (!item.is_object ()) continue;
+        const auto frame = item.find ("frame");
+        const auto value = item.find ("value");
+        if (frame == item.end () || value == item.end () || !frame->is_number () ||
+            !value->is_number ()) continue;
+        Animation::Key key;
+        key.frame = frame->get<int> ();
+        key.value = value->get<float> ();
+        if (key.frame <= previous || !std::isfinite (key.value)) continue;
+        auto parseHandle = [&item] (const char* name, Animation::Handle& output) {
+            const auto authoredHandle = item.find (name);
+            if (authoredHandle == item.end () || !authoredHandle->is_object ()) return;
+            const auto enabled = authoredHandle->find ("enabled");
+            if (enabled != authoredHandle->end () && enabled->is_boolean () && !enabled->get<bool> ()) return;
+            output.enabled = true;
+            const auto x = authoredHandle->find ("x");
+            const auto y = authoredHandle->find ("y");
+            if (x != authoredHandle->end () && x->is_number ()) output.x = x->get<float> ();
+            if (y != authoredHandle->end () && y->is_number ()) output.y = y->get<float> ();
+        };
+        parseHandle ("back", key.back);
+        parseHandle ("front", key.front);
+        if (const auto constant = item.find ("step"); constant != item.end () && constant->is_boolean ())
+            key.constant = constant->get<bool> ();
+        keys.push_back (key);
+        previous = key.frame;
+    }
 }
 
 DynamicValueUniquePtr DynamicValueParser::parse (const json& data, const Properties& properties,

@@ -4,6 +4,7 @@
 #include "ModelParser.h"
 
 #include "ShaderConstantParser.h"
+#include "DynamicValueParser.h"
 #include "TextureParser.h"
 #include "UserSettingParser.h"
 #include "WallpaperEngine/Data/Builders/ColorBuilder.h"
@@ -58,6 +59,54 @@ public:
     void update (const Color&, UpdateSource) override { }
     void update (UpdateSource) override { }
 };
+
+// Native: a camera object's "path" names a JSON file whose "paths"
+// array holds animation items. An item is kept only when its options define a
+// valid timeline; center/eye/up carry channels c0..c2 and zoom/fov
+// are plain key arrays.
+std::vector<SceneCameraObjectPath> parseCameraObjectPaths (const JSON& it, const Project& project) {
+    std::vector<SceneCameraObjectPath> result;
+    const auto path = it.find ("path");
+    if (path == it.end () || !path->is_string () || !project.assetLocator) return result;
+    try {
+        const auto data = WallpaperEngine::Data::JSON::parseAuthoringJson (
+            project.assetLocator->readString (path->get<std::string> ()), "camera object paths");
+        const auto items = data.find ("paths");
+        if (!data.is_object () || items == data.end () || !items->is_array ()) return result;
+        for (const auto& item : *items) {
+            if (!item.is_object ()) continue;
+            SceneCameraObjectPath parsed;
+            if (!DynamicValueParser::parseAnimationOptions (item, parsed.timeline)) continue;
+            const auto configure = [&parsed] (PropertyAnimation& track) {
+                track.fps = parsed.timeline.fps;
+                track.length = parsed.timeline.length;
+                track.mode = parsed.timeline.mode;
+            };
+            static constexpr const char* vectorNames[3] = {"center", "eye", "up"};
+            for (size_t vector = 0; vector < 3; ++vector) {
+                configure (parsed.vectors[vector]);
+                const auto track = item.find (vectorNames[vector]);
+                if (track == item.end () || !track->is_object ()) continue;
+                for (size_t channel = 0; channel < 3; ++channel) {
+                    const auto keys = track->find ("c" + std::to_string (channel));
+                    if (keys != track->end ())
+                        DynamicValueParser::parseAnimationKeys (*keys, parsed.vectors[vector].channels[channel]);
+                }
+            }
+            configure (parsed.zoom);
+            configure (parsed.fov);
+            if (const auto zoom = item.find ("zoom"); zoom != item.end ())
+                DynamicValueParser::parseAnimationKeys (*zoom, parsed.zoom.channels[0]);
+            if (const auto fov = item.find ("fov"); fov != item.end ())
+                DynamicValueParser::parseAnimationKeys (*fov, parsed.fov.channels[0]);
+            result.push_back (std::move (parsed));
+        }
+    } catch (const std::exception& error) {
+        sLog.error ("Cannot load camera object paths: ", error.what ());
+        result.clear ();
+    }
+    return result;
+}
 
 UserSettingUniquePtr textFloatSetting (const JSON& object, const Project& project, const char* key) {
     JSON authored = object.optional (key).value_or (JSON (1.0f));
@@ -276,6 +325,11 @@ ObjectUniquePtr ObjectParser::parse (const JSON& it, const Project& project) {
 	    .path = it.optional<std::string> ("path", ""),
 	    .fov = it.user ("fov", project.properties, 50.0f),
 	    .zoom = it.user ("zoom", project.properties, 1.0f),
+	    .sequentialQueue = [&it] {
+	        const auto queue = it.find ("queuemode");
+	        return queue != it.end () && queue->is_string () && queue->get<std::string> () == "sequential";
+	    } (),
+	    .paths = parseCameraObjectPaths (it, project),
 	});
     } else if (lightIt != it.end ()) {
         // constructor / descriptors, shared by every
