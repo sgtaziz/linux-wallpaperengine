@@ -120,6 +120,15 @@ CScene::CScene (
     // setup the scene camera
     this->m_camera = std::make_unique<Camera> (
         *this, scene->camera, Camera::selectActiveSceneCamera (scene->objects));
+    // Native creates the fade material once, here, only for a
+    // scene whose camerafade is on and that has root camera paths; turning the
+    // flag on later cannot start a fade, turning it off stops one.
+    if (scene->camera.fade->value->getBool () && !scene->camera.configuration.paths.empty ()) {
+        m_cameraFade = std::make_unique<SceneCameraFade> ();
+        if (const auto scheme = scene->project.properties.find ("schemecolor");
+            scheme != scene->project.properties.end () && scheme->second)
+            m_schemeColor = scheme->second.get ();
+    }
 
     float width = scene->camera.projection.width;
     float height = scene->camera.projection.height;
@@ -837,6 +846,14 @@ void CScene::renderFrame (const glm::ivec4& viewport) {
     // Native copies the completed scene and generates reflection mips before
     // DOF/HDR presentation. This snapshot is consumed by the next scene frame.
     if (m_mipMappedSceneFBO) m_mipMappedSceneFBO->snapshotFrom (*m_sceneFBO);
+}
+
+void CScene::renderOverFrame () {
+    if (!m_cameraFade || !getScene ().camera.fade->value->getBool ()) return;
+    const auto& target = m_hdrOutput ? m_hdrOutput : m_sceneFBO;
+    m_cameraFade->draw (target->getFramebuffer (), target->getRealWidth (), target->getRealHeight (),
+                        m_schemeColor ? m_schemeColor->getVec3 () : SceneCameraFade::kDefaultSchemeColor,
+                        m_camera->getPathFadeAlpha ());
 }
 
 void CScene::refreshAutomaticProjection () {

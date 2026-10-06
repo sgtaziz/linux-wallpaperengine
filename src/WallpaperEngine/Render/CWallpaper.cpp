@@ -583,6 +583,7 @@ void CWallpaper::render (
     if (needsSceneRender) {
 	this->renderFrame (sceneViewport);
 	this->combineHdrFrame ();
+	this->renderOverFrame ();
 	this->m_lastRenderedFrame = currentFrame;
     }
 #if !NDEBUG

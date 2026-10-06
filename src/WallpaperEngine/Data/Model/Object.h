@@ -294,6 +294,7 @@ struct ParticleEmitter {
     glm::vec3 distanceMin;
     glm::vec3 distanceMax;
     bool distanceMaxAuthored;
+    bool directionsAuthored = true;
     glm::vec3 origin;
     glm::vec3 offsetMin;
     glm::vec3 offsetMax;

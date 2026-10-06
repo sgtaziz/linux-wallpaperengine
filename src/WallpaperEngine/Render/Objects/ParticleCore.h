@@ -359,7 +359,10 @@ inline glm::vec3 nativeSphereDisplacement (float azimuthUnit, float axialUnit,
                       std::sin (azimuth) * radius * equator * directions.y,
                       std::cos (azimuth) * radius * equator * directions.z);
     const float length = glm::length (sample);
-    if (length == 0.0f) return glm::vec3 (0.0f);
+    // A zero sample (directions "0 0 0") normalizes to inf * 0 = NaN natively
+    // the particle is born at NaN and never
+    // drawn, and the NaN fails the fallback test so no extra draws happen.
+    if (length == 0.0f) return glm::vec3 (std::numeric_limits<float>::quiet_NaN ());
     sample /= length;
     // Record masks (sign < 0) (sign != 0): a lane whose
     // direction disagrees with a nonzero sign is negated.
@@ -368,6 +371,29 @@ inline glm::vec3 nativeSphereDisplacement (float azimuthUnit, float axialUnit,
             sample[axis] = -sample[axis];
     }
     return sample * (distanceMin + (distanceMax - distanceMin) * length);
+}
+
+struct BoxEmitterExtent {
+    glm::vec3 directions;
+    glm::vec3 distanceMax;
+};
+
+inline BoxEmitterExtent boxEmitterExtent (const glm::vec3& directions, bool directionsAuthored,
+                                          const glm::vec3& distanceMax, bool distanceMaxAuthored,
+                                          bool perspective) {
+    // Factory reads the scene orthographic bit 0x400: unauthored
+    // directions and distancemax are "1 1 1" in a
+    // perspective scene; the parser's "1 1 0" / "256 256 0" are the ortho values.
+    return {!directionsAuthored && perspective ? glm::vec3 (1.0f) : directions,
+            !distanceMaxAuthored && perspective ? glm::vec3 (1.0f) : distanceMax};
+}
+
+inline glm::vec3 emitterVelocity (const glm::vec3& direction, float length, float speed) {
+    // Opcodes 1 and 2 scale the direction by speed * rsqrt(length^2)
+    // a zero or NaN direction therefore
+    // gives a NaN velocity (inf * 0), which movement turns into a NaN position.
+    if (length > 0.0f) return direction * (speed / length);
+    return direction * (speed * std::numeric_limits<float>::infinity ());
 }
 
 inline glm::vec2 emitterSpeedBounds (float authoredMin, float authoredMax,

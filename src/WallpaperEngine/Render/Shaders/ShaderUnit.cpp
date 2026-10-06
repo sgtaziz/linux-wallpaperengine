@@ -6,6 +6,7 @@
 #include <cctype>
 #include <cstdint>
 #include <cmath>
+#include <limits>
 #include <functional>
 #include <map>
 #include <regex>
@@ -1109,6 +1110,26 @@ std::string ShaderUnit::applyBuiltinDeclarationLowering (std::string source) con
     return source;
 }
 
+int WallpaperEngine::Render::Shaders::nativeComboDefault (const JSON& value) {
+    // Native stores asInt () when jsoncpp isInt () holds (an int,
+    // a uint below 2^31, or an integral real in int range) and 0 otherwise,
+    // so strings, booleans and fractional or out-of-range numbers become 0.
+    constexpr double minimum = std::numeric_limits<int>::min ();
+    constexpr double maximum = std::numeric_limits<int>::max ();
+    if (value.is_number_integer ()) {
+	if (value.is_number_unsigned ())
+	    return value.get<uint64_t> () <= static_cast<uint64_t> (maximum) ? static_cast<int> (value.get<uint64_t> ()) : 0;
+	const auto integer = value.get<int64_t> ();
+	return integer >= minimum && integer <= maximum ? static_cast<int> (integer) : 0;
+    }
+    if (value.is_number_float ()) {
+	const double real = value.get<double> ();
+	double integral = 0.0;
+	if (real >= minimum && real <= maximum && std::modf (real, &integral) == 0.0) return static_cast<int> (real);
+    }
+    return 0;
+}
+
 void ShaderUnit::parseComboConfiguration (const std::string& content, const int defaultValue) {
     // Native stores only combo/default for runtime compilation.
     // Authored `require` controls editor visibility; it must not gate an
@@ -1137,16 +1158,9 @@ void ShaderUnit::parseComboConfiguration (const std::string& content, const int 
     if (entry == this->m_combos.end () && entryOverride == this->m_overrideCombos.end ()) {
 	// if no combo is defined just load the default settings
 	if (defvalue == data.end ()) {
-	    // TODO: PROPERLY SUPPORT EMPTY COMBOS
 	    this->m_discoveredCombos.emplace (combo, defaultValue);
-	} else if (defvalue->is_number_float ()) {
-	    sLog.exception ("float combos are not supported in shader ", this->m_file, ". ", combo);
-	} else if (defvalue->is_number_integer ()) {
-	    this->m_discoveredCombos.emplace (combo, defvalue->get<int> ());
-	} else if (defvalue->is_string ()) {
-	    sLog.exception ("string combos are not supported in shader ", this->m_file, ". ", combo);
 	} else {
-	    sLog.exception ("cannot parse combo information ", combo, ". unknown type for ", defvalue->dump ());
+	    this->m_discoveredCombos.emplace (combo, nativeComboDefault (*defvalue));
 	}
     }
 }

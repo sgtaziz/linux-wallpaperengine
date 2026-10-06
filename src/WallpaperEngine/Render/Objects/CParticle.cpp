@@ -1740,13 +1740,16 @@ EmitterFunc CParticle::createBoxEmitter (const ParticleEmitter& emitter, size_t 
 	}
     }
 
-    glm::vec3 flippedDirections = emitter.directions;
+    const auto extent = ParticleCore::boxEmitterExtent (emitter.directions, emitter.directionsAuthored,
+        emitter.distanceMax, emitter.distanceMaxAuthored, !getScene ().getCamera ().isOrthogonal ());
+    glm::vec3 flippedDirections = extent.directions;
     flippedDirections.y = -flippedDirections.y;
+    const glm::vec3 distanceMax = extent.distanceMax;
 
     const ParticleCore::EmitterScheduleConfig schedule = ParticleCore::scheduleConfig (emitter, rate);
 
     return
-	[this, emitter, transformedEmitterOrigin, controlPointIndex, flippedDirections, schedule, index,
+	[this, emitter, transformedEmitterOrigin, controlPointIndex, flippedDirections, distanceMax, schedule, index,
 	 state = ParticleCore::initialState (schedule)]
 	(std::vector<ParticleInstance>& particles, uint32_t& count, float dt) mutable {
 	    auto activeSchedule = schedule;
@@ -1787,7 +1790,7 @@ EmitterFunc CParticle::createBoxEmitter (const ParticleEmitter& emitter, size_t 
 		const glm::vec3& spawnOrigin = birthTransform.origin;
 
 		glm::vec3 randomPos = ParticleCore::nativeBoxDisplacement (
-		    m_rng, flippedDirections, emitter.distanceMin, emitter.distanceMax);
+		    m_rng, flippedDirections, emitter.distanceMin, distanceMax);
 		// cVar43 is preset world bit OR nonzero CP index.
 		if (useCPBasis) randomPos = birthTransform.basis * randomPos;
 
@@ -1808,8 +1811,7 @@ EmitterFunc CParticle::createBoxEmitter (const ParticleEmitter& emitter, size_t 
 		    emitter.speedMin, emitter.speedMax, speedOverrideValue ()->getFloat (), m_particle.flags);
 		const float speed = WallpaperEngine::Maths::randomFloat (
 		    m_rng, speedBounds.x, speedBounds.y);
-		p.velocity = directionLength > 0.0f
-		    ? velocityDirection * (speed / directionLength) : glm::vec3 (0.0f);
+		p.velocity = ParticleCore::emitterVelocity (velocityDirection, directionLength, speed);
         ParticleCore::initializeEmitterBirth (
             p, instanceBirthRgbGain (), alphaOverrideValue ()->getFloat (),
             20.0f * ((m_particle.flags & 0x80u) != 0 ? 1.0f : sizeOverrideValue ()->getFloat ()),
@@ -1926,8 +1928,7 @@ EmitterFunc CParticle::createSphereEmitter (const ParticleEmitter& emitter, size
 	    const float speed = WallpaperEngine::Maths::randomFloat (
 		m_rng, speedBounds.x, speedBounds.y);
 	    const float directionLength = glm::length (velocityDirection);
-	    p.velocity = directionLength > 0.0f
-		? velocityDirection * (speed / directionLength) : glm::vec3 (0.0f);
+	    p.velocity = ParticleCore::emitterVelocity (velocityDirection, directionLength, speed);
 
         ParticleCore::initializeEmitterBirth (
             p, instanceBirthRgbGain (), alphaOverrideValue ()->getFloat (),

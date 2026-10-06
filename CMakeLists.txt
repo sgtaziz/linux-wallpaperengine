@@ -423,6 +423,8 @@ set(COMMON_SOURCES
     src/WallpaperEngine/Render/WallpaperState.cpp
     src/WallpaperEngine/Render/Wallpapers/CScene.h
     src/WallpaperEngine/Render/Wallpapers/CScene.cpp
+    src/WallpaperEngine/Render/Wallpapers/SceneCameraFade.h
+    src/WallpaperEngine/Render/Wallpapers/SceneCameraFade.cpp
     src/WallpaperEngine/Render/Wallpapers/CVolumetrics.h
     src/WallpaperEngine/Render/Wallpapers/CVolumetrics.cpp
     src/WallpaperEngine/Render/Wallpapers/VolumetricLight.h

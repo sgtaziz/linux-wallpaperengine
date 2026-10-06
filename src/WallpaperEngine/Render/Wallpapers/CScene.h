@@ -11,6 +11,7 @@
 #include "WallpaperEngine/Scripting/ScriptEngine.h"
 #include "SpotLightShadow.h"
 #include "CVolumetrics.h"
+#include "SceneCameraFade.h"
 #include <array>
 #include <map>
 #include <optional>
@@ -134,6 +135,7 @@ public:
 
 protected:
     void renderFrame (const glm::ivec4& viewport) override;
+    void renderOverFrame () override;
     void updateMouse (const glm::ivec4& viewport);
     void dispatchCursorEvents ();
 
@@ -166,6 +168,8 @@ private:
 
     std::unique_ptr<Scripting::ScriptEngine> m_scriptEngine;
     std::unique_ptr<Camera> m_camera;
+    std::unique_ptr<SceneCameraFade> m_cameraFade;
+    const DynamicValue* m_schemeColor = nullptr;
     ObjectUniquePtr m_bloomObjectData;
     CObject* m_bloomObject = nullptr;
     bool m_hdrPostprocessing = false;
