@@ -971,6 +971,29 @@ TEST_CASE ("Ordered colour changes compose on the current colour stream", "[part
     }
 }
 
+TEST_CASE ("Overlapping alphafade windows OR the native ramp bits", "[particle][alphafade]") {
+    // Original 2.8.42 opcode 3 replay (, birth
+    // alpha 1, lifetime 12): with fadein > fadeout both masked ramps apply and
+    // the factor is their bitwise OR, not the fade-in ramp alone. The OR merges
+    // exponent bits, so one RCPPS ulp can move it between ~0.75 and ~2.0: the
+    // values hold only where RCPPS matches the replay CPU (Ryzen 9 9950X3D).
+    const auto bits = [] (float value) { return std::bit_cast<uint32_t> (nativeRuntimeReciprocal (value)); };
+    if (bits (12.0f) != 0x3daaa800u || bits (0.8f) != 0x3fa00000u || bits (0.5f) != 0x3ffff000u
+        || bits (0.99f) != 0x3f814800u)
+        SKIP ("RCPPS approximations differ from the replay machine; the OR depends on their exact bits");
+    REQUIRE (nativeRuntimeAlphaFade (4.8f, 12.0f, 0.8f, 0.2f) == 1.99993896f);
+    REQUIRE (nativeRuntimeAlphaFade (8.4f, 12.0f, 0.8f, 0.2f) == 1.74998486f);
+    // Outside the overlap only one masked ramp remains (life 0.1 / 0.95).
+    REQUIRE (nativeRuntimeAlphaFade (1.2f, 12.0f, 0.8f, 0.2f) == 0.124992371f);
+    REQUIRE (nativeRuntimeAlphaFade (11.4f, 12.0f, 0.8f, 0.2f) == 0.0625725091f);
+    // Installed Rain_Splash_copy2 (fadein 0.5, fadeout 0.01): far above the
+    // 0.2 / 0.8 fade-in-only values at life 0.1 / 0.4.
+    REQUIRE (nativeRuntimeAlphaFade (1.2f, 12.0f, 0.5f, 0.01f) == 0.924773991f);
+    REQUIRE (nativeRuntimeAlphaFade (4.8f, 12.0f, 0.5f, 0.01f) == 0.873975575f);
+    // Neither mask (fadein 0.2 < life 0.4 < fadeout 0.7): exactly 1.
+    REQUIRE (nativeRuntimeAlphaFade (4.8f, 12.0f, 0.2f, 0.7f) == 1.0f);
+}
+
 TEST_CASE ("Particle preset color summary comes from color components, not authored top level",
            "[particle][instance][parser]") {
     using WallpaperEngine::Data::Parsers::ObjectParser;
