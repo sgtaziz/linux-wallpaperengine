@@ -601,8 +601,13 @@ bool CImage::loadPuppetMesh (const glm::vec2& size) {
 	for (const auto& position : mesh.positions) {
 	    this->m_puppetRawPositions.insert (this->m_puppetRawPositions.end (), position.begin (), position.end ());
 	}
+	const auto uvScale = m_texture
+	    ? puppetTexcoordScale (m_texture->getRealWidth (), m_texture->getRealHeight (),
+	                           m_texture->getTextureWidth (0), m_texture->getTextureHeight (0), m_texture->isAnimated ())
+	    : std::array<float, 2> {1.0f, 1.0f};
 	for (const auto& uv : mesh.texcoords) {
-	    texcoords.insert (texcoords.end (), uv.begin (), uv.end ());
+	    texcoords.push_back (uv[0] * uvScale[0]);
+	    texcoords.push_back (uv[1] * uvScale[1]);
 	}
 	for (const auto& uv : mesh.texcoordsFull)
 	    texcoordsFull.insert (texcoordsFull.end (), uv.begin (), uv.end ());

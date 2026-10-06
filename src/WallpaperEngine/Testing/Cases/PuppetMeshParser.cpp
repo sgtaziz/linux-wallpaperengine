@@ -1036,3 +1036,14 @@ TEST_CASE ("Puppet emission rest inverse is distinct from render skin bind", "[p
     REQUIRE_THROWS_AS (puppetEmissionInverseBindMatrices (singularRest), std::runtime_error);
     REQUIRE (puppetInverseBindMatrices (singularRest)[0] == renderBind[0]);
 }
+
+TEST_CASE ("Puppet UVs scale into the image region of a padded raw texture", "[puppet][texture]") {
+    using WallpaperEngine::Render::Objects::puppetTexcoordScale;
+    // 3238423642's butterfly: a DXT texture stored 608x608 for a 600x600 image.
+    const auto padded = puppetTexcoordScale (600, 600, 608, 608, false);
+    REQUIRE (padded[0] == Catch::Approx (600.0f / 608.0f));
+    REQUIRE (padded[1] == Catch::Approx (600.0f / 608.0f));
+    // An embedded image stored at its own size, and an animated atlas, keep their UVs.
+    REQUIRE (puppetTexcoordScale (3658, 2000, 3658, 2000, false) == std::array<float, 2> {1.0f, 1.0f});
+    REQUIRE (puppetTexcoordScale (600, 600, 608, 608, true) == std::array<float, 2> {1.0f, 1.0f});
+}
