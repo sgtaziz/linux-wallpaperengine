@@ -92,8 +92,8 @@ inline std::vector<float> ropeDrawVertices (
     return vertices;
 }
 
-// Native warmup temporarily clears spawn/follow descriptor dispatch bits.
-// Death processing and emitter/initializer execution remain inner-tick work.
+// Native warmup temporarily clears the node's event byte, so births
+// dispatch nothing and expiry records slots only for rope renderers.
 class SuppressBirthEvents {
 public:
     explicit SuppressBirthEvents (bool& enabled) : m_enabled (enabled), m_previous (enabled) {

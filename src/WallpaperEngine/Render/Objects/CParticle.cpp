@@ -1342,6 +1342,9 @@ void CParticle::advanceChildren (ParticleCore::TickClock clock) {
 	auto& node = m_childNodes[childIndex];
 	if (!node.detached && node.parentBirthId == 0)
 	    node.runtime->setChildAnchor (m_simulationModelMatrix, glm::vec3 (0.0f), true);
+	// composes every event node from the parent's current stack;
+	// only its anchor stays as last written.
+	else node.runtime->m_childSceneParentMatrix = m_simulationModelMatrix;
 	if (node.follow) {
 	    const auto parent = std::find_if (m_particles.begin (),
 	        m_particles.begin () + m_particleCount,
@@ -1353,8 +1356,6 @@ void CParticle::advanceChildren (ParticleCore::TickClock clock) {
 		node.detached = true;
 		node.runtime->disableStaticEmittersRecursively ();
         node.runtime->m_eventParentSlot.reset ();
-		node.runtime->setChildAnchor (m_simulationModelMatrix,
-		    node.runtime->m_childParentPosition, false);
 	    }
 	}
 	node.runtime->inheritControlPointsFromParent (*this, m_particle.children[node.descriptor]);
@@ -1467,8 +1468,8 @@ void CParticle::spawnChild (size_t descriptor, const ParticleInstance* parent, b
             node.runtime->m_eventParentSlot = parent->poolSlot;
         }
         node.runtime->m_hasChildParentMatrix = true;
-        // One-shot spawn/death children keep their birth-space anchor. Static
-        // children and live follow children inherit the changing parent basis.
+        // anchors at spawn; live follow children re-anchor each
+        // tick, and every node composes the parent's current stack.
         node.runtime->setChildAnchor (m_simulationModelMatrix,
             parent ? parent->position : glm::vec3 (0.0f), parent == nullptr);
         if (reused) {
@@ -1509,15 +1510,17 @@ void CParticle::processChildEvents (const std::vector<ParticleInstance>& expired
                                     const std::vector<ParticleInstance>& born) {
     // A node at native depth >= 10 has no event groups: no detach, draw or spawn.
     if (!ParticleCore::nativeNodeOwnsChildren (m_childDepth)) return;
-    for (const auto& particle : expired) {
+    const bool expiredRecorded = ParticleCore::nativeRecordsExpiredSlots (
+        m_birthEventsEnabled, m_hasOrdinaryRopeRenderer);
+    if (expiredRecorded) for (const auto& particle : expired) {
         for (auto& node : m_childNodes) {
             if (node.follow && node.parentBirthId == particle.birthId) {
                 node.follow = false;
                 node.detached = true;
                 node.runtime->disableStaticEmittersRecursively ();
                 // Native event-follow invalidates at parent expiry.
+                // Detach keeps the last live anchor.
                 node.runtime->m_eventParentSlot.reset ();
-                node.runtime->setChildAnchor (m_simulationModelMatrix, particle.position, false);
                 if (traceParticleChildren (*this))
                     sLog.out ("CHILD_TRACE detach object=", m_particle.id,
                               " child=", node.model->id, " parentbirth=", particle.birthId);
@@ -1529,7 +1532,7 @@ void CParticle::processChildEvents (const std::vector<ParticleInstance>& expired
     // particle nodes consume the scene-owned MT stream.
     const auto draw = [this] { return ParticleCore::nativeRandomUnit (m_rng); };
     const auto activeNodes = [this] (size_t descriptor) { return activeChildNodes (descriptor); };
-    if (!expired.empty ()) {
+    if (expiredRecorded && !expired.empty ()) {
         std::vector<ParticleCore::NativeDeathDescriptor> deaths;
         for (size_t descriptor = 0; descriptor < m_particle.children.size (); ++descriptor) {
             const auto& child = m_particle.children[descriptor];
@@ -1542,20 +1545,18 @@ void CParticle::processChildEvents (const std::vector<ParticleInstance>& expired
                 spawnChild (descriptor, &expired[index], false);
             });
     }
-    // Native walks birth descriptors outermost, then the combined
-    // birth IDs from the full emitter stage. This keeps authored ordering.
-    // Births alone never pass maxcount, so the per-birth check matches the
-    // native skip of full descriptors and its break at equality.
+    if (!m_birthEventsEnabled || born.empty ()) return;
+    std::vector<ParticleCore::NativeBirthDescriptor> births;
     for (size_t descriptor = 0; descriptor < m_particle.children.size (); ++descriptor) {
         const auto& child = m_particle.children[descriptor];
-        if (!m_birthEventsEnabled || (child.type != "eventfollow" && child.type != "eventspawn")) continue;
-        const size_t limit = static_cast<size_t> (std::max (0, child.maxCount));
-        for (const auto& particle : born) {
-            if (activeNodes (descriptor) >= limit) break;
-            if (!(draw () <= child.probability)) continue;
-            spawnChild (descriptor, &particle, child.type == "eventfollow");
-        }
+        if (child.type == "eventfollow" || child.type == "eventspawn")
+            births.push_back ({descriptor, child.probability,
+                               static_cast<uint32_t> (std::max (0, child.maxCount))});
     }
+    ParticleCore::dispatchNativeBirthEvents (born.size (), births, activeNodes, draw,
+        [this, &born] (size_t index, size_t descriptor) {
+            spawnChild (descriptor, &born[index], m_particle.children[descriptor].type == "eventfollow");
+        });
 }
 
 void CParticle::disableStaticEmittersRecursively () {
@@ -3858,20 +3859,14 @@ void CParticle::setChildAnchor (const glm::mat4& parentStack,
     m_childReplacesSceneStack = !staticChild && (m_particle.flags & 1u) != 0;
     if (staticChild) return;
 
-    // event node gets B*T(particle)*descriptor. The child
-    // preset bit selects 's replacement or multiplication of the
-    // stack; the parent's preset bit selects the coordinate basis for B.
     const bool parentWorld = m_parentParticleRuntime
         && (m_parentParticleRuntime->m_particle.flags & 1u) != 0;
-    if (parentWorld && !m_childReplacesSceneStack) {
-        const auto inverse = Wallpapers::inverseFiniteTransform (parentStack);
-        if (inverse) m_childParentMatrix = *inverse;
-        else if (!m_reportedParentCPTransformFailure) {
-            sLog.error ("Particle event child parent transform is singular: ", m_particle.name);
-            m_reportedParentCPTransformFailure = true;
-        }
-    } else if (!parentWorld && m_childReplacesSceneStack) {
-        m_childParentMatrix = parentStack;
+    const auto basis = ParticleCore::nativeEventChildBasis (
+        parentStack, m_childReplacesSceneStack, parentWorld);
+    if (basis) m_childParentMatrix = *basis;
+    else if (!m_reportedParentCPTransformFailure) {
+        sLog.error ("Particle event child parent transform is singular: ", m_particle.name);
+        m_reportedParentCPTransformFailure = true;
     }
 }
 
@@ -3887,10 +3882,8 @@ void CParticle::updateMatrices () {
     const glm::mat4 local = perspective && !m_hasChildParentMatrix
         ? transform.authoredMatrix * flip : flip * transform.authoredMatrix * flip;
     if (m_hasChildParentMatrix) {
-        const glm::mat4 node = m_childParentMatrix
-            * glm::translate (glm::mat4 (1.0f), m_childParentPosition) * local;
-        m_modelMatrix = m_childReplacesSceneStack
-            ? node : m_childSceneParentMatrix * node;
+        m_modelMatrix = ParticleCore::nativeEventChildStack (m_childSceneParentMatrix,
+            m_childParentMatrix, m_childParentPosition, local, m_childReplacesSceneStack);
     } else {
         m_modelMatrix = perspective ? local
             : glm::translate (glm::mat4 (1.0f),
@@ -3907,9 +3900,7 @@ void CParticle::updateMatrices () {
     // 1 is set, then restores before recursively rendering children.
     // Linux's active scene/composition projection already maps centered world
     // coordinates into the target, so its world draw base is identity.
-    if ((m_particle.flags & 1u) != 0)
-        m_modelMatrix = perspective ? flip : glm::mat4 (1.0f);
-    if (!m_hasChildParentMatrix) this->applyParallaxToModelMatrix ();
+    this->applyParallaxToModelMatrix ();
     m_modelMatrixInverse = Wallpapers::inverseFiniteTransform (m_modelMatrix).value_or (glm::mat4 (1.0f));
 
     this->updateParticleViewProjection ();
@@ -3933,12 +3924,15 @@ void CParticle::updateMatrices () {
 }
 
 void CParticle::applyParallaxToModelMatrix () {
-    // Native translates the scene stack before dispatching this
-    // object's draw, from its root ancestor. The emitter's own rotation or
-    // negative/nonuniform scale must not rotate or magnify the camera
-    // movement (2334035201 fog/smoke), nor may a parent's.
-    m_modelMatrix = glm::translate (glm::mat4 (1.0f), getScene ().getLayerParallaxOffset (m_particle))
-        * m_modelMatrix;
+    // Native translates the view stack before dispatching this
+    // object's draw, from its root ancestor changes only the
+    // model stack, so static and event child nodes take the owner's shift
+    // once (they compose the parent's pre-parallax simulation matrix). The
+    // emitter's own rotation or negative/nonuniform scale must not rotate or
+    // magnify the camera movement (2334035201 fog/smoke), nor may a parent's.
+    m_modelMatrix = ParticleCore::nativeNodeDrawModel (
+        getScene ().getLayerParallaxOffset (instanceOverrideOwner ()->m_particle), m_simulationModelMatrix,
+        (m_particle.flags & 1u) != 0, !getScene ().getCamera ().isOrthogonal ());
 }
 
 void CParticle::updateParticleViewProjection () {
