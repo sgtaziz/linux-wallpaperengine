@@ -603,6 +603,33 @@ TEST_CASE ("g_ParallaxPosition and the layer offset agree on one top-origin curs
     }
 }
 
+TEST_CASE ("The shader pointer takes native's whole client pixel", "[scene][pointer]") {
+    // Native 2.8.42 probes (c2-a3, 1280x720 window): g_PointerPosition read
+    // exactly the integer cursor pixel / size on every run, while the Wayland
+    // client saw the same cursor up to 0.97 px further on. The bottom-origin
+    // framebuffer cursor comes from the input drivers.
+    using WallpaperEngine::Render::Wallpapers::sceneClientPixelFraction;
+    const glm::ivec4 window (0, 0, 1280, 720);
+    const glm::dvec2 subpixel = sceneClientPixelFraction ({321.93, 720.0 - 216.97}, window);
+    REQUIRE (subpixel.x == 321.0 / 1280.0);
+    REQUIRE (subpixel.y == 216.0 / 720.0);
+    // A whole-pixel cursor keeps the former fraction.
+    const glm::dvec2 whole = sceneClientPixelFraction ({897.0, 720.0 - 468.0}, window);
+    REQUIRE (whole.x == Catch::Approx (897.0 / 1280.0).margin (1e-12));
+    REQUIRE (whole.y == Catch::Approx (1.0 - (720.0 - 468.0) / 720.0).margin (1e-12));
+    // Output viewports are offset inside the framebuffer; outside clamps.
+    const glm::dvec2 offset = sceneClientPixelFraction ({175.7, 90.2}, {100, 50, 200, 100});
+    REQUIRE (offset.x == 75.0 / 200.0);
+    REQUIRE (offset.y == 59.0 / 100.0);
+    const glm::dvec2 outside = sceneClientPixelFraction ({-3.5, 900.0}, window);
+    REQUIRE (outside.x == 0.0);
+    REQUIRE (outside.y == 0.0);
+    // The disabled-mouse origin maps exactly as before (top-origin y = 1).
+    const glm::dvec2 origin = sceneClientPixelFraction ({0.0, 0.0}, window);
+    REQUIRE (origin.x == 0.0);
+    REQUIRE (origin.y == 1.0);
+}
+
 TEST_CASE ("Camera parallax sweeps the full canvas of a cover-cropped scene", "[scene][parallax]") {
     // Native scales the viewport-fraction cursor
     // by the full projection size. A 3440x1440 canvas shown
