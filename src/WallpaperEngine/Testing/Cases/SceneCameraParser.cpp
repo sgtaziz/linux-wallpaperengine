@@ -3,6 +3,7 @@
 
 #include "WallpaperEngine/Assets/AssetLocator.h"
 #include "WallpaperEngine/Data/Model/Project.h"
+#include "WallpaperEngine/Data/Model/Property.h"
 #include "WallpaperEngine/Data/Model/Wallpaper.h"
 #include "WallpaperEngine/Data/Parsers/WallpaperParser.h"
 #include "WallpaperEngine/Data/Parsers/ObjectParser.h"
@@ -23,6 +24,8 @@
 #include <memory>
 #include <string>
 #include <tuple>
+#include <utility>
+#include <vector>
 
 TEST_CASE ("Native layer input defaults survive authored configuration cloning",
            "[scene][parser][script][input]") {
@@ -828,6 +831,65 @@ TEST_CASE ("Native secondary membership ignores nonboolean reflected values and 
     REQUIRE (ObjectParser::parse (JSON::parse (R"({"id":3,"name":"omitted"})"), project)->reflected);
 }
 
+TEST_CASE ("Native layer perspective flag accepts a JSON bool or a bool user binding for image and text layers",
+           "[scene][parser][perspective]") {
+    using WallpaperEngine::Assets::AssetLocator;
+    using WallpaperEngine::Data::JSON::JSON;
+    using WallpaperEngine::Data::Model::DynamicValue;
+    using WallpaperEngine::Data::Model::Image;
+    using WallpaperEngine::Data::Model::Object;
+    using WallpaperEngine::Data::Model::Project;
+    using WallpaperEngine::Data::Model::PropertyBoolean;
+    using WallpaperEngine::Data::Model::PropertyData;
+    using WallpaperEngine::Data::Model::Text;
+    using WallpaperEngine::Data::Parsers::ObjectParser;
+    using WallpaperEngine::FileSystem::Container;
+    // sets flags bit 0x80 from a JSON bool, or from the bool
+    // "value" of an object; the base
+    // load always enables that branch. Anything else
+    // leaves the 0x2001 default clear.
+    auto files = std::make_unique<Container> ();
+    files->getVFS ().add ("material.json", R"({"passes":[{"shader":"genericimage2"}]})");
+    files->getVFS ().add ("layer.json", R"({"material":"material.json","width":64,"height":64})");
+    Project project {};
+    project.assetLocator = std::make_unique<AssetLocator> (std::move (files));
+    auto toggle = std::make_shared<PropertyBoolean> (PropertyData {"tilt3d", "tilt3d"}, true);
+    project.properties["tilt3d"] = toggle;
+    const auto enabled = [] (const Object& layer) {
+        return layer.perspective && layer.perspective->value->getBool ();
+    };
+    const std::vector<std::pair<std::string, bool>> values {
+        {"", false}, {"false", false}, {"true", true}, {"1", false}, {"0", false},
+        {"\"true\"", false}, {"null", false}, {R"({"value":true})", true},
+        {R"({"value":false})", false}, {R"({"value":1})", false}, {R"({"value":"true"})", false},
+        {"{}", false}, {R"({"user":"tilt3d","value":false})", true}};
+    for (const std::string kind : {"image", "text"}) {
+        for (const auto& [value, expected] : values) {
+            const std::string body = kind == "image" ? R"("image":"layer.json")" : R"("text":"12:00")";
+            const std::string field = value.empty () ? "" : ",\"perspective\":" + value;
+            const auto layer = ObjectParser::parse (JSON::parse (
+                R"({"id":1,"name":"layer","angles":"35 0 0",)" + body + field + "}"), project);
+            INFO (kind << " perspective = " << (value.empty () ? "<omitted>" : value));
+            REQUIRE ((kind == "image" ? layer->is<Image> () : layer->is<Text> ()));
+            REQUIRE (enabled (*layer) == expected);
+            // thisScene.createLayer configurations (cloned or script-built) use
+            // the same object factory as scene.json.
+            auto clone = JSON::parse (layer->initialConfiguration);
+            clone["id"] = 2;
+            REQUIRE (enabled (*ObjectParser::parse (clone, project)) == expected);
+        }
+    }
+    const auto created = ObjectParser::parse (JSON::parse (
+        R"({"id":7000,"text":"12:00","perspective":{"value":true},"angles":"35 0 0"})"), project);
+    REQUIRE (enabled (*created));
+    // A bound flag follows its user property.
+    const auto bound = ObjectParser::parse (JSON::parse (
+        R"({"id":7001,"text":"12:00","perspective":{"user":"tilt3d","value":false}})"), project);
+    REQUIRE (enabled (*bound));
+    toggle->update (false, DynamicValue::User);
+    REQUIRE_FALSE (enabled (*bound));
+}
+
 TEST_CASE ("Native scene bool flags default true and accept only boolean authoring values",
            "[scene][parser][secondary-reflection]") {
     using WallpaperEngine::Assets::AssetLocator;
@@ -1155,4 +1217,115 @@ TEST_CASE ("Camera shake moves the frame eye and center only while enabled", "[s
     // Perspective keeps z and ignores the orthographic height.
     const auto perspective = Camera::Shake::evaluate (cameraOn, 12.5f, false, 1080);
     REQUIRE (perspective.offset == cameraShakeOffset (2.75f, 0.15f, 0.77f, 12.5f, false, 0));
+}
+
+namespace {
+struct ParsedOrthographicScene {
+    WallpaperEngine::Data::Model::Project project {};
+    WallpaperEngine::Data::Model::WallpaperUniquePtr wallpaper;
+    [[nodiscard]] const WallpaperEngine::Data::Model::Scene& scene () const {
+        return *wallpaper->as<WallpaperEngine::Data::Model::Scene> ();
+    }
+};
+
+std::unique_ptr<ParsedOrthographicScene> parseOrthographicScene (int width, int height, const std::string& general) {
+    auto files = std::make_unique<WallpaperEngine::FileSystem::Container> ();
+    files->getVFS ().add ("scene.json", R"({"camera":{"center":"0 0 -1","eye":"0 0 0","up":"0 1 0"},)"
+        R"("general":{"orthogonalprojection":{"width":)" + std::to_string (width) + R"(,"height":)"
+        + std::to_string (height) + "}" + general + R"(},"objects":[]})");
+    auto parsed = std::make_unique<ParsedOrthographicScene> ();
+    parsed->project.type = WallpaperEngine::Data::Model::Project::Type_Scene;
+    parsed->project.assetLocator = std::make_unique<WallpaperEngine::Assets::AssetLocator> (std::move (files));
+    parsed->wallpaper = WallpaperEngine::Data::Parsers::WallpaperParser::parse (
+        WallpaperEngine::Data::JSON::JSON ("scene.json"), parsed->project);
+    return parsed;
+}
+
+glm::vec2 ndc (const glm::mat4& viewProjection, const glm::vec3& point) {
+    const auto clip = viewProjection * glm::vec4 (point, 1.0f);
+    return glm::vec2 (clip) / clip.w;
+}
+} // namespace
+
+TEST_CASE ("Native perspective layers keep the flat orthographic placement at z = 0",
+           "[scene][camera][projection][perspective]") {
+    using WallpaperEngine::Render::Camera;
+    // keeps the live view's x/y translation and swaps only its depth
+    // and the projection, so untilted z = 0 layers land exactly as flat ones.
+    const float width = 1920, height = 1080;
+    const auto parsed = parseOrthographicScene (1920, 1080, "");
+    const auto& sceneCamera = parsed->scene ().camera;
+    const Camera::Pose root {{0, 0, 0}, {0, 0, -1}, {0, 1, 0}};
+    const Camera::Pose offCentre {{1100, 610, 1}, {1100, 610, 0}, {0, 1, 0}};
+    const Camera::Shake shake {true, {9, -4, 0}};
+    const glm::vec3 authoredEye (137, -58, 1);
+    const std::vector<std::pair<const char*, std::pair<glm::mat4, glm::mat4>>> cameras {
+        {"centred", {Camera::makeOrthogonalProjectionForScene (width, height, 0, 0, root.eye),
+                     glm::lookAt (root.eye, root.center, root.up)}},
+        {"authored eye", {Camera::makeOrthogonalProjectionForScene (width, height, 0, 0, authoredEye),
+                          glm::lookAt (authoredEye, authoredEye + glm::vec3 (0, 0, -1), root.up)}},
+        {"script transform", {Camera::makeScriptOrthogonalProjection (width, height, 1.0f),
+                              Camera::renderLookAtForTransforms (offCentre, true, width, height)}},
+        {"zoomed script transform", {Camera::makeScriptOrthogonalProjection (width, height, 1.5f),
+                                     Camera::renderLookAtForTransforms (offCentre, true, width, height)}},
+        {"shake", {Camera::makeOrthogonalProjectionForScene (width, height, 0, 0, root.eye),
+                   Camera::untransformedOrthogonalRenderLookAt (shake.apply (root), shake, width, height)}},
+    };
+    for (const auto& [name, matrices] : cameras) {
+        const auto& [projection, view] = matrices;
+        const auto flat = projection * view;
+        const auto layer = Camera::orthogonalLayerPerspectiveViewProjection (projection, view, width, height, sceneCamera);
+        for (const glm::vec3 point : {glm::vec3 (0), glm::vec3 (-960, 540, 0), glm::vec3 (960, -540, 0),
+                                      glm::vec3 (-311, -127, 0), glm::vec3 (705, 402, 0)}) {
+            INFO (name << " (" << point.x << ", " << point.y << ")");
+            const auto expected = ndc (flat, point), actual = ndc (layer, point);
+            REQUIRE (actual.x == Catch::Approx (expected.x).margin (1e-4f));
+            REQUIRE (actual.y == Catch::Approx (expected.y).margin (1e-4f));
+        }
+    }
+    // The off-centre transformed eye still moves the layer, as it does flat.
+    const auto& [projection, view] = cameras[2].second;
+    REQUIRE (std::abs (ndc (Camera::orthogonalLayerPerspectiveViewProjection (
+        projection, view, width, height, sceneCamera), glm::vec3 (0)).x) > 0.1f);
+}
+
+TEST_CASE ("Native perspective layers use the override FOV eye distance",
+           "[scene][camera][projection][perspective]") {
+    using WallpaperEngine::Render::Camera;
+    // A point at depth z scales by d / (d - z), d = -1/(tan(fov/2) * P[1][1]).
+    const auto eyeDistance = [] (const ParsedOrthographicScene& parsed, float width, float height) {
+        const auto projection = Camera::makeOrthogonalProjectionForScene (width, height, 0, 0, glm::vec3 (0));
+        const auto layer = Camera::orthogonalLayerPerspectiveViewProjection (
+            projection, glm::mat4 (1.0f), width, height, parsed.scene ().camera);
+        const float z = 100.0f, ratio = ndc (layer, {200, 0, z}).x / ndc (layer, {200, 0, 0}).x;
+        return z * ratio / (ratio - 1.0f);
+    };
+    // Native 4K leaves capture: eye distance 989.6377 at 2160 px and 95 degrees.
+    const auto defaults = parseOrthographicScene (3840, 2160, R"(,"fov":50)");
+    REQUIRE (eyeDistance (*defaults, 3840, 2160) == Catch::Approx (989.6377f).margin (0.05f));
+    // perspectiveoverridefov is used, not the perspective fov.
+    const auto overridden = parseOrthographicScene (3840, 2160, R"(,"fov":50,"perspectiveoverridefov":67)");
+    REQUIRE (eyeDistance (*overridden, 3840, 2160)
+             == Catch::Approx (1080.0f / std::tan (glm::radians (33.5f))).margin (0.05f));
+    const auto at1080 = parseOrthographicScene (1920, 1080, "");
+    const float d1080 = eyeDistance (*at1080, 1920, 1080);
+    REQUIRE (d1080 / (d1080 - 100.0f) == Catch::Approx (1.2533f).margin (1e-3f));
+}
+
+TEST_CASE ("Native perspective layers foreshorten tilted quads",
+           "[scene][camera][projection][perspective]") {
+    using WallpaperEngine::Render::Camera;
+    const float width = 1920, height = 1080;
+    const auto parsed = parseOrthographicScene (1920, 1080, "");
+    const auto projection = Camera::makeOrthogonalProjectionForScene (width, height, 0, 0, glm::vec3 (0));
+    const auto view = glm::lookAt (glm::vec3 (0), glm::vec3 (0, 0, -1), glm::vec3 (0, 1, 0));
+    const auto layer = Camera::orthogonalLayerPerspectiveViewProjection (
+        projection, view, width, height, parsed->scene ().camera);
+    // A 200x60 quad tilted 35 degrees about X: its top edge comes toward the eye.
+    const auto world = glm::rotate (glm::mat4 (1.0f), glm::radians (35.0f), glm::vec3 (1, 0, 0));
+    const auto edgeWidth = [&] (const glm::mat4& viewProjection, float y) {
+        return ndc (viewProjection * world, {100, y, 0}).x - ndc (viewProjection * world, {-100, y, 0}).x;
+    };
+    REQUIRE (edgeWidth (layer, 30) / edgeWidth (layer, -30) == Catch::Approx (1.072f).margin (1e-3f));
+    REQUIRE (edgeWidth (projection * view, 30) / edgeWidth (projection * view, -30) == 1.0f);
 }

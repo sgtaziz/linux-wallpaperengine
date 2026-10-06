@@ -224,6 +224,23 @@ ObjectUniquePtr ObjectParser::parse (const JSON& it, const Project& project) {
 	};
     }
 
+    // Native writes bit 0x80 from a JSON bool, or from the bool
+    // "value" of an object, which also binds its user property.
+    // The base load always enables that binding, for
+    // scene.json and createLayer alike.
+    // Anything else, `1` included, leaves the 0x2001 default clear.
+    JSON perspective = JSON::object ();
+    if (const auto perspectiveIt = it.find ("perspective"); perspectiveIt != it.end ()) {
+        if (perspectiveIt->is_boolean ()) {
+            perspective["perspective"] = *perspectiveIt;
+        } else if (perspectiveIt->is_object ()) {
+            perspective["perspective"] = *perspectiveIt;
+            if (const auto value = perspectiveIt->find ("value"); value == perspectiveIt->end () || !value->is_boolean ())
+                perspective["perspective"]["value"] = false;
+        }
+    }
+    basedata.perspective = perspective.user ("perspective", project.properties, false);
+
     auto initialConfiguration = it;
     initialConfiguration.erase ("id");
     basedata.initialConfiguration = initialConfiguration.dump ();

@@ -6,6 +6,7 @@
 
 #include "Camera.h"
 #include "CObject.h"
+#include "Objects/ParticleCore.h"
 #include "Wallpapers/SceneTransform.h"
 
 using namespace WallpaperEngine;
@@ -266,6 +267,28 @@ glm::mat4 Camera::flag4OrthogonalView (float eyeDistance, const Shake& shake, fl
     view[3][0] = translation.x;
     view[3][1] = translation.y;
     return view;
+}
+
+glm::mat4 Camera::orthogonalLayerPerspectiveViewProjection (
+    const glm::mat4& projection, const glm::mat4& view, float width, float height,
+    const SceneData::Camera& camera) {
+    // Native push copies of the live stacks
+    // edits only the view translation (x/y less canvas offsets, zero here; z
+    // replaced by the eye distance from the projection's Y scale), then selects
+    // the camera perspective: picks perspectiveoverridefov (95 by
+    // default), not fov, in orthographic scenes. Linux keeps the eye
+    // translation and shake partly in the flat projection, so the live view is
+    // the flat VP less its symmetric (zoomed) orthographic box; z=0 points then
+    // land exactly where they do flat.
+    auto box = glm::ortho (-width * 0.5f, width * 0.5f, -height * 0.5f, height * 0.5f, -2000.0f, 2000.0f);
+    box[0][0] = projection[0][0];
+    box[1][1] = projection[1][1];
+    auto liveView = glm::inverse (box) * projection * view;
+    const float fov = camera.projection.perspectiveOverrideFov->value->getFloat ();
+    liveView[3][2] = -Objects::ParticleCore::flag4OrthographicEyeDistance (fov, projection[1][1]);
+    return glm::perspective (glm::radians (fov), width / height,
+                             camera.projection.nearz->value->getFloat (),
+                             camera.projection.farz->value->getFloat ()) * liveView;
 }
 
 glm::mat4 Camera::getCursorLookAt () const {

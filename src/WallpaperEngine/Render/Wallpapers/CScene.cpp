@@ -525,6 +525,19 @@ std::shared_ptr<const CFBO> CScene::getActiveRenderTarget () const {
     return m_activeRenderTarget ? m_activeRenderTarget : getFBO ();
 }
 const glm::mat4& CScene::getActiveRenderProjection () const { return m_activeRenderProjection; }
+glm::mat4 CScene::getLayerRenderProjection (bool perspective) const {
+    // Native swaps an orthographic
+    // scene's stacks for the perspectiveoverridefov camera. Only the root
+    // stacks are rebuilt; local composition and reflection scopes and true
+    // perspective scenes keep their current projection.
+    const auto& camera = getCamera ();
+    if (!perspective || !camera.isOrthogonal () || m_compositionScope.localProjection
+        || m_secondaryReflectionStage)
+        return m_activeRenderProjection;
+    return m_rootRenderClipTransform * Camera::orthogonalLayerPerspectiveViewProjection (
+        camera.getProjection (), camera.getRenderLookAt (), camera.getWidth (), camera.getHeight (),
+        getScene ().camera);
+}
 bool CScene::isChildCompositionScope () const { return m_compositionScope.offscreenTarget; }
 bool CScene::isLocalCompositionScope () const { return m_compositionScope.localProjection; }
 bool CScene::isMaxAlphaCompositionScope () const { return m_maxAlphaCompositionScope; }

@@ -44,6 +44,12 @@ struct ObjectData {
     bool reflected = true;
     /** Authored stop flag for overlapping SceneScript cursor targets. */
     bool disablePropagation = false;
+    /**
+     * Native `perspective`, registered on the
+     * image (text inherits it) and model tables. Set only from a JSON bool or a
+     * bool user-property binding; absent for objects not built by the parser.
+     */
+    UserSettingUniquePtr perspective;
     /** The point of origin of the object */
     UserSettingUniquePtr origin;
     /** Transform fields for generic scene/group objects. Typed objects keep their own transform fields. */
