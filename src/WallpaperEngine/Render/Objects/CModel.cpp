@@ -122,38 +122,8 @@ struct CModel::MeshDraw final : CRenderable {
         if (mesh.vertexMask & 8) m_texcoord = uploadBuffer (GL_ARRAY_BUFFER, mesh.texcoords);
         if (mesh.vertexMask & 0x20) m_texcoordFull = uploadBuffer (GL_ARRAY_BUFFER, mesh.texcoordsFull);
         if (!palette.empty () && (mesh.vertexMask & 0x01000000) != 0) {
-            std::vector<std::array<float, 3>> positions, normals;
-            std::vector<std::array<float, 4>> tangents;
-            for (size_t vertex = 0; vertex < mesh.positions.size (); ++vertex) {
-                const auto position = puppetSkinnedPosition (mesh, vertex, palette);
-                positions.push_back ({position.x, position.y, position.z});
-                const auto direction = [&] (glm::vec3 value) {
-                    glm::vec3 result (0);
-                    for (size_t lane = 0; lane < 4; ++lane) {
-                        const auto weight = mesh.blendWeights.at (vertex)[lane];
-                        if (weight != 0) result += glm::mat3 (palette.at (mesh.blendIndices.at (vertex)[lane]))
-                            * value * weight;
-                    }
-                    return result;
-                };
-                if (mesh.vertexMask & 2) {
-                    const auto normal = direction (glm::make_vec3 (mesh.normals.at (vertex).data ()));
-                    normals.push_back ({normal.x, normal.y, normal.z});
-                }
-                if (mesh.vertexMask & 4) {
-                    const auto& raw = mesh.tangents.at (vertex);
-                    const auto tangent = direction (glm::make_vec3 (raw.data ()));
-                    tangents.push_back ({tangent.x, tangent.y, tangent.z, raw[3]});
-                }
-            }
-            m_skinnedPosition = uploadBuffer (GL_ARRAY_BUFFER, positions);
-            m_skinnedNormal = uploadBuffer (GL_ARRAY_BUFFER, normals);
-            m_skinnedTangent = uploadBuffer (GL_ARRAY_BUFFER, tangents);
-            m_blendIndices = uploadBuffer (GL_ARRAY_BUFFER, mesh.blendIndices);
-            m_blendWeights = uploadBuffer (GL_ARRAY_BUFFER, mesh.blendWeights);
-            for (const auto& bone : palette)
-                for (size_t column = 0; column < 4; ++column)
-                    for (size_t row = 0; row < 3; ++row) m_bones.push_back (bone[column][row]);
+            m_skinMesh = mesh;
+            skin (mesh, palette, true);
         }
         if (wideIndices) {
             m_index = uploadBuffer (GL_ELEMENT_ARRAY_BUFFER, *wideIndices);
@@ -180,6 +150,58 @@ struct CModel::MeshDraw final : CRenderable {
                 if (buffer != GL_NONE) glDeleteBuffers (1, &buffer);
             throw;
         }
+    }
+
+    /**
+     * CPU-skins positions/normals/tangents and publishes the bone matrices for
+     * shader skinning. The first call creates the buffers; later calls (animated
+     * MODEL pose updates) refresh them in place.
+     */
+    void skin (const PuppetMeshData& mesh, const std::vector<glm::mat4>& palette, bool create) {
+        std::vector<std::array<float, 3>> positions, normals;
+        std::vector<std::array<float, 4>> tangents;
+        for (size_t vertex = 0; vertex < mesh.positions.size (); ++vertex) {
+            const auto position = puppetSkinnedPosition (mesh, vertex, palette);
+            positions.push_back ({position.x, position.y, position.z});
+            const auto direction = [&] (glm::vec3 value) {
+                glm::vec3 result (0);
+                for (size_t lane = 0; lane < 4; ++lane) {
+                    const auto weight = mesh.blendWeights.at (vertex)[lane];
+                    if (weight != 0) result += glm::mat3 (palette.at (mesh.blendIndices.at (vertex)[lane]))
+                        * value * weight;
+                }
+                return result;
+            };
+            if (mesh.vertexMask & 2) {
+                const auto normal = direction (glm::make_vec3 (mesh.normals.at (vertex).data ()));
+                normals.push_back ({normal.x, normal.y, normal.z});
+            }
+            if (mesh.vertexMask & 4) {
+                const auto& raw = mesh.tangents.at (vertex);
+                const auto tangent = direction (glm::make_vec3 (raw.data ()));
+                tangents.push_back ({tangent.x, tangent.y, tangent.z, raw[3]});
+            }
+        }
+        if (create) {
+            m_skinnedPosition = uploadBuffer (GL_ARRAY_BUFFER, positions);
+            m_skinnedNormal = uploadBuffer (GL_ARRAY_BUFFER, normals);
+            m_skinnedTangent = uploadBuffer (GL_ARRAY_BUFFER, tangents);
+            m_blendIndices = uploadBuffer (GL_ARRAY_BUFFER, mesh.blendIndices);
+            m_blendWeights = uploadBuffer (GL_ARRAY_BUFFER, mesh.blendWeights);
+        } else {
+            refreshBuffer (m_skinnedPosition, positions);
+            refreshBuffer (m_skinnedNormal, normals);
+            refreshBuffer (m_skinnedTangent, tangents);
+        }
+        m_bones.clear ();
+        for (const auto& bone : palette)
+            for (size_t column = 0; column < 4; ++column)
+                for (size_t row = 0; row < 3; ++row) m_bones.push_back (bone[column][row]);
+    }
+
+    /** Re-skins this mesh for an animated pose; no-op for unskinned meshes. */
+    void updatePalette (const std::vector<glm::mat4>& palette) {
+        if (m_skinMesh) skin (*m_skinMesh, palette, false);
     }
 
     void attachGeometry (Effects::CPass& target) {
@@ -345,6 +367,7 @@ struct CModel::MeshDraw final : CRenderable {
     GLuint m_skinnedPosition = GL_NONE, m_skinnedNormal = GL_NONE, m_skinnedTangent = GL_NONE;
     GLuint m_blendIndices = GL_NONE, m_blendWeights = GL_NONE;
     std::vector<float> m_bones;
+    std::optional<PuppetMeshData> m_skinMesh;
     GLsizei m_indexCount = 0;
     GLenum m_indexType = GL_UNSIGNED_SHORT;
     size_t m_shapeIndex = 0;
@@ -381,9 +404,27 @@ void CModel::setup () {
         // The shared parser validates subsequent MDAT/MDLA records. A MODEL
         // without animation layers uses the native unanimated local pose.
         if (!staticModelHasOnlyPadding (bytes, skeleton.sectionEndOffset)) {
-            const auto animation = parsePuppetFirstAnimationHeader (bytes, skeleton);
+            auto animation = parsePuppetFirstAnimationHeader (bytes, skeleton);
             if (!staticModelHasOnlyPadding (bytes, animation.sectionEndOffset))
                 throw std::runtime_error ("Model has unsupported trailing records");
+            // Native resolves each layer's clip id in the
+            // model's clip list; the pose is then evaluated like an image puppet.
+            if (!m_model.animationLayers.empty () && !animation.clips.empty ()) {
+                bool supported = true;
+                if (std::any_of (skeleton.bones.begin (), skeleton.bones.end (),
+                                 [] (const PuppetBoneRecord& bone) { return (bone.rawFlags & 2) != 0; })) {
+                    if (!skeleton.boneMappingKnown) supported = false;
+                    else for (size_t i = 0; i < skeleton.bones.size (); ++i)
+                        if ((skeleton.bones[i].rawFlags & 2) != 0 && skeleton.mappingRecordByBone[i] >= 0)
+                            supported = false;
+                }
+                if (supported) {
+                    m_layers.reset (skeleton, m_model.animationLayers);
+                    m_animation = std::move (animation);
+                } else
+                    sLog.error ("Model animation unavailable for ", m_model.path,
+                                ": unsupported flag-2 bone mapping");
+            }
         }
         const auto local = puppetUnanimatedLocalMatrices (skeleton);
         m_currentGlobals = puppetGlobalMatrices (skeleton, local);
@@ -449,6 +490,24 @@ void CModel::rebuildDynamic () {
         [] (const auto& left, const auto& right) { return left->depthFirst () && !right->depthFirst (); });
 }
 
+void CModel::preparePuppetPose () {
+    if (!m_animation || !m_skeleton) return;
+    const uint32_t frame = getScene ().getContext ().getDriver ().getFrameCounter ();
+    if (m_poseFrame == frame) return;
+    m_poseFrame = frame;
+    try {
+        const auto local = modelPuppetLocalMatrices (
+            *m_skeleton, *m_animation, m_model.animationLayers, m_layers,
+            std::max (0.0f, getScene ().getDeltaTime ()));
+        m_currentGlobals = puppetGlobalMatrices (*m_skeleton, local);
+        const auto palette = puppetSkinPalette (*m_skeleton, local);
+        for (const auto& mesh : m_meshes) mesh->updatePalette (palette);
+    } catch (const std::exception& error) {
+        sLog.error ("Model animation disabled for ", m_model.path, ": ", error.what ());
+        m_animation.reset ();
+    }
+}
+
 void CModel::updateDynamic () {
     if (!m_model.dynamic || m_dynamicRevision == m_model.dynamic->revision) return;
     for (const auto& mesh : m_meshes) mesh->update (m_model.dynamic->shapes.at (mesh->m_shapeIndex));
@@ -481,6 +540,7 @@ std::vector<ParticleCore::CollisionCapsule> CModel::collisionCapsules (const glm
 }
 
 void CModel::render () {
+    preparePuppetPose ();
     if (m_model.dynamic && m_dynamicStructureRevision != m_model.dynamic->structureRevision)
         rebuildDynamic ();
     else if (m_model.dynamic && m_dynamicRevision != m_model.dynamic->revision)
@@ -525,6 +585,7 @@ bool CModel::castsShadow () const {
 void CModel::renderShadowCaster (const DepthTarget& atlas, const Wallpapers::ShadowAtlasTile& tile,
                                  const glm::mat4& viewProjection) {
     if (!castsShadow ()) return;
+    preparePuppetPose ();
     if (m_model.dynamic && m_dynamicStructureRevision != m_model.dynamic->structureRevision)
         rebuildDynamic ();
     else if (m_model.dynamic && m_dynamicRevision != m_model.dynamic->revision)

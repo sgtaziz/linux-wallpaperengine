@@ -1,4 +1,5 @@
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/catch_approx.hpp>
 
 #include "WallpaperEngine/Data/JSON.h"
 #include "WallpaperEngine/Data/Model/Object.h"
@@ -10,6 +11,7 @@
 #include "WallpaperEngine/FileSystem/Container.h"
 #include "WallpaperEngine/FileSystem/Adapters/Directory.h"
 #include "WallpaperEngine/Logging/Log.h"
+#include "WallpaperEngine/Render/Objects/ModelPuppetPose.h"
 
 #include <chrono>
 #include <filesystem>
@@ -435,6 +437,76 @@ TEST_CASE ("Image animation layers retain authored blend controls", "[json][imag
     REQUIRE (image->animationLayers[0]->blendTime == 0.75f);
     REQUIRE (image->animationLayers[1]->additive);
     REQUIRE (image->animationLayers[1]->blendTime == 0.5f);
+}
+
+TEST_CASE ("Scene MODEL animation layers parse like image layers and drive the skinned pose", "[json][model][puppet]") {
+    using namespace WallpaperEngine::Render::Objects;
+    using WallpaperEngine::Data::Model::Project;
+    using WallpaperEngine::Data::Model::SceneModel;
+    using WallpaperEngine::Data::Parsers::ObjectParser;
+    Project project {};
+    const auto parse = [&] (const char* layers) {
+        const auto data = parseAuthoringJson (std::string (R"({"id": 9, "name": "m", "model": "models/m.mdl")") +
+                                              layers + "}", "scene.json");
+        return ObjectParser::parse (data, project);
+    };
+    const auto none = parse ("");
+    REQUIRE (dynamic_cast<const SceneModel&> (*none).animationLayers.empty ());
+
+    const auto object = parse (R"(, "animationlayers": [
+        {"id": 5, "animation": 77, "visible": true, "rate": 1.0, "blend": 1.0, "additive": false},
+        {"id": 6, "animation": 999, "visible": true},
+        {"id": 7, "animation": 77, "visible": false}])");
+    const auto& model = dynamic_cast<const SceneModel&> (*object);
+    REQUIRE (model.animationLayers.size () == 3);
+    REQUIRE (model.animationLayers[0]->animation->value->getInt () == 77);
+    REQUIRE (model.animationLayers[0]->visible->value->getBool ());
+    REQUIRE_FALSE (model.animationLayers[2]->visible->value->getBool ());
+
+    PuppetSkeletonData skeleton;
+    skeleton.bones.resize (2);
+    skeleton.bones[0].parentIndex = -1;
+    skeleton.bones[1].parentIndex = 0;
+    const glm::mat4 childBind = glm::translate (glm::mat4 (1.0f), glm::vec3 (1, 0, 0));
+    for (size_t i = 0; i < 16; ++i) {
+        skeleton.bones[0].matrix[i] = glm::value_ptr (glm::mat4 (1.0f))[i];
+        skeleton.bones[1].matrix[i] = glm::value_ptr (childBind)[i];
+    }
+    PuppetAnimationHeader animation;
+    PuppetClipHeader clip;
+    clip.rawId = 77;
+    clip.rawRate = 1.0f;
+    clip.rawFrameCount = 1;
+    clip.tracks.resize (2);
+    clip.tracks[0].rawSamples = {{0, 0, 0, 0, 0, 0, 1, 1, 1}, {2, 0, 0, 0, 0, 0, 1, 1, 1}};
+    clip.tracks[1].rawSamples = {{1, 0, 0, 0, 0, 0, 1, 1, 1}, {1, 0, 0, 0, 0, 0, 1, 1, 1}};
+    animation.clips.push_back (clip);
+    PuppetMeshData mesh;
+    mesh.vertexMask = 0x01800009;
+    mesh.positions.push_back ({1, 0, 0});
+    mesh.blendIndices.push_back ({0, 1, 0, 0});
+    mesh.blendWeights.push_back ({1, 0, 0, 0});
+    const auto vertexX = [&] (const std::vector<glm::mat4>& local) {
+        return puppetSkinnedPosition (mesh, 0, puppetSkinPalette (skeleton, local)).x;
+    };
+
+    ModelPuppetLayers state;
+    state.reset (skeleton, model.animationLayers);
+    // Only the visible layer whose clip exists contributes; time advances by the frame delta.
+    REQUIRE (vertexX (modelPuppetLocalMatrices (skeleton, animation, model.animationLayers, state, 0.5f))
+             == Catch::Approx (2.0f));
+    REQUIRE (vertexX (modelPuppetLocalMatrices (skeleton, animation, model.animationLayers, state, 0.25f))
+             == Catch::Approx (2.5f));
+    // Without layers (or with none resolving) the model keeps its bind pose.
+    const auto& noLayers = dynamic_cast<const SceneModel&> (*none).animationLayers;
+    ModelPuppetLayers idle;
+    idle.reset (skeleton, noLayers);
+    REQUIRE (vertexX (modelPuppetLocalMatrices (skeleton, animation, noLayers, idle, 0.5f)) == Catch::Approx (1.0f));
+    std::vector<WallpaperEngine::Data::Model::ImageAnimationLayerUniquePtr> unresolved;
+    unresolved.push_back (std::move (const_cast<SceneModel&> (model).animationLayers[1]));
+    ModelPuppetLayers missing;
+    missing.reset (skeleton, unresolved);
+    REQUIRE (vertexX (modelPuppetLocalMatrices (skeleton, animation, unresolved, missing, 0.5f)) == Catch::Approx (1.0f));
 }
 
 TEST_CASE ("Image copybackground accepts literal and wrapped authoring values", "[json][image][parser]") {
