@@ -14,6 +14,7 @@
 #include <glm/mat4x4.hpp>
 
 #include "WallpaperEngine/Render/Objects/CRenderable.h"
+#include "WallpaperEngine/Render/Objects/TextLayoutBox.h"
 #include "WallpaperEngine/Scripting/ScriptEngine.h"
 #include "WallpaperEngine/Scripting/ScriptableObject.h"
 
@@ -43,7 +44,11 @@ public:
     void setup () override;
     void render () override;
     bool executeMaterialFunction (const std::string& name);
-    [[nodiscard]] glm::vec2 getLayoutSize () const { return m_quadSize; }
+    // Native layer size: the layout box plus the
+    // gated padding on both sides. Script `size` reads it.
+    [[nodiscard]] glm::vec2 getLayoutSize () const;
+    // The glyph raster extent, which the cursor hit rectangle keeps.
+    [[nodiscard]] glm::vec2 getRasterSize () const { return m_quadSize; }
     [[nodiscard]] glm::vec2 getLayoutOffset () const;
     [[nodiscard]] const std::string& getHorizontalAlign () const { return m_horizontalAlign; }
     [[nodiscard]] const std::string& getVerticalAlign () const { return m_verticalAlign; }
@@ -80,6 +85,7 @@ private:
     void setupEffects ();
     void resizeEffectTargets ();
     bool hasVisibleEffects () const;
+    glm::vec2 layerPadding () const;
     std::shared_ptr<const TextureProvider> runEffects ();
 
     const Text& m_text;
@@ -90,6 +96,7 @@ private:
     std::string m_lastRenderedText;
     long m_lastCharacterSize26_6 = 0;
     glm::vec2 m_lastSpacing = { 0.0f, 0.0f };
+    glm::vec2 m_lastPadding = { 0.0f, 0.0f };
     glm::vec3 m_lastRasterColor = { -1.0f, -1.0f, -1.0f };
     glm::vec3 m_lastRasterBackgroundColor = { -1.0f, -1.0f, -1.0f };
     float m_lastRasterOpacity = -1.0f;
@@ -126,6 +133,7 @@ private:
     GLint m_uFlipV = -1;
     GLint m_uOpaqueBackground = -1;
     GLint m_uBackgroundColor = -1;
+    GLint m_uBackgroundRect = -1;
     GLint m_uGlyphUvOffset = -1;
     GLint m_uGlyphUvScale = -1;
     GLint m_uEffectFinal = -1;
@@ -165,6 +173,7 @@ private:
     glm::vec2 m_quadSize = { 0.0f, 0.0f };
     glm::vec2 m_rasterCenter = { 0.0f, 0.0f };
     float m_layoutMinX = 0.0f;
+    TextLayoutBox m_layoutBox;
     float m_layoutMaxX = 0.0f;
     std::string m_lastRasterHorizontalAlign;
     int m_layoutRows = 1;

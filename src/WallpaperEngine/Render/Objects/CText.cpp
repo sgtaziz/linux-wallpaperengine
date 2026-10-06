@@ -70,6 +70,7 @@ uniform float uNodeAlpha;
 uniform bool uFlipV;
 uniform bool uOpaqueBackground;
 uniform vec4 uBackgroundColor;
+uniform vec4 uBackgroundRect;
 uniform vec2 uGlyphUvOffset;
 uniform vec2 uGlyphUvScale;
 uniform bool uEffectFinal;
@@ -92,7 +93,10 @@ void main() {
         glyph = texture(uTexture, glyphUV);
     }
     if (uOpaqueBackground) {
-        FragColor = withinGlyph ? glyph : vec4(uBackgroundColor.rgb, uNodeAlpha);
+        bool withinBackground = all(greaterThanEqual(vUV, uBackgroundRect.xy)) &&
+            all(lessThanEqual(vUV, uBackgroundRect.zw));
+        FragColor = withinGlyph ? glyph
+            : withinBackground ? vec4(uBackgroundColor.rgb, uNodeAlpha) : vec4(0.0);
     } else if (uOffscreenBackdrop) {
         vec2 backdropUV = vBackdropPosition.xy / vBackdropPosition.w * 0.5 + 0.5;
         vec3 backdrop = texture(uBackdropTexture, backdropUV).rgb;
@@ -445,9 +449,9 @@ void CText::setupEffects () {
 
 void CText::resizeEffectTargets () {
     if (m_text.effects.empty ()) return;
-    const glm::vec2 pad = glm::clamp (m_text.padding->value->getVec2 (), glm::vec2 (0.0f), glm::vec2 (512.0f));
-    const glm::vec2 dimensions = glm::vec2 (m_textureSize) + 2.0f * pad;
-    const glm::ivec2 size = glm::max (glm::ivec2 (1), glm::ivec2 (glm::ceil (dimensions)));
+    // Native: the layout box plus padding, truncated to integers.
+    const glm::vec2 dimensions = getLayoutSize ();
+    const glm::ivec2 size = glm::max (glm::ivec2 (1), glm::ivec2 (dimensions));
     if (size == m_effectTargetSize && m_textTarget) return;
     m_effectTargetSize = size;
     const auto width = static_cast<uint32_t> (size.x);
@@ -472,6 +476,18 @@ void CText::resizeEffectTargets () {
     m_effectSub->clear (glm::vec4 (0.0f));
     for (const auto& target : m_sizedTargets)
 	target.provider->create (*target.descriptor, TextureFlags_NoFlags, dimensions);
+}
+
+glm::vec2 CText::layerPadding () const {
+    const glm::vec2 authored = m_text.padding->value->getVec2 ();
+    // The saved layer sizes of installed scenes count only visible effects.
+    const bool effects = hasVisibleEffects ();
+    const bool opaque = m_text.opaqueBackground->value->getBool ();
+    return {textLayerPadding (authored.x, effects, opaque), textLayerPadding (authored.y, effects, opaque)};
+}
+
+glm::vec2 CText::getLayoutSize () const {
+    return glm::vec2 (m_layoutBox.width (), m_layoutBox.height ()) + 2.0f * layerPadding ();
 }
 
 bool CText::hasVisibleEffects () const {
@@ -586,6 +602,8 @@ void CText::rebuildTextureFrom (const std::string& text) {
     // Native adds authored Y spacing directly to the face line metric; it
     // does not clamp overlapping or reverse-order rows.
     const float lineHeight = static_cast<float> (m_ftFace->size->metrics.height >> 6) + rowSpacing;
+    m_layoutBox = textLayoutBox (rows, letterSpacing, lineHeight,
+                                 static_cast<float> (m_ftFace->size->metrics.ascender >> 6));
     int minInkX = 0, maxInkX = 0, minInkY = 0, maxInkY = 0;
     float maxAdvance = 0.0f;
     bool hasInk = false;
@@ -714,15 +732,37 @@ void CText::rebuildTextureFrom (const std::string& text) {
             static_cast<uint8_t> (std::lround (background.b * 255.0f)),
             static_cast<uint8_t> (std::lround (rasterOpacity * 255.0f)),
         };
-        for (size_t index = 0; index < pixels.size (); index += 4)
-            std::copy (std::begin (channels), std::end (channels), pixels.begin () + index);
-        if (floatRaster)
-            for (size_t index = 0; index < floatPixels.size (); index += 4) {
-                floatPixels[index] = background.r * backgroundBrightness;
-                floatPixels[index + 1] = background.g * backgroundBrightness;
-                floatPixels[index + 2] = background.b * backgroundBrightness;
-                floatPixels[index + 3] = channels[3] / 255.0f;
+        // Native draws the background over the layout box plus
+        // padding only; raster pixels outside it start as plain glyph texels.
+        const glm::vec2 pad = layerPadding ();
+        const float left = m_layoutBox.minX - pad.x - static_cast<float> (originX);
+        const float right = m_layoutBox.maxX + pad.x - static_cast<float> (originX);
+        const float top = -m_layoutBox.maxY - pad.y - static_cast<float> (originY);
+        const float bottom = -m_layoutBox.minY + pad.y - static_cast<float> (originY);
+        for (int row = 0; row < height; ++row) {
+            for (int col = 0; col < width; ++col) {
+                const size_t index = (static_cast<size_t> (row) * width + col) * 4;
+                const float x = static_cast<float> (col) + 0.5f, y = static_cast<float> (row) + 0.5f;
+                if (x < left || x > right || y < top || y > bottom) {
+                    pixels[index] = monoRed;
+                    pixels[index + 1] = monoGreen;
+                    pixels[index + 2] = monoBlue;
+                    if (floatRaster) {
+                        floatPixels[index] = monoFloatColor.r;
+                        floatPixels[index + 1] = monoFloatColor.g;
+                        floatPixels[index + 2] = monoFloatColor.b;
+                    }
+                    continue;
+                }
+                std::copy (std::begin (channels), std::end (channels), pixels.begin () + index);
+                if (floatRaster) {
+                    floatPixels[index] = background.r * backgroundBrightness;
+                    floatPixels[index + 1] = background.g * backgroundBrightness;
+                    floatPixels[index + 2] = background.b * backgroundBrightness;
+                    floatPixels[index + 3] = channels[3] / 255.0f;
+                }
             }
+        }
     } else if (!offscreenGlyphBlend)
         for (size_t index = 0; index < pixels.size (); index += 4) {
             pixels[index] = monoRed;
@@ -846,6 +886,7 @@ void CText::rebuildTextureFrom (const std::string& text) {
     m_quadSize = { static_cast<float> (width), static_cast<float> (height) };
     m_lastRenderedText = text;
     m_lastSpacing = authoredSpacing;
+    m_lastPadding = m_text.padding->value->getVec2 ();
     m_lastRasterColor = m_text.color->value->getVec3 ();
     m_lastRasterBackgroundColor = m_text.backgroundColor->value->getVec3 ();
     m_lastRasterOpacity = rasterOpacity;
@@ -900,6 +941,7 @@ void CText::buildShader () {
     m_uFlipV = glGetUniformLocation (m_program, "uFlipV");
     m_uOpaqueBackground = glGetUniformLocation (m_program, "uOpaqueBackground");
     m_uBackgroundColor = glGetUniformLocation (m_program, "uBackgroundColor");
+    m_uBackgroundRect = glGetUniformLocation (m_program, "uBackgroundRect");
     m_uGlyphUvOffset = glGetUniformLocation (m_program, "uGlyphUvOffset");
     m_uGlyphUvScale = glGetUniformLocation (m_program, "uGlyphUvScale");
     m_uEffectFinal = glGetUniformLocation (m_program, "uEffectFinal");
@@ -998,6 +1040,7 @@ void CText::render () {
     } else if (fontChanged || renderedText != m_lastRenderedText
                || m_horizontalAlign != m_lastRasterHorizontalAlign
                || m_text.spacing->value->getVec2 () != m_lastSpacing
+               || (opaqueBackground && m_text.padding->value->getVec2 () != m_lastPadding)
 	       || m_text.color->value->getVec3 () != m_lastRasterColor
 	       || m_text.backgroundColor->value->getVec3 () != m_lastRasterBackgroundColor
 	       || rasterOpacity != m_lastRasterOpacity
@@ -1045,9 +1088,22 @@ void CText::render () {
 
     const auto sceneTarget = getScene ().getActiveRenderTarget ();
     const bool useEffects = hasVisibleEffects () && m_textTarget;
+    if (useEffects) resizeEffectTargets ();
+    // Quad-local rectangles, y up, relative to the raster center that `mvp`
+    // places. Native draws the background over the layout box
+    // plus padding; draws into a target that holds that box at
+    // (padding, padding).
+    const glm::vec2 layerPad = layerPadding ();
+    const glm::vec2 boxCenter = glm::vec2 (m_layoutBox.centerX (), m_layoutBox.centerY ()) - m_rasterCenter;
+    const glm::vec2 boxHalf = glm::vec2 (m_layoutBox.width (), m_layoutBox.height ()) * 0.5f;
+    const glm::vec2 backgroundMin = boxCenter - boxHalf - layerPad;
+    const glm::vec2 backgroundMax = boxCenter + boxHalf + layerPad;
+    const glm::vec2 targetSize (m_effectTargetSize);
+    const glm::vec2 targetCenter = boxCenter - boxHalf - layerPad + targetSize * 0.5f;
+    const glm::mat4 targetQuad = glm::translate (glm::mat4 (1.0f), glm::vec3 (targetCenter, 0.0f))
+        * glm::scale (glm::mat4 (1.0f), glm::vec3 (targetSize / m_quadSize, 1.0f));
     glm::mat4 drawMvp = mvp;
     if (useEffects) {
-	resizeEffectTargets ();
 	m_textTarget->clear (glm::vec4 (0.0f));
 	glBindFramebuffer (GL_FRAMEBUFFER, m_textTarget->getFramebuffer ());
 	glViewport (0, 0, m_textTarget->getRealWidth (), m_textTarget->getRealHeight ());
@@ -1073,26 +1129,33 @@ void CText::render () {
     glUniform1f (m_uNodeAlpha, opaqueBackground ? rasterOpacity : 1.0f);
     glUniform1i (m_uEffectFinal, 0);
     glUniform1i (m_uOffscreenBackdrop, useEffects && !opaqueBackground ? 1 : 0);
-    const glm::vec2 paddedSize = useEffects
-        ? glm::vec2 (m_effectTargetSize)
-        : m_quadSize + 2.0f * glm::clamp (m_text.padding->value->getVec2 (),
-              glm::vec2 (0.0f), glm::vec2 (512.0f));
     if (opaqueBackground || (useEffects && offscreenGlyphBlend)) {
-	// Native text expands its background target by twice the authored
-	// padding, capped at 512 on each axis. Composite its background and
-	// glyph coverage in one draw so scene alpha applies only once.
-	const glm::vec2 pad = (paddedSize - m_quadSize) * 0.5f;
-	drawMvp = drawMvp * glm::scale (glm::mat4 (1.0f),
-	    glm::vec3 (paddedSize / m_quadSize, 1.0f));
+	// Composite the background and glyph coverage in one draw so scene
+	// alpha applies only once. The direct quad covers the background and
+	// the whole raster, whose ink native leaves unclipped; the effect
+	// quad covers its target.
+	const glm::vec2 rasterHalf = m_quadSize * 0.5f;
+	const glm::vec2 drawMin = useEffects ? targetCenter - targetSize * 0.5f
+	    : glm::min (backgroundMin, -rasterHalf);
+	const glm::vec2 drawMax = useEffects ? targetCenter + targetSize * 0.5f
+	    : glm::max (backgroundMax, rasterHalf);
+	const glm::vec2 drawSize = drawMax - drawMin;
+	const glm::vec2 drawCenter = (drawMin + drawMax) * 0.5f;
+	drawMvp = drawMvp * glm::translate (glm::mat4 (1.0f),
+	        glm::vec3 (useEffects ? drawCenter - targetCenter : drawCenter, 0.0f))
+	    * glm::scale (glm::mat4 (1.0f), glm::vec3 (drawSize / m_quadSize, 1.0f));
 	const glm::vec4 background = m_text.backgroundColor->value->getVec4 ();
 	glUniform4f (m_uBackgroundColor, background.r * backgroundBrightness,
             background.g * backgroundBrightness, background.b * backgroundBrightness, 1.0f);
-	glUniform2f (m_uGlyphUvOffset, pad.x / paddedSize.x, pad.y / paddedSize.y);
-	glUniform2f (m_uGlyphUvScale, paddedSize.x / m_quadSize.x, paddedSize.y / m_quadSize.y);
+	const glm::vec2 glyphOffset = (-rasterHalf - drawMin) / drawSize;
+	glUniform2f (m_uGlyphUvOffset, glyphOffset.x, glyphOffset.y);
+	glUniform2f (m_uGlyphUvScale, drawSize.x / m_quadSize.x, drawSize.y / m_quadSize.y);
+	const glm::vec2 backgroundLow = (backgroundMin - drawMin) / drawSize;
+	const glm::vec2 backgroundHigh = (backgroundMax - drawMin) / drawSize;
+	glUniform4f (m_uBackgroundRect, backgroundLow.x, backgroundLow.y, backgroundHigh.x, backgroundHigh.y);
     }
     glUniformMatrix4fv (m_uMVP, 1, GL_FALSE, glm::value_ptr (drawMvp));
-    const glm::mat4 backdropMvp = mvp * glm::scale (glm::mat4 (1.0f),
-        glm::vec3 (paddedSize / m_quadSize, 1.0f));
+    const glm::mat4 backdropMvp = mvp * targetQuad;
     glUniformMatrix4fv (m_uBackdropMVP, 1, GL_FALSE, glm::value_ptr (backdropMvp));
     glUniform1i (m_uOpaqueBackground, opaqueBackground ? 1 : 0);
 
@@ -1123,8 +1186,7 @@ void CText::render () {
 	    getScene ().isMaxAlphaCompositionScope () ? GL_MAX : GL_FUNC_ADD);
 	if (getScene ().isMaxAlphaCompositionScope ())
 	    glBlendFuncSeparate (GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE);
-	const glm::mat4 finalMvp = mvp * glm::scale (glm::mat4 (1.0f),
-	    glm::vec3 (glm::vec2 (m_effectTargetSize) / m_quadSize, 1.0f));
+	const glm::mat4 finalMvp = mvp * targetQuad;
 	glUseProgram (m_program);
 	glUniformMatrix4fv (m_uMVP, 1, GL_FALSE, glm::value_ptr (finalMvp));
         glUniform1f (m_uNodeAlpha, 1.0f);
