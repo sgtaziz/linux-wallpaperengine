@@ -412,6 +412,7 @@ TextUniquePtr ObjectParser::parseText (const JSON& it, const Project& project, O
 	    .limitWidth = it.user ("limitwidth", project.properties, false),
 	    .maxWidth = it.user ("maxwidth", project.properties, 500.0f),
 	    .limitUseEllipsis = it.user ("limituseellipsis", project.properties, false),
+	    .depthTest = it.optional ("depthtest", std::string ("enabled")) != "disabled",
 	    .opaqueBackground = it.user ("opaquebackground", project.properties, false),
 	    .backgroundColor = it.color ("backgroundcolor", project.properties, Builders::ColorBuilder::Black, true),
 	    .backgroundBrightness = textFloatSetting (it, project, "backgroundbrightness"),

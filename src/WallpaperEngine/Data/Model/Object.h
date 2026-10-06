@@ -1047,6 +1047,8 @@ struct TextData {
     UserSettingUniquePtr maxWidth;
     /** Append an ellipsis when maxRows discards later rows */
     UserSettingUniquePtr limitUseEllipsis;
+    /** Authored depthtest; native tests text depth only when not "disabled" */
+    bool depthTest = true;
     /** Draw the native text-background rectangle behind the glyphs */
     UserSettingUniquePtr opaqueBackground;
     /** Authored RGB for the opaque text background */
