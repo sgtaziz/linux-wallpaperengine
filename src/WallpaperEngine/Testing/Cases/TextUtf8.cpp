@@ -303,6 +303,9 @@ using WallpaperEngine::Render::Objects::TextLaidRow;
 using WallpaperEngine::Render::Objects::TextLayoutLimits;
 using WallpaperEngine::Render::Objects::TextRowGlyph;
 using WallpaperEngine::Render::Objects::textGlyphHorizontalInk;
+using WallpaperEngine::Render::Objects::TextLayoutBox;
+using WallpaperEngine::Render::Objects::textLayoutBox;
+using WallpaperEngine::Render::Objects::textLayerPadding;
 
 constexpr long kNativeTestSize26_6 = 24 * 64;
 
@@ -834,4 +837,106 @@ TEST_CASE ("A fallback-supplied mark stays in its base run when the run face com
     const auto uncovered = layoutTextRows (scalars ("A\xcc\x8c"), resolve, none);
     REQUIRE (uncovered[0].glyphs.size () == 2);
     REQUIRE (uncovered[0].glyphs[1].face == noto);
+}
+
+namespace {
+TextLayoutBox layoutBoxOf (FT_Face face, std::string_view text, float letterSpacing = 0.0f,
+                           float rowSpacing = 0.0f) {
+    const TextLayoutLimits none;
+    return textLayoutBox (layoutTextRows (scalars (text), resolverFor ({face}), none), letterSpacing,
+                          static_cast<float> (face->size->metrics.height >> 6) + rowSpacing,
+                          static_cast<float> (face->size->metrics.ascender >> 6));
+}
+} // namespace
+
+TEST_CASE ("The text layout box reproduces the boxes measured in native frames", "[text][layout][box][shipped]") {
+    const char* root = std::getenv ("WPE_SHIPPED_ASSETS");
+    if (!root) SKIP ("WPE_SHIPPED_ASSETS is not set; shipped RobotoMono box fixtures not run");
+    TestFonts fonts;
+    const FT_Face roboto = fonts.load (std::filesystem::path (root) / "fonts/RobotoMono-Regular.ttf");
+    // W17 run2 native captures (w17-persp-offc, opaque background, padding
+    // 24, centre/centre): Hxg 220x180 and HHHH 281x180 at 24 pt, Hxg 134x114
+    // at 12 pt. The Linux raster boxes were 228x140, 288x119 and 138x94.
+    const float pad = textLayerPadding (24.0f, false, true);
+    const auto hxg = layoutBoxOf (roboto, "Hxg");
+    REQUIRE (hxg.width () + 2.0f * pad == 220.0f);
+    REQUIRE (hxg.height () + 2.0f * pad == 180.0f);
+    const auto hhhh = layoutBoxOf (roboto, "HHHH");
+    REQUIRE (hhhh.width () + 2.0f * pad == 281.0f);
+    REQUIRE (hhhh.height () + 2.0f * pad == 180.0f);
+    // The trailing advance is not part of the box.
+    REQUIRE (hxg.width () < placeRow (layoutTextRows (scalars ("Hxg"), resolverFor ({roboto}), {})[0].glyphs).pen);
+    // Centre alignment centres the box, not the ink: its centre sat 13 px
+    // below the layer origin (418 versus 405 in the frame).
+    const float ascender = static_cast<float> (roboto->size->metrics.ascender >> 6);
+    const float descender = static_cast<float> (roboto->size->metrics.descender >> 6);
+    const float lineHeight = static_cast<float> (roboto->size->metrics.height >> 6);
+    REQUIRE (textVerticalAnchorOffset (hxg.centerY (), ascender, descender, 1, lineHeight, "center") == -13.5f);
+    REQUIRE (FT_Set_Char_Size (roboto, 0, 12 * 64, 300, 300) == 0);
+    const auto small = layoutBoxOf (roboto, "Hxg");
+    REQUIRE (small.width () + 2.0f * pad == 134.0f);
+    REQUIRE (small.height () + 2.0f * pad == 114.0f);
+    // w31-run1 native frame (padding 0): Alcubierre 12 pt grave/acute
+    // capitals rise above the ascender and the box rises with them, 67 px tall
+    // where the line box is 59.
+    const FT_Face display = fonts.load (std::filesystem::path (root) / "fonts/Alcubierre.otf");
+    REQUIRE (FT_Set_Char_Size (display, 0, 12 * 64, 300, 300) == 0);
+    REQUIRE ((display->size->metrics.height >> 6) == 59);
+    REQUIRE (layoutBoxOf (display, "\xc3\x80\xc3\x81").height () == 67.0f);
+}
+
+TEST_CASE ("Text layout box rows take whole line heights while ink extends them", "[text][layout][box]") {
+    TestFonts fonts;
+    const FT_Face sans = fonts.loadSystem ("DejaVuSans.ttf");
+    const float ascender = static_cast<float> (sans->size->metrics.ascender >> 6);
+    const float lineHeight = static_cast<float> (sans->size->metrics.height >> 6);
+
+    // Every row, the last included, takes the full line height plus the
+    // authored row spacing; the top is the ascender.
+    const auto rows = layoutBoxOf (sans, "A\nA\nA", 0.0f, 7.5f);
+    REQUIRE (rows.maxY == ascender);
+    REQUIRE (rows.height () == 3.0f * (lineHeight + 7.5f));
+
+    // Overlapping rows: the box ends at the last row's baseline, not at a
+    // line box that would end above it.
+    const float overlap = lineHeight - 100.0f;
+    REQUIRE (ascender - 3.0f * overlap > -2.0f * overlap);
+    REQUIRE (layoutBoxOf (sans, "A\nA\nA", 0.0f, -100.0f).minY == -2.0f * overlap);
+
+    // A descender below the line box extends it.
+    FT_BBox g {};
+    REQUIRE (textGlyphPixelBounds (sans, FT_Get_Char_Index (sans, 'g'), g));
+    REQUIRE (static_cast<float> (g.yMin) < ascender - overlap);
+    REQUIRE (layoutBoxOf (sans, "g", 0.0f, -100.0f).minY == static_cast<float> (g.yMin));
+
+    // Ink above the ascender raises the top to the ink; the bottom keeps
+    // the line box.
+    FT_BBox tall {};
+    REQUIRE (textGlyphPixelBounds (sans, FT_Get_Char_Index (sans, 0x01d9), tall));
+    REQUIRE (static_cast<float> (tall.yMax) > ascender);
+    const auto stacked = layoutBoxOf (sans, "\xc7\x99");
+    REQUIRE (stacked.maxY == static_cast<float> (tall.yMax));
+    REQUIRE (stacked.minY == ascender - lineHeight);
+}
+
+TEST_CASE ("Text layout box width counts trailing spaces to their pen and letter spacing", "[text][layout][box]") {
+    TestFonts fonts;
+    const FT_Face sans = fonts.loadSystem ("DejaVuSans.ttf");
+    const TextLayoutLimits none;
+    const auto spaced = layoutTextRows (scalars ("A  "), resolverFor ({sans}), none);
+    const auto placed = placeRow (spaced[0].glyphs);
+    const float space = static_cast<float> (spaced[0].glyphs.back ().glyph.xAdvance26_6 >> 6);
+    REQUIRE (space > 0.0f);
+    // The last space adds its pen position but not its advance.
+    REQUIRE (layoutBoxOf (sans, "A  ").width () == placed.pen - space);
+    REQUIRE (layoutBoxOf (sans, "A  ").width () > layoutBoxOf (sans, "A").width ());
+    REQUIRE (layoutBoxOf (sans, "AA", 10.0f).width () == layoutBoxOf (sans, "AA").width () + 10.0f);
+}
+
+TEST_CASE ("Text padding is a margin only for effects or an opaque background", "[text][layout][box]") {
+    REQUIRE (textLayerPadding (24.0f, false, false) == 0.0f);
+    REQUIRE (textLayerPadding (24.0f, true, false) == 24.0f);
+    REQUIRE (textLayerPadding (24.0f, false, true) == 24.0f);
+    REQUIRE (textLayerPadding (600.0f, true, true) == 512.0f);
+    REQUIRE (textLayerPadding (-5.0f, true, false) == -5.0f);
 }

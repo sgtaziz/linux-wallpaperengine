@@ -55,6 +55,22 @@ inline bool textGlyphHorizontalInk (FT_Face face, FT_UInt index, float& low, flo
     return true;
 }
 
+/** Vertical glyph ink in raster pixels, y up from the baseline: the pixel
+ * CBox, or the rendered bitmap extent for bitmap-only faces. */
+inline bool textGlyphVerticalInk (FT_Face face, FT_UInt index, float& bottom, float& top) {
+    FT_BBox bounds {};
+    if (textGlyphPixelBounds (face, index, bounds)) {
+        bottom = static_cast<float> (bounds.yMin);
+        top = static_cast<float> (bounds.yMax);
+        return true;
+    }
+    if (FT_Load_Glyph (face, index, FT_LOAD_RENDER | FT_LOAD_COLOR) != 0) return false;
+    const auto slot = face->glyph;
+    top = static_cast<float> (slot->bitmap_top);
+    bottom = top - static_cast<float> (slot->bitmap.rows);
+    return true;
+}
+
 /** Native face runs plus the glyph filter.
  * - Exhausted scalars never change the run and shape with the run face.
  * - Whitespace and ZWJ never start a run; leading whitespace, ZWJ and
@@ -458,5 +474,36 @@ inline std::vector<TextLaidRow> layoutTextRows (std::span<const char32_t> text,
         ++index;
     }
     return result;
+}
+
+/** Native walks every positioned glyph (pen including
+ * letter spacing) for the layout bounds: horizontal ink with the origin, and
+ * per row the ink bottom and top with the baseline. */
+inline TextLayoutBox textLayoutBox (const std::vector<TextLaidRow>& rows, float letterSpacing,
+                                    float lineHeight, float ascender) {
+    TextLayoutRange horizontal;
+    float lowestInk = 0.0f, highestInk = 0.0f;
+    for (size_t line = 0; line < rows.size (); ++line) {
+        float penX = 0.0f, penY = 0.0f, rowBottom = 0.0f, rowTop = 0.0f;
+        for (const auto& laid : rows[line].glyphs) {
+            const auto& glyph = laid.glyph;
+            const float x = penX + static_cast<float> (glyph.xOffset26_6 >> 6);
+            const float y = penY + static_cast<float> (glyph.yOffset26_6 >> 6);
+            float low = 0.0f, high = 0.0f, bottom = 0.0f, top = 0.0f;
+            if (textGlyphHorizontalInk (laid.face, glyph.glyphIndex, low, high))
+                horizontal.include (x + low, x + high);
+            if (textGlyphVerticalInk (laid.face, glyph.glyphIndex, bottom, top)) {
+                rowBottom = std::min (rowBottom, y + bottom);
+                rowTop = std::max (rowTop, y + top);
+            }
+            penX += static_cast<float> (glyph.xAdvance26_6 >> 6) + letterSpacing;
+            penY += static_cast<float> (glyph.yAdvance26_6 >> 6);
+        }
+        const float baseline = -static_cast<float> (line) * lineHeight;
+        lowestInk = std::min (lowestInk, rowBottom + baseline);
+        highestInk = std::max (highestInk, rowTop + baseline);
+    }
+    return textLayoutBoxFromBounds (horizontal, lowestInk, highestInk, ascender, lineHeight,
+                                    static_cast<int> (rows.size ()));
 }
 } // namespace WallpaperEngine::Render::Objects

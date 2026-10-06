@@ -934,7 +934,7 @@ void CScene::dispatchCursorEvents () {
             else if (authored.find ("right") != std::string::npos) alignment.x = -size.x * 0.5f;
         } else if (object.is<Objects::CText> ()) {
             const auto* text = object.as<Objects::CText> ();
-            size = text->getLayoutSize ();
+            size = text->getRasterSize ();
             alignment = text->getLayoutOffset ();
         }
         else return std::nullopt;

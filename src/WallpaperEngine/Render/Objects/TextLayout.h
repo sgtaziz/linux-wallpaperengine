@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <string_view>
 
+#include "TextLayoutBox.h"
+
 #include <ft2build.h>
 #include FT_FREETYPE_H
 #include FT_GLYPH_H
@@ -41,6 +43,27 @@ inline float textHorizontalAnchorOffset (float rasterCenter, const TextLayoutRan
     const float anchor = alignment == "left" ? 0.0f
         : alignment == "right" ? bounds.width () : bounds.width () * 0.5f;
     return rasterCenter - anchor - std::min (0.0f, bounds.min);
+}
+
+/** `horizontal` holds the positioned glyph ink with the origin included;
+ * `lowestInk` / `highestInk` are the row ink bottom / top extremes, each row's
+ * taken with its baseline (0) and offset by row × -lineHeight. Every row, the
+ * last included, takes one full line height below the ascender; ink beyond
+ * that line box grows it on either side. */
+inline TextLayoutBox textLayoutBoxFromBounds (const TextLayoutRange& horizontal, float lowestInk,
+                                              float highestInk, float ascender, float lineHeight,
+                                              int rows) {
+    return {horizontal.min, horizontal.max,
+            std::min (ascender - static_cast<float> (rows) * lineHeight, lowestInk),
+            std::max (ascender, highestInk)};
+}
+
+/** Native: the background/effect margin around the layout box.
+ * Zero unless the text has visible effects or an opaque background; each
+ * axis is capped at 512 with no lower clamp. */
+inline float textLayerPadding (float authored, bool effects, bool opaqueBackground) {
+    if (!effects && !opaqueBackground) return 0.0f;
+    return std::min (authored, 512.0f);
 }
 
 inline float textVerticalAnchorOffset (float rasterCenterUp, float ascender, float descender,
