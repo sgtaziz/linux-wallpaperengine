@@ -656,6 +656,67 @@ TEST_CASE ("Single-file loops repeat inside the decoder", "[audio][schedule]") {
     REQUIRE_FALSE (two.starts[1].repeat);
 }
 
+TEST_CASE ("Multi-file loops wait out the inaudible time before repicking", "[audio][schedule]") {
+    using Policy = WallpaperEngine::Audio::SoundPlaybackPolicy;
+    // A 3 s clip starts at frame 0 of a 30 fps scene. Native repicks when a
+    // clip-length timer expires, and that timer only runs while audible
+    // a muted voice keeps playing to EOF meanwhile.
+    constexpr float frame = 1.0f / 30.0f;
+    FakeClipPlayer player;
+    player.duration = 3.0f;
+    WallpaperEngine::Audio::SoundLayerController layer (Policy ("loop", false, 1.0f, 5.0f, 2), 2, player, 13);
+    layer.initialize (1.0f);
+    REQUIRE (player.starts.size () == 1);
+    // Ticks frames [from, to] with the clip ending on endFrame; returns the
+    // frame on which the next clip starts, or -1.
+    const auto nextStart = [&] (int from, int to, int endFrame, const auto& volumeAt) {
+        const size_t started = player.starts.size ();
+        for (int index = from; index <= to; ++index) {
+            if (index == endFrame) player.finished = true;
+            layer.tick (frame, volumeAt (index));
+            if (player.starts.size () != started) return index;
+        }
+        return -1;
+    };
+
+    SECTION ("Unmuted before EOF") {
+        // Muted over 1-2 s: the clip still ends at 3 s, the next starts at 4 s.
+        const int next = nextStart (1, 200, 90, [] (int index) { return index > 30 && index <= 60 ? 0.0f : 1.0f; });
+        REQUIRE (next >= 119);
+        REQUIRE (next <= 121);
+    }
+
+    SECTION ("Unmuted after EOF") {
+        // Muted from 1 s, the clip ends at 3 s, unmuted at 7 s: the 2 s of
+        // muted playback still run after the unmute, so the next starts at 9 s.
+        const int next = nextStart (1, 400, 90, [] (int index) { return index > 30 && index <= 210 ? 0.0f : 1.0f; });
+        REQUIRE (next >= 269);
+        REQUIRE (next <= 271);
+    }
+
+    SECTION ("A pause holds the voice and accrues nothing") {
+        // Paused over 1-2 s, the clip ends at 4 s and hands off on that update.
+        int next = -1;
+        for (int index = 1; index <= 200 && next < 0; ++index) {
+            if (index == 31) layer.pause ();
+            if (index == 61) layer.resume (1.0f);
+            if (index == 120) player.finished = true;
+            layer.tick (frame, 1.0f);
+            if (player.starts.size () == 2) next = index;
+        }
+        REQUIRE (next == 120);
+    }
+
+    SECTION ("play() drops the carried wait") {
+        REQUIRE (nextStart (1, 104, 90, [] (int index) { return index > 30 && index <= 60 ? 0.0f : 1.0f; }) == -1);
+        layer.play (1.0f);
+        REQUIRE (player.starts.size () == 2);
+        REQUIRE (layer.policy ().timer () == 0.0f);
+        // The replacement clip plays fully audible and hands off at its EOF.
+        REQUIRE (nextStart (105, 300, 195, [] (int) { return 1.0f; }) == 195);
+    }
+}
+
 TEST_CASE ("Silent sound layers start on a later volume raise", "[audio][schedule]") {
     using Policy = WallpaperEngine::Audio::SoundPlaybackPolicy;
     // c10: volume 0 at start, raised to 1 by a script at 2.2 s.
