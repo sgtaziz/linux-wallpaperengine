@@ -87,6 +87,8 @@ public:
         m_durationKnown = duration && std::isfinite (*duration) && *duration >= 0.0f;
         m_remaining = m_durationKnown ? *duration : std::numeric_limits<float>::infinity ();
         if (m_mode == Mode::Random) m_timer = m_interval + m_remaining;
+        m_loopClip = LoopClip::Playing;
+        m_inaudibleLive = 0.0f;
     }
 
     /** No clip could be started. */
@@ -107,10 +109,11 @@ public:
             }
         }
         if (m_mode != Mode::Loop || m_paused || m_stopped) return Action::None;
-        if (audible) return play (true);
-        // Native multi-file loops repick when a duration timer expires; that
-        // timer only runs while audible, so a muted layer waits here.
-        m_timer = std::numeric_limits<float>::min ();
+        // A replayed voice that ends again leaves the pending wait running.
+        if (m_loopClip != LoopClip::Playing) return Action::None;
+        if (audible && !(m_inaudibleLive > 0.0f)) return play (true);
+        // The next update arms the wait for the inaudible time.
+        m_loopClip = LoopClip::Ended;
         return Action::None;
     }
 
@@ -127,6 +130,19 @@ public:
             }
         }
         if (m_remaining > 0.0f) m_remaining -= sceneDelta;
+        // Native multi-file loops repick when a clip-length timer expires
+        // It only runs while audible, but a muted voice
+        // keeps playing, so the clip reaches EOF early by
+        // the inaudible time it played through; the next pick waits that long.
+        // The update that sees EOF still belongs to the clip.
+        if (m_mode == Mode::Loop && !loopsInDecoder () && m_voice == Voice::Live &&
+            m_loopClip != LoopClip::Waiting) {
+            if (!audible) m_inaudibleLive += sceneDelta;
+            if (m_loopClip == LoopClip::Ended) {
+                m_loopClip = LoopClip::Waiting;
+                m_timer = std::max (m_inaudibleLive, std::numeric_limits<float>::min ());
+            }
+        }
         return action;
     }
 
@@ -166,6 +182,9 @@ public:
     }
 
 private:
+    /** A multi-file loop clip is playing, has just ended, or waits to repick. */
+    enum class LoopClip { Playing, Ended, Waiting };
+
     Action resumePausedVoice () {
         m_paused = false;
         if (m_voice != Voice::Paused) return Action::None;
@@ -185,6 +204,8 @@ private:
     float m_interval = 0.0f;
     bool m_durationKnown = true;
     Voice m_voice = Voice::None;
+    LoopClip m_loopClip = LoopClip::Playing;
+    float m_inaudibleLive = 0.0f;
 };
 
 /** Try each still-usable clip at most once; remember failures across cycles. */
