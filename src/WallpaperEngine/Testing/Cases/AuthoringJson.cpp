@@ -82,14 +82,17 @@ TEST_CASE ("Particle parser retains fractional warm-up and authored sphere sign"
     REQUIRE (particle->emitters[0].sign.z == 0);
     REQUIRE (particle->emitters[0].flags == 1);
     REQUIRE_FALSE (particle->emitters[0].distanceMaxAuthored);
+    REQUIRE_FALSE (particle->emitters[0].directionsAuthored);
     auto explicitFlags = data;
     explicitFlags["particle"]["emitter"][0]["flags"] = 0;
     explicitFlags["particle"]["emitter"][0]["distancemax"] = "3 3 3";
+    explicitFlags["particle"]["emitter"][0]["directions"] = "1 1 0";
     const auto explicitObject = ObjectParser::parse (explicitFlags, project);
     const auto* explicitParticle = dynamic_cast<const Particle*> (explicitObject.get ());
     REQUIRE (explicitParticle != nullptr);
     REQUIRE (explicitParticle->emitters[0].flags == 0);
     REQUIRE (explicitParticle->emitters[0].distanceMaxAuthored);
+    REQUIRE (explicitParticle->emitters[0].directionsAuthored);
 
     auto invalid = data;
     invalid["particle"]["starttime"] = -1.0;

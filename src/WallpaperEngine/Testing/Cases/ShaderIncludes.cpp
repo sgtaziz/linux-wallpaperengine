@@ -267,6 +267,36 @@ TEST_CASE ("Shader combo require metadata does not gate runtime authored values"
     REQUIRE (compiled.find ("#define RIMLIGHTING 1") != std::string::npos);
 }
 
+TEST_CASE ("Shader combo defaults coerce like native jsoncpp asInt", "[shader][combo-default]") {
+    // Native stores asInt () only when isInt () holds; every other
+    // default becomes 0 (native zr-combo fixture: 1.0 -> 1, -2.0 -> -2,
+    // 1.5 / "1" / true / 3e9 -> 0) instead of rejecting the shader.
+    using WallpaperEngine::Render::Shaders::nativeComboDefault;
+    const auto value = [] (const char* text) { return WallpaperEngine::Data::JSON::JSON::parse (text); };
+    REQUIRE (nativeComboDefault (value ("1")) == 1);
+    REQUIRE (nativeComboDefault (value ("1.0")) == 1);
+    REQUIRE (nativeComboDefault (value ("-2.0")) == -2);
+    REQUIRE (nativeComboDefault (value ("2147483647.0")) == 2147483647);
+    REQUIRE (nativeComboDefault (value ("1.5")) == 0);
+    REQUIRE (nativeComboDefault (value ("\"1\"")) == 0);
+    REQUIRE (nativeComboDefault (value ("true")) == 0);
+    REQUIRE (nativeComboDefault (value ("3000000000.0")) == 0);
+    REQUIRE (nativeComboDefault (value ("3000000000")) == 0);
+    REQUIRE (nativeComboDefault (value ("null")) == 0);
+
+    auto files = std::make_unique<Container> ();
+    AssetLocator assets (std::move (files));
+    const std::string source =
+        "// [COMBO] {\"combo\":\"REAL\",\"default\":1.0}\n"
+        "// [COMBO] {\"combo\":\"TEXT\",\"default\":\"1\"}\n"
+        "void main() {\n#if REAL && !TEXT\ngl_FragColor = vec4(1.0,0.0,0.0,1.0);\n#endif\n}\n";
+    ShaderUnit unit (GLSLContext::UnitType_Fragment, "combo-default.frag", source,
+                     assets, emptyConstants, emptyTextures, emptyTextures, emptyCombos, emptyCombos);
+    const auto& compiled = unit.compile ();
+    REQUIRE (compiled.find ("#define REAL 1") != std::string::npos);
+    REQUIRE (compiled.find ("#define TEXT 0") != std::string::npos);
+}
+
 TEST_CASE ("Shipped sampler dependencies preserve authored permutations", "[shader][sampler-require]") {
     // The installed sampler declarations with both combo and require metadata
     // have no default texture. Native reads their inline combo but

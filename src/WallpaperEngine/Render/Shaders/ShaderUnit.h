@@ -18,6 +18,11 @@ using namespace WallpaperEngine::Assets;
 using namespace WallpaperEngine::Data::Model;
 
 /**
+ * The runtime value of a [COMBO] metadata default.
+ */
+int nativeComboDefault (const JSON& value);
+
+/**
  * Represents a whole shader unit
  */
 class ShaderUnit {

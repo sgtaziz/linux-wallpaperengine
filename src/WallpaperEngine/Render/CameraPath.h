@@ -65,4 +65,18 @@ inline std::optional<Data::Model::CameraPathSample> advanceNativeCameraPath (
     return result;
 }
 
+/**
+ * Camera fade alpha of the root path cursor, from
+ * the remaining time r of the current path: 1 - 2r in its last 0.5 s, 1 - 2t
+ * in its first 0.5 s, 0 between. The cursor time is the post-advance elapsed.
+ */
+inline float nativeCameraFadeAlpha (const std::vector<Data::Model::CameraPath>& paths, const CameraPathCursor& cursor) {
+    if (cursor.path >= paths.size ()) return 0.0f;
+    const float duration = paths[cursor.path].duration;
+    const float remaining = duration - cursor.time;
+    if (remaining < 0.5f) return 1.0f - 2.0f * remaining;
+    if (remaining <= duration - 0.5f) return 0.0f;
+    return 1.0f - 2.0f * (duration - remaining);
+}
+
 } // namespace WallpaperEngine::Render

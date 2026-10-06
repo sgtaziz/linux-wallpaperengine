@@ -893,6 +893,31 @@ TEST_CASE ("Camera paths sample before time advance and preserve original strict
     REQUIRE (cursor.time == 10);
 }
 
+TEST_CASE ("Camera path fade ramps over the first and last half second of each path",
+           "[scene][camera-path][camerafade]") {
+    // Native (native zr-camfade-on: dips at every path
+    // boundary, about 0.45 s wide at half alpha, gaps 3 s / 4 s).
+    using namespace WallpaperEngine::Render;
+    using namespace WallpaperEngine::Data::Model;
+    const std::vector<CameraPath> paths {CameraPath {{}, 3.0f}, CameraPath {{}, 4.0f}};
+    const auto alpha = [&paths] (size_t path, float time) {
+        return nativeCameraFadeAlpha (paths, CameraPathCursor {.path = path, .sample = 0, .time = time});
+    };
+    REQUIRE (alpha (0, 0.0f) == 1.0f);
+    REQUIRE (alpha (0, 0.25f) == Catch::Approx (0.5f));
+    REQUIRE (alpha (0, 1.5f) == 0.0f);
+    REQUIRE (alpha (0, 2.75f) == Catch::Approx (0.5f));
+    REQUIRE (alpha (0, 3.0f) == 1.0f);
+    REQUIRE (alpha (1, 0.1f) == Catch::Approx (0.8f));
+    REQUIRE (alpha (1, 3.9f) == Catch::Approx (0.8f));
+    REQUIRE (alpha (1, 2.0f) == 0.0f);
+    // A path shorter than 1 s takes the remaining-time branch first.
+    const std::vector<CameraPath> shortPath {CameraPath {{}, 0.6f}};
+    REQUIRE (nativeCameraFadeAlpha (shortPath, CameraPathCursor {.path = 0, .sample = 0, .time = 0.2f})
+             == Catch::Approx (0.2f));
+    REQUIRE (nativeCameraFadeAlpha ({}, CameraPathCursor {}) == 0.0f);
+}
+
 TEST_CASE ("Camera paths preserve before-first timestamp and segment wrap semantics",
            "[scene][camera-path]") {
     using namespace WallpaperEngine::Render;

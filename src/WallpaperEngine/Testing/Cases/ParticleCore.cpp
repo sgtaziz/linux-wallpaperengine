@@ -3207,9 +3207,58 @@ TEST_CASE ("Native sphere cone uses angle axial and cube-root radius draws", "[p
     REQUIRE (std::abs (asymmetric.x - 1.51481683f) < 0.001f);
     REQUIRE (std::abs (asymmetric.y + 9.15512272f) < 0.001f);
     REQUIRE (std::abs (asymmetric.z - 1.68982179f) < 0.001f);
-    REQUIRE (nativeSphereDisplacement (angle, axial, radius, glm::vec3 (0.0f),
-        2.0f, 8.0f, 0.0f, glm::ivec3 (0)) == glm::vec3 (0.0f));
+    // Zero directions normalize to NaN natively (native zr-boxdir sph0: no
+    // particle is drawn), not to the origin.
+    const auto zero = nativeSphereDisplacement (angle, axial, radius, glm::vec3 (0.0f),
+        2.0f, 8.0f, 0.0f, glm::ivec3 (0));
+    REQUIRE ((std::isnan (zero.x) && std::isnan (zero.y) && std::isnan (zero.z)));
     REQUIRE (rng () == 3586334585u);
+}
+
+TEST_CASE ("Box emitter defaults follow the scene projection", "[particle][box][defaults]") {
+    // Native zr-perspbox: an unauthored perspective box spreads like an explicit
+    // "1 1 1" / "1 1 1" box; orthographic scenes keep "1 1 0" / "256 256 0".
+    const glm::vec3 orthoDirections (1.0f, 1.0f, 0.0f), orthoDistance (256.0f, 256.0f, 0.0f);
+    const auto perspective = boxEmitterExtent (orthoDirections, false, orthoDistance, false, true);
+    REQUIRE (perspective.directions == glm::vec3 (1.0f));
+    REQUIRE (perspective.distanceMax == glm::vec3 (1.0f));
+    const auto ortho = boxEmitterExtent (orthoDirections, false, orthoDistance, false, false);
+    REQUIRE (ortho.directions == orthoDirections);
+    REQUIRE (ortho.distanceMax == orthoDistance);
+    const auto authored = boxEmitterExtent (glm::vec3 (2.0f, 0.0f, 0.0f), true, glm::vec3 (5.0f), true, true);
+    REQUIRE (authored.directions == glm::vec3 (2.0f, 0.0f, 0.0f));
+    REQUIRE (authored.distanceMax == glm::vec3 (5.0f));
+}
+
+TEST_CASE ("Emitter velocity of a zero direction is NaN like native", "[particle][random][box][sphere]") {
+    // scales by speed * rsqrt(length^2): native zr-boxdir box0-move
+    // (directions "0 0 0" plus movement) draws nothing.
+    const auto scaled = emitterVelocity (glm::vec3 (3.0f, 4.0f, 0.0f), 5.0f, 10.0f);
+    REQUIRE (scaled == glm::vec3 (6.0f, 8.0f, 0.0f));
+    for (const float speed : {0.0f, 2.0f}) {
+        const auto zero = emitterVelocity (glm::vec3 (0.0f), 0.0f, speed);
+        REQUIRE ((std::isnan (zero.x) && std::isnan (zero.y) && std::isnan (zero.z)));
+    }
+    const float nan = std::numeric_limits<float>::quiet_NaN ();
+    REQUIRE (std::isnan (emitterVelocity (glm::vec3 (nan), nan, 1.0f).x));
+}
+
+TEST_CASE ("Change operator windows clamp like native opcodes 4 to 6", "[particle][operator][sizechange]") {
+    using WallpaperEngine::Maths::fadeValue;
+    // Ordinary windows keep the established piecewise result.
+    REQUIRE (fadeValue (0.1f, 0.2f, 0.8f, 1.0f, 3.0f) == 1.0f);
+    REQUIRE (fadeValue (0.5f, 0.2f, 0.8f, 1.0f, 3.0f) == Catch::Approx (2.0f));
+    REQUIRE (fadeValue (0.9f, 0.2f, 0.8f, 1.0f, 3.0f) == 3.0f);
+    // Reversed: clamp((t - 0.8) / -0.6) holds the end value before 0.2 and
+    // the start value after 0.8 (native zr-sizechange size-reversed: 3x).
+    REQUIRE (fadeValue (0.1f, 0.8f, 0.2f, 1.0f, 3.0f) == 3.0f);
+    REQUIRE (fadeValue (0.5f, 0.8f, 0.2f, 1.0f, 3.0f) == Catch::Approx (2.0f));
+    REQUIRE (fadeValue (0.9f, 0.8f, 0.2f, 1.0f, 3.0f) == 1.0f);
+    // Degenerate: -inf / +inf clamp to the ends; the NaN at t == start
+    // passes minps as 1.
+    REQUIRE (fadeValue (0.4f, 0.5f, 0.5f, 1.0f, 3.0f) == 1.0f);
+    REQUIRE (fadeValue (0.5f, 0.5f, 0.5f, 1.0f, 3.0f) == 3.0f);
+    REQUIRE (fadeValue (0.6f, 0.5f, 0.5f, 1.0f, 3.0f) == 3.0f);
 }
 
 TEST_CASE ("Image emitter retains alpha-threshold pixels in X-major order", "[particle][imageemitter]") {

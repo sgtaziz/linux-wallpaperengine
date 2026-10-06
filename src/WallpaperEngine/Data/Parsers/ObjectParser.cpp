@@ -1047,6 +1047,7 @@ ParticleEmitter ObjectParser::parseParticleEmitter (const JSON& it) {
 	    .distanceMin = parseVec3 ("distancemin", glm::vec3 (0.0f, 0.0f, 0.0f)),
 	    .distanceMax = parseVec3 ("distancemax", glm::vec3 (256.0f, 256.0f, 0.0f)),
 	    .distanceMaxAuthored = it.find ("distancemax") != it.end (),
+	    .directionsAuthored = it.find ("directions") != it.end (),
 	    .origin = parseVec3 ("origin", glm::vec3 (0.0f)),
 	    .offsetMin = parseVec3 ("offsetmin", name == "layerimage"
 	        ? glm::vec3 (-5.0f, -5.0f, 0.0f) : glm::vec3 (0.0f)),

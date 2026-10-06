@@ -1,5 +1,8 @@
 #include "Maths.h"
 
+#include <algorithm>
+#include <cmath>
+
 using namespace WallpaperEngine::Maths;
 
 float WallpaperEngine::Maths::randomFloat (std::mt19937& rng, float min, float max) {
@@ -21,6 +24,14 @@ float WallpaperEngine::Maths::lerp (float t, float a, float b) { return a + t * 
 
 // Helper: Fade value change over lifetime
 float WallpaperEngine::Maths::fadeValue (float life, float startTime, float endTime, float startValue, float endValue) {
+    if (!(startTime < endTime)) {
+	// Opcodes 4-6 clamp (life - start) / (end - start)
+	// with minps(x, 1) then maxps(0, x): a reversed window runs from the end
+	// value back to the start value, and a NaN (life == start == end) gives 1.
+	float t = (life - startTime) / (endTime - startTime);
+	t = std::isnan (t) ? 1.0f : std::min (t, 1.0f);
+	return lerp (std::max (0.0f, t), startValue, endValue);
+    }
     if (life <= startTime) {
 	return startValue;
     } else if (life >= endTime) {

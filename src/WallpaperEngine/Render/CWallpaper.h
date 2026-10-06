@@ -158,6 +158,8 @@ protected:
      * Renders a frame of the wallpaper
      */
     virtual void renderFrame (const glm::ivec4& viewport) = 0;
+    /** Draws over the finished frame after the HDR combine, before presentation. */
+    virtual void renderOverFrame () {}
 
     /** Scene roots already apply presentation scaling in their projection. */
     [[nodiscard]] virtual bool rendersAtOutputSize () const { return false; }

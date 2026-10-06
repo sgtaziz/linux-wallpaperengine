@@ -83,6 +83,10 @@ public:
     [[nodiscard]] const glm::vec3& getUp () const;
     [[nodiscard]] const glm::mat4& getProjection () const;
     [[nodiscard]] const glm::mat4& getLookAt () const;
+    /** The root camera-path fade alpha after this frame's path advance. */
+    [[nodiscard]] float getPathFadeAlpha () const {
+        return nativeCameraFadeAlpha (m_camera.configuration.paths, m_pathCursor);
+    }
     [[nodiscard]] const glm::mat4& getRenderLookAt () const;
     [[nodiscard]] glm::mat4 getCursorLookAt () const;
     [[nodiscard]] const Shake& getShake () const;
