@@ -1085,7 +1085,8 @@ void CText::render () {
     // parent transforms. Effects composite through this same final matrix.
     imageWorld = glm::translate (glm::mat4 (1.0f), getScene ().getLayerParallaxOffset (m_text))
         * imageWorld;
-    glm::mat4 mvp = getScene ().getActiveRenderProjection () * imageWorld;
+    glm::mat4 mvp = getScene ().getLayerRenderProjection (
+        m_text.perspective && m_text.perspective->value->getBool ()) * imageWorld;
 
     const auto sceneTarget = getScene ().getActiveRenderTarget ();
     const bool useEffects = hasVisibleEffects () && m_textTarget;

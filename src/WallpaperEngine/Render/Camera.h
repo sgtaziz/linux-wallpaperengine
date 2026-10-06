@@ -64,6 +64,14 @@ public:
     /** Orthographic flag-4 particle view at the given eye distance, keeping the frame shake. */
     [[nodiscard]] static glm::mat4 flag4OrthogonalView (
         float eyeDistance, const Shake& shake, float width, float height);
+    /**
+     * Native view-projection for an image/text layer with `perspective`
+     * in an orthographic scene, from the flat projection/view it replaces.
+     * Uses the scene's perspectiveoverridefov and authored nearz/farz.
+     */
+    [[nodiscard]] static glm::mat4 orthogonalLayerPerspectiveViewProjection (
+        const glm::mat4& projection, const glm::mat4& view, float width, float height,
+        const SceneData::Camera& camera);
     [[nodiscard]] static glm::mat4 makeScriptOrthogonalProjection (
         float width, float height, float zoom);
     [[nodiscard]] static glm::mat4 makeProjectionForTransforms (

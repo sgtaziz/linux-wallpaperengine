@@ -2010,7 +2010,11 @@ void CImage::updateScreenSpacePosition () {
 
     // Both the scene quad and the scene-space puppet vertices already carry
     // the authored transform. Rotating the projection would apply it twice.
-    glm::mat4 mvp = this->getScene ().getActiveRenderProjection ();
+    // A fullscreen image's final composite replaces the view (see below), so
+    // only placed layers take the native `perspective` stacks.
+    glm::mat4 mvp = this->getScene ().getLayerRenderProjection (
+        getImage ().perspective && getImage ().perspective->value->getBool ()
+        && !getImage ().model->fullscreen);
 
     // Native translates the scene view by the root ancestor's
     // offset before this object's own transform. A fullscreen image's final

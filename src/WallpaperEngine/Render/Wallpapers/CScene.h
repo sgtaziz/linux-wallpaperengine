@@ -126,6 +126,8 @@ public:
     bool sortScriptLayer (const CObject* object, int index);
     [[nodiscard]] std::shared_ptr<const CFBO> getActiveRenderTarget () const;
     [[nodiscard]] const glm::mat4& getActiveRenderProjection () const;
+    /** Active projection, or the native perspective-layer one for a root-scope `perspective` layer. */
+    [[nodiscard]] glm::mat4 getLayerRenderProjection (bool perspective) const;
     [[nodiscard]] const glm::mat4& getRootRenderClipTransform () const { return m_rootRenderClipTransform; }
     /** Drawing into a composing image's offscreen target. */
     [[nodiscard]] bool isChildCompositionScope () const;
