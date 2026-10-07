@@ -9,10 +9,12 @@
 #include <array>
 #include <cerrno>
 #include <cstdlib>
+#include <cstring>
 #include <fcntl.h>
 #include <fstream>
 #include <iomanip>
 #include <map>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <sys/file.h>
@@ -20,10 +22,21 @@
 
 using namespace WallpaperEngine::Scripting;
 using WallpaperEngine::Data::Model::Project;
-using json = nlohmann::json;
+// Ordered so stored objects keep their key insertion order, as native's raw
+// JSON text does.
+using json = nlohmann::ordered_json;
 
 namespace {
-constexpr size_t kMaxWallpaperBytes = 100 * 1024;
+// Native 2.8.42 accounts each namespace entry as an 8-byte header plus its
+// JSON text and refuses a set that would exceed this total.
+constexpr size_t kMaxNamespaceBytes = 100000;
+constexpr size_t kEntryHeaderBytes = 8;
+// Native keeps each value's text verbatim, including two texts that are not
+// JSON: "undefined" when JSON.stringify yields undefined and "" when it throws.
+// A later get cannot parse either and returns null. Linux stores null and
+// records the native text length under this member, mirroring the namespace
+// path, so the cap still counts it.
+constexpr const char* kUnparsableTextRecord = "unparsableText";
 unsigned nextInstanceId = 0;
 std::map<unsigned, LocalStorageObject*> instances;
 
@@ -87,8 +100,6 @@ json readData (const std::filesystem::path& path) {
 
 void writeData (const std::filesystem::path& path, const json& data) {
     const std::string serialized = data.dump ();
-    if (serialized.size () > kMaxWallpaperBytes)
-        throw std::length_error ("SceneScript storage exceeds 100 KB");
     static unsigned serial = 0;
     const auto temporary = path.string () + "." + std::to_string (getpid ()) + "." + std::to_string (++serial) + ".tmp";
     int fd = open (temporary.c_str (), O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC, 0600);
@@ -119,15 +130,90 @@ std::string toString (JSContext* context, JSValueConst value) {
     JS_FreeCString (context, chars);
     return result;
 }
+
+// Native reads keys and locations as C strings, so text after a NUL is ignored.
+std::string toCString (JSContext* context, JSValueConst value) {
+    std::string result = toString (context, value);
+    result.resize (std::strlen (result.c_str ()));
+    return result;
+}
+
+// Length of the JSON.stringify text native would hold for a stored value.
+size_t storedTextSize (JSContext* context, const json& value) {
+    const std::string dumped = value.dump ();
+    JSValue parsed = JS_ParseJSON (context, dumped.c_str (), dumped.size (), "localStorage");
+    if (JS_IsException (parsed)) throw std::runtime_error ("SceneScript storage value is invalid");
+    JSValue encoded = JS_JSONStringify (context, parsed, JS_UNDEFINED, JS_UNDEFINED);
+    JS_FreeValue (context, parsed);
+    if (JS_IsException (encoded)) throw std::runtime_error ("SceneScript storage value is invalid");
+    WallpaperEngine::Data::Utils::ScopeGuard releaseEncoded ([context, encoded] {
+        JS_FreeValue (context, encoded);
+    });
+    return toString (context, encoded).size ();
+}
+
+// Native raises every localStorage failure through one error constructor, a
+// SyntaxError.
+JSValue throwStorageError (JSContext* context, const char* message) {
+    return JS_ThrowSyntaxError (context, "%s", message);
+}
+
+// The recorded unparsable-text lengths of one namespace, or nullptr.
+json* unparsableTextLengths (json& data, bool global, const std::string& screenKey) {
+    const auto record = data.find (kUnparsableTextRecord);
+    if (record == data.end () || !record->is_object ()) return nullptr;
+    json* parent = &*record;
+    if (!global) {
+        const auto screens = parent->find ("screens");
+        if (screens == parent->end () || !screens->is_object ()) return nullptr;
+        parent = &*screens;
+    }
+    const auto lengths = parent->find (global ? "global" : screenKey);
+    return lengths != parent->end () && lengths->is_object () ? &*lengths : nullptr;
+}
+
+std::optional<size_t> recordedLength (const json* lengths, const std::string& key) {
+    if (!lengths) return std::nullopt;
+    const auto found = lengths->find (key);
+    if (found == lengths->end () || !found->is_number_unsigned ()) return std::nullopt;
+    return found->get<size_t> ();
+}
+
+// Records key's native text length, or forgets it when length is empty; a null
+// key forgets the whole namespace. Empty records are removed.
+void recordUnparsableText (json& data, bool global, const std::string& screenKey, const std::string* key,
+                           std::optional<size_t> length) {
+    if (length) {
+        json& record = data[kUnparsableTextRecord];
+        (global ? record["global"] : record["screens"][screenKey])[*key] = *length;
+        return;
+    }
+    json* lengths = unparsableTextLengths (data, global, screenKey);
+    if (!lengths) return;
+    if (key) lengths->erase (*key); else lengths->clear ();
+    if (!lengths->empty ()) return;
+    json& record = data[kUnparsableTextRecord];
+    if (global) {
+        record.erase ("global");
+    } else {
+        record["screens"].erase (screenKey);
+        if (record["screens"].empty ()) record.erase ("screens");
+    }
+    if (record.empty ()) data.erase (kUnparsableTextRecord);
+}
 } // namespace
 
-LocalStorageObject::LocalStorageObject (JSContext* context, const Project& project) :
-    LocalStorageObject (context, defaultStateRoot (), wallpaperIdentity (project), project.storageScreenKey) { }
+LocalStorageObject::LocalStorageObject (JSContext* context, const Project& project,
+                                        std::function<bool ()> evaluatingTopLevel) :
+    LocalStorageObject (context, defaultStateRoot (), wallpaperIdentity (project), project.storageScreenKey,
+                        std::move (evaluatingTopLevel)) { }
 
 LocalStorageObject::LocalStorageObject (JSContext* context, std::filesystem::path stateRoot,
-                                        std::string identity, std::string screenKey) :
+                                        std::string identity, std::string screenKey,
+                                        std::function<bool ()> evaluatingTopLevel) :
     m_context (context), m_path (std::move (stateRoot) / (stableHash (identity) + ".json")),
-    m_screenKey (std::move (screenKey)), m_instanceId (++nextInstanceId) {
+    m_screenKey (std::move (screenKey)), m_evaluatingTopLevel (std::move (evaluatingTopLevel)),
+    m_instanceId (++nextInstanceId) {
     if (m_instanceId == 0) throw std::overflow_error ("too many SceneScript storage objects");
     instances.emplace (m_instanceId, this);
 }
@@ -158,44 +244,89 @@ JSValue LocalStorageObject::dispatch (JSContext* context, JSValueConst, int argc
 }
 
 JSValue LocalStorageObject::invoke (JSContext* context, int argc, JSValueConst* argv, int operation) {
+    enum Operation { Get = 0, Set = 1, Clear = 2, Delete = 3 };
+    // Messages are verbatim native 2.8.42 text, including the shared key error.
+    constexpr std::array<const char*, 4> topLevelErrors = {
+        "LocalStorageGet cannot be cleared from global scope.",
+        "LocalStorageSet cannot be cleared from global scope.",
+        "LocalStorageClear cannot be cleared from global scope.",
+        "LocalStorageDelete cannot be cleared from global scope.",
+    };
+    const auto argument = [argc, argv] (int index) -> JSValueConst {
+        return index < argc ? argv[index] : JS_UNDEFINED;
+    };
     try {
-        if (operation != 2 && argc < 1) return JS_ThrowTypeError (context, "localStorage key is required");
-        if (operation == 1 && argc < 2) return JS_ThrowTypeError (context, "localStorage value is required");
-        const int locationArg = operation == 1 ? 2 : operation == 2 ? 0 : 1;
-        std::string location = "screen";
-        if (argc > locationArg && !JS_IsUndefined (argv[locationArg]))
-            location = toString (context, argv[locationArg]);
-        if (location != "screen" && location != "global")
-            return JS_ThrowRangeError (context, "invalid localStorage location");
-        const std::string key = operation == 2 ? "" : toString (context, argv[0]);
-        json value;
-        if (operation == 1) {
-            JSValue encoded = JS_JSONStringify (context, argv[1], JS_UNDEFINED, JS_UNDEFINED);
-            if (JS_IsException (encoded)) return encoded;
-            if (JS_IsUndefined (encoded)) return JS_ThrowTypeError (context, "localStorage value is not serializable");
-            WallpaperEngine::Data::Utils::ScopeGuard releaseEncoded ([context, encoded] {
-                JS_FreeValue (context, encoded);
-            });
-            const std::string serialized = toString (context, encoded);
-            value = json::parse (serialized);
+        if (m_evaluatingTopLevel && m_evaluatingTopLevel ())
+            return throwStorageError (context, topLevelErrors[operation]);
+        if (operation != Clear && !JS_IsString (argument (0)))
+            return throwStorageError (context, "LocalStorageSet key not a string.");
+        int locationArg = operation == Set ? 2 : operation == Clear ? 0 : 1;
+        std::string serialized;
+        std::optional<size_t> unparsableLength;
+        if (operation == Set) {
+            if (JS_IsUndefined (argument (1))) {
+                // Native deletes instead, passing its own arguments so the
+                // value slot is read as the location (always the screen
+                // namespace), and returns the delete's result.
+                operation = Delete;
+                locationArg = 1;
+            } else {
+                JSValue encoded = JS_JSONStringify (context, argument (1), JS_UNDEFINED, JS_UNDEFINED);
+                if (JS_IsException (encoded)) {
+                    // Native catches the exception and stores empty text.
+                    JSValue exception = JS_GetException (context);
+                    if (JS_IsUncatchableError (exception)) return JS_Throw (context, exception);
+                    JS_FreeValue (context, exception);
+                    unparsableLength = 0;
+                } else if (JS_IsUndefined (encoded)) {
+                    unparsableLength = std::char_traits<char>::length ("undefined");
+                } else {
+                    WallpaperEngine::Data::Utils::ScopeGuard releaseEncoded ([context, encoded] {
+                        JS_FreeValue (context, encoded);
+                    });
+                    serialized = toString (context, encoded);
+                }
+            }
         }
+        // A window has no native screen instance, so its screen namespace is
+        // the global one (an empty screen key).
+        const bool global = m_screenKey.empty () || (JS_IsString (argument (locationArg))
+            && toCString (context, argument (locationArg)) == "global");
+        const std::string key = operation == Clear ? "" : toCString (context, argument (0));
         std::filesystem::create_directories (m_path.parent_path ());
         LockedFile lock (m_path.string () + ".lock");
         json data = readData (m_path);
-        json& namespaceData = location == "global" ? data["global"] : data["screens"][m_screenKey];
+        json& namespaceData = global ? data["global"] : data["screens"][m_screenKey];
         if (!namespaceData.is_object ()) namespaceData = json::object ();
-        if (operation == 0) {
+        if (operation == Get) {
             const auto found = namespaceData.find (key);
-            if (found == namespaceData.end ()) return JS_NULL;
-            const std::string serialized = found->dump ();
-            return JS_ParseJSON (context, serialized.c_str (), serialized.size (), "localStorage");
+            if (found == namespaceData.end ()) return JS_UNDEFINED;
+            const std::string stored = found->dump ();
+            return JS_ParseJSON (context, stored.c_str (), stored.size (), "localStorage");
         }
-        if (operation == 1) namespaceData[key] = std::move (value);
-        if (operation == 2) namespaceData.clear ();
+        if (operation == Set) {
+            const json* lengths = unparsableTextLengths (data, global, m_screenKey);
+            size_t total = kEntryHeaderBytes + unparsableLength.value_or (serialized.size ());
+            for (const auto& entry : namespaceData.items ()) {
+                if (entry.key () == key) continue;
+                const auto recorded = recordedLength (lengths, entry.key ());
+                total += kEntryHeaderBytes + (recorded ? *recorded : storedTextSize (context, entry.value ()));
+            }
+            if (total > kMaxNamespaceBytes)
+                return throwStorageError (context, "LocalStorageSet failed, possibly out of memory.");
+            namespaceData[key] = unparsableLength ? json (nullptr) : json::parse (serialized);
+        }
+        if (operation == Clear) namespaceData.clear ();
         bool deleted = false;
-        if (operation == 3) deleted = namespaceData.erase (key) != 0;
-        if (operation != 3 || deleted) writeData (m_path, data);
-        return operation == 3 ? JS_NewBool (context, deleted) : JS_UNDEFINED;
+        if (operation == Delete) deleted = namespaceData.erase (key) != 0;
+        if (operation != Delete || deleted) {
+            // Last, as it may add top-level members and invalidate namespaceData.
+            recordUnparsableText (data, global, m_screenKey, operation == Clear ? nullptr : &key,
+                                  operation == Set ? unparsableLength : std::nullopt);
+            writeData (m_path, data);
+        }
+        if (operation == Set) return JS_UNDEFINED;
+        return JS_NewBool (context, operation == Clear || deleted);
     } catch (const std::exception& error) {
         return JS_ThrowInternalError (context, "%s", error.what ());
     }

@@ -42,6 +42,15 @@ using namespace WallpaperEngine::Application;
 using namespace WallpaperEngine::Data::Model;
 using namespace WallpaperEngine::FileSystem;
 
+namespace {
+// Native -playInWindow never names a screen instance, so a window's screen
+// localStorage namespace is the global one; an empty key selects it.
+std::string storageScreenKey (const ApplicationContext& context, const std::string& screen) {
+    const auto mode = context.settings.render.mode;
+    return mode == ApplicationContext::NORMAL_WINDOW || mode == ApplicationContext::EXPLICIT_WINDOW ? "" : screen;
+}
+} // namespace
+
 void CustomGLDebugCallback (
     GLenum source, GLenum type, GLuint id, GLenum severity, GLsizei length, const GLchar* message, const void* userParam
 ) {
@@ -444,7 +453,7 @@ void WallpaperApplication::advancePlaylist (
 	}
 
 	auto project = this->loadBackground (nextPath.string ());
-	project->storageScreenKey = screen;
+	project->storageScreenKey = storageScreenKey (this->m_context, screen);
 
 	this->setupPropertiesForProject (*project);
 	this->ensureBrowserForProject (*project);
@@ -750,7 +759,7 @@ void WallpaperApplication::prepareOutputs () {
 	const auto clamp = clampIt != this->m_context.settings.general.screenClamps.end ()
 	    ? clampIt->second
 	    : this->m_context.settings.render.window.clamp;
-	info->storageScreenKey = background;
+	info->storageScreenKey = storageScreenKey (this->m_context, background);
 
 	m_renderContext->setWallpaper (
 	    background,

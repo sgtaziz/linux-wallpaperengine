@@ -328,7 +328,8 @@ ScriptEngine::ScriptEngine (Wallpapers::CScene& scene, Media::MediaSource& media
 
     this->m_engineObject = std::make_unique<EngineObject> (*this, scene);
     this->m_inputObject = std::make_unique<InputObject> (*this, scene);
-    this->m_localStorageObject = std::make_unique<LocalStorageObject> (this->m_context, scene.getScene ().project);
+    this->m_localStorageObject = std::make_unique<LocalStorageObject> (
+        this->m_context, scene.getScene ().project, [this] { return this->isEvaluatingModuleTopLevel (); });
     this->m_sceneObject = std::make_unique<SceneObject> (*this, scene);
     this->m_consoleObject = std::make_unique<ConsoleObject> (*this, scene);
     this->m_scriptPropertiesObject = std::make_unique<ScriptPropertiesObject> (*this, scene);
@@ -1082,8 +1083,9 @@ void ScriptEngine::tick () {
     // The preceding frame's module must not own new engine-level timers.
     m_runningModule = nullptr;
     ScopeGuard runningGuard ([this] { m_runningModule = nullptr; });
-    // run intervals
-    this->m_engineObject->tick ();
+    // Native timers advance by the same scene delta, after the property
+    // timelines and before update().
+    this->m_engineObject->tick (delta);
 
     // run any pending notifications
 

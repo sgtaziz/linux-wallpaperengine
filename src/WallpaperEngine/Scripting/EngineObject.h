@@ -34,6 +34,14 @@ private:
     JSContext* m_previous;
 };
 
+/**
+ * engine.runtime: native asks the host (vfunc,
+ * selector 2), and native answers with the scene root clock
+ * that zeroes with the scene and advances by each frame's delta
+ * before the scripts update. Load time and paused time are never included.
+ */
+template <typename Scene> double engineRuntime (const Scene& scene) { return scene.getSceneTime (); }
+
 class EngineObject {
 public:
     EngineObject (ScriptEngine& engine, Render::Wallpapers::CScene& scene);
@@ -49,7 +57,8 @@ public:
     [[nodiscard]] JSClassID getAssetHandleClassId () const { return m_assetHandleClassId; }
     JSValue registerAudioBuffers (uint32_t resolution);
 
-    void tick ();
+    /** Refreshes registered audio buffers and advances timers by the scene delta (seconds). */
+    void tick (float delta);
     void cancelTimersForObject (const ScriptableObject& object) { m_timers.cancelOwner (object); }
     const EngineTimers& getTimers () const { return m_timers; }
 

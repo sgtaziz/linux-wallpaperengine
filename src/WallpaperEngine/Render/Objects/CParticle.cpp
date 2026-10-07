@@ -2334,7 +2334,7 @@ InitializerFunc CParticle::createPositionOffsetRandomInitializer (const Position
     return [this, scale, distance, timeScale, directions = init.directions,
             sign = init.sign, octaves = init.octaves] (ParticleInstance& p) {
         const auto position = ParticleCore::positionOffsetBirth (
-            ParticleCore::toAuthoredVector (p.position), getScene ().getParticleSceneTime (),
+            ParticleCore::toAuthoredVector (p.position), getScene ().getSceneTime (),
             scale->getFloat (), distance->getFloat (), timeScale->getFloat (),
             octaves, directions, sign);
         if (position) p.position = ParticleCore::toSimulationVector (*position);
@@ -2566,7 +2566,7 @@ InitializerFunc CParticle::createTurbulentVelocityRandomInitializer (const Turbu
             speedMinDefault ? sceneSpeedDefaults.x : speedMin->getFloat (),
             speedMaxDefault ? sceneSpeedDefaults.y : speedMax->getFloat (),
             speedOverride->getFloat (), patchSpeedRange);
-        const float sceneTime = getScene ().getParticleSceneTime ();
+        const float sceneTime = getScene ().getSceneTime ();
         const auto velocity = Utils::nativeTurbulentBirthVelocity (
             phaseRandom, speedRandom, phaseMin, (phaseMaxVal->getFloat () - phaseMin) * phaseGain,
             speedRange.x, speedRange.y - speedRange.x, sceneTime,
@@ -3225,7 +3225,7 @@ OperatorFunc CParticle::createTurbulenceOperator (const TurbulenceOperator& op) 
             useSceneDefaults.timeScale ? sceneDefaults.timeScale : timeScaleValue->getFloat (),
             rateOverride->getFloat ());
         const glm::vec3 mask = useSceneDefaults.mask ? sceneDefaults.mask : maskValue->getVec3 ();
-        const float sceneTime = getScene ().getParticleSceneTime ();
+        const float sceneTime = getScene ().getSceneTime ();
         const auto envelope = operatorEnvelope (blend);
         const bool world = (m_particle.flags & 1u) != 0;
         const bool ortho = getScene ().getCamera ().isOrthogonal ();
@@ -4350,7 +4350,7 @@ void CParticle::buildRope () {
                     << point.position.y << ',' << point.position.z << ']';
         }
         sLog.out ("Particle rope live state: particle=", getId (),
-                  " renderer=", m_activeRendererIndex, " scene=", getScene ().getParticleSceneTime (),
+                  " renderer=", m_activeRendererIndex, " scene=", getScene ().getSceneTime (),
                   " alive=", m_particleCount, " ordered=", ordered.str ());
     }
     buildRopePoints (orderedPoints, static_cast<uint32_t> (orderedPoints.size ()));
