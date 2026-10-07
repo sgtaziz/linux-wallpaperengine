@@ -1,6 +1,7 @@
 #pragma once
 
 #include <functional>
+#include <optional>
 #include <glm/gtc/type_ptr.hpp>
 #include <utility>
 
@@ -54,6 +55,8 @@ public:
     void setNormalModelMatrix (const glm::mat3* normalModel);
     void setViewProjectionMatrix (const glm::mat4* viewProjection);
     void setBlendingMode (BlendingMode blendingmode);
+    // Text effect steps replace the material's depth test with the native text rule.
+    void setDepthTestOverride (std::optional<bool> test) { m_depthTestOverride = test; }
     [[nodiscard]] BlendingMode getBlendingMode () const;
     [[nodiscard]] std::shared_ptr<const CFBO> resolveFBO (const std::string& name) const;
     /** Scene light resources first, then render targets. */
@@ -210,6 +213,7 @@ private:
     float m_texcoordBottomV = 1.0f;
     std::map<std::string, ReferenceUniformEntry*> m_referenceUniforms = {};
     BlendingMode m_blendingmode = BlendingMode_Normal;
+    std::optional<bool> m_depthTestOverride;
     const glm::mat4* m_modelViewProjectionMatrix;
     const glm::mat4* m_modelViewProjectionMatrixInverse;
     const glm::mat4* m_modelMatrix;

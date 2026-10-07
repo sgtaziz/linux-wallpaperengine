@@ -227,7 +227,14 @@ void CPass::setupRenderFramebuffer () const {
 	}
     }
 
-    switch (this->m_pass.depthtest) {
+    if (m_depthTestOverride.has_value ()) {
+	if (*m_depthTestOverride) {
+	    glEnable (GL_DEPTH_TEST);
+	    glDepthFunc (GL_LEQUAL);
+	} else {
+	    glDisable (GL_DEPTH_TEST);
+	}
+    } else switch (this->m_pass.depthtest) {
 	case DepthtestMode_Enabled:
 	    glEnable (GL_DEPTH_TEST);
 	    glDepthFunc (GL_LEQUAL);

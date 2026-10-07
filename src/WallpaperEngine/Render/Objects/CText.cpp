@@ -23,6 +23,7 @@
 #include "WallpaperEngine/Data/Model/Object.h"
 #include "WallpaperEngine/Data/Model/Effect.h"
 #include "WallpaperEngine/Data/Model/Material.h"
+#include "WallpaperEngine/Render/Objects/TextEffectQuad.h"
 #include "WallpaperEngine/Data/Model/UserSetting.h"
 #include "WallpaperEngine/Logging/Log.h"
 #include "WallpaperEngine/Render/Camera.h"
@@ -171,6 +172,7 @@ CText::CText (Wallpapers::CScene& scene, const Text& text) :
 CText::~CText () {
     m_effectSteps.clear ();
     if (m_passPosition != 0) glDeleteBuffers (1, &m_passPosition);
+    if (m_passPositionFinal != 0) glDeleteBuffers (1, &m_passPositionFinal);
     if (m_passTexCoord != 0) glDeleteBuffers (1, &m_passTexCoord);
     if (m_vbo != 0) {
 	glDeleteBuffers (1, &m_vbo);
@@ -395,6 +397,8 @@ void CText::setupEffects () {
     glGenBuffers (1, &m_passPosition);
     glBindBuffer (GL_ARRAY_BUFFER, m_passPosition);
     glBufferData (GL_ARRAY_BUFFER, sizeof (positions), positions, GL_STATIC_DRAW);
+    glGenBuffers (1, &m_passPositionFinal);
+    updateEffectFinalQuad ();
     glGenBuffers (1, &m_passTexCoord);
     glBindBuffer (GL_ARRAY_BUFFER, m_passTexCoord);
     glBufferData (GL_ARRAY_BUFFER, sizeof (uvs), uvs, GL_STATIC_DRAW);
@@ -448,6 +452,13 @@ void CText::setupEffects () {
     }
 }
 
+void CText::updateEffectFinalQuad () {
+    if (m_passPositionFinal == 0) return;
+    const auto positions = textEffectFinalPositions (glm::vec2 (m_effectTargetSize));
+    glBindBuffer (GL_ARRAY_BUFFER, m_passPositionFinal);
+    glBufferData (GL_ARRAY_BUFFER, sizeof (positions), positions.data (), GL_DYNAMIC_DRAW);
+}
+
 void CText::resizeEffectTargets () {
     if (m_text.effects.empty ()) return;
     // Native: the layout box plus padding, truncated to integers.
@@ -475,6 +486,7 @@ void CText::resizeEffectTargets () {
     }
     m_effectMain->clear (glm::vec4 (0.0f));
     m_effectSub->clear (glm::vec4 (0.0f));
+    updateEffectFinalQuad ();
     for (const auto& target : m_sizedTargets)
 	target.provider->create (*target.descriptor, TextureFlags_NoFlags, dimensions);
 }
@@ -505,13 +517,24 @@ bool CText::executeMaterialFunction (const std::string& name) {
     return executed;
 }
 
-std::shared_ptr<const TextureProvider> CText::runEffects () {
+CText::EffectResult CText::runEffects (const std::shared_ptr<const CFBO>& sceneTarget,
+                                       const glm::mat4& finalMvp) {
     std::shared_ptr<const TextureProvider> input = m_textTarget;
     std::shared_ptr<const TextureProvider> effectInput;
     bool inTargetSequence = false;
     bool useMain = true;
     m_effectiveColor4 = m_text.color->value->getVec4 ();
     m_effectiveColor4.a = 1.0f;
+    // Native: the final step of the chain draws the target-pixel quad
+    // straight into the scene with the object's matrices; earlier steps use
+    // the 2x2 clip quad into intermediates. A last step that writes an
+    // explicit scratch target cannot be the scene draw.
+    const EffectStep* finalStep = nullptr;
+    for (const auto& step : m_effectSteps) {
+	if (!step.pass || !step.effect->visible->value->getBool ()) continue;
+	finalStep = step.pass->getTarget ().has_value () ? nullptr : &step;
+    }
+    bool drewFinal = false;
     for (auto& step : m_effectSteps) {
 	if (!step.effect->visible->value->getBool ()) continue;
 	if (step.command == Command_Swap) {
@@ -520,7 +543,10 @@ std::shared_ptr<const TextureProvider> CText::runEffects () {
 	}
 	if (!step.pass) continue;
 	std::shared_ptr<const CFBO> destination;
-	if (step.pass->getTarget ().has_value ()) {
+	const bool isFinal = &step == finalStep;
+	if (isFinal) {
+	    destination = sceneTarget;
+	} else if (step.pass->getTarget ().has_value ()) {
 	    destination = step.provider->find (step.pass->getTarget ().value ());
 	    if (!destination) destination = getScene ().findFBO (step.pass->getTarget ().value ());
 	    if (!destination) {
@@ -539,21 +565,36 @@ std::shared_ptr<const TextureProvider> CText::runEffects () {
 	step.pass->setDestination (destination);
 	step.pass->setInput (input);
 	step.pass->setPreviousInput (inTargetSequence ? effectInput : nullptr);
-	step.pass->setPosition (m_passPosition);
+	step.pass->setPosition (isFinal ? m_passPositionFinal : m_passPosition);
 	step.pass->setTexCoord (m_passTexCoord, 1.0f, 0.0f);
-	step.pass->setModelViewProjectionMatrix (&m_effectIdentity);
+	// The text object's own translucent blend applies to the scene draw, as
+	// the image chain moves the object's blend to its last pass.
+	step.pass->setBlendingMode (isFinal ? BlendingMode_Translucent : step.pass->getPass ().blending);
+	m_effectFinalMvp = finalMvp;
+	step.pass->setModelViewProjectionMatrix (isFinal ? &m_effectFinalMvp : &m_effectIdentity);
 	step.pass->setModelViewProjectionMatrixInverse (&m_effectIdentity);
 	step.pass->setModelMatrix (&m_effectIdentity);
 	step.pass->setViewProjectionMatrix (&m_effectIdentity);
-	glColorMask (true, true, true, true);
-	step.pass->render ();
+	glColorMask (true, true, true, isFinal ? getScene ().isChildCompositionScope () : true);
+	// Native text depth rule on the scene draw (test only in perspective scenes, never
+	// write: the pass blend is translucent); offscreen intermediates never test.
+	step.pass->setDepthTestOverride (
+	    isFinal && textDepthTestEnabled (getScene ().getCamera ().isOrthogonal (), m_text.depthTest));
+	{
+	    const TextDepthState depthState (false);
+	    step.pass->render ();
+	}
+	if (isFinal) {
+	    drewFinal = true;
+	    continue;
+	}
 	input = destination;
 	if (!step.pass->getTarget ().has_value ()) {
 	    inTargetSequence = false;
 	    effectInput.reset ();
 	}
     }
-    return input;
+    return {input, drewFinal};
 }
 
 const float& CText::getBrightness () const { return m_effectBrightness; }
@@ -1185,28 +1226,31 @@ void CText::render () {
 	glDrawArrays (GL_TRIANGLES, 0, 6);
     }
     if (useEffects) {
-	const auto effected = runEffects ();
-	glBindFramebuffer (GL_FRAMEBUFFER, sceneTarget->getFramebuffer ());
-	glViewport (0, 0, sceneTarget->getRealWidth (), sceneTarget->getRealHeight ());
-	glColorMask (true, true, true, getScene ().isChildCompositionScope ());
-	glEnable (GL_BLEND);
-	glBlendFunc (GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-	glBlendEquationSeparate (GL_FUNC_ADD,
-	    getScene ().isMaxAlphaCompositionScope () ? GL_MAX : GL_FUNC_ADD);
-	if (getScene ().isMaxAlphaCompositionScope ())
-	    glBlendFuncSeparate (GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE);
-	const glm::mat4 finalMvp = mvp * targetQuad;
-	glUseProgram (m_program);
-	glUniformMatrix4fv (m_uMVP, 1, GL_FALSE, glm::value_ptr (finalMvp));
-        glUniform1f (m_uNodeAlpha, 1.0f);
-	glUniform1i (m_uEffectFinal, 1);
-	glActiveTexture (GL_TEXTURE0);
-	glBindTexture (GL_TEXTURE_2D, effected->getTextureID (0));
-	applyTextDrawState ();
-	const TextDepthState depthState (
-	    textDepthTestEnabled (getScene ().getCamera ().isOrthogonal (), m_text.depthTest));
-	glBindVertexArray (m_vao);
-	glDrawArrays (GL_TRIANGLES, 0, 6);
+	const glm::mat4 finalMvp = textEffectFinalMatrix (mvp, targetCenter);
+	const auto effected = runEffects (sceneTarget, finalMvp);
+	if (!effected.drewFinal) {
+		glBindFramebuffer (GL_FRAMEBUFFER, sceneTarget->getFramebuffer ());
+		glViewport (0, 0, sceneTarget->getRealWidth (), sceneTarget->getRealHeight ());
+		glColorMask (true, true, true, getScene ().isChildCompositionScope ());
+		glEnable (GL_BLEND);
+		glBlendFunc (GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+		glBlendEquationSeparate (GL_FUNC_ADD,
+		    getScene ().isMaxAlphaCompositionScope () ? GL_MAX : GL_FUNC_ADD);
+		if (getScene ().isMaxAlphaCompositionScope ())
+		    glBlendFuncSeparate (GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE);
+		const glm::mat4 compositeMvp = mvp * targetQuad;
+		glUseProgram (m_program);
+		glUniformMatrix4fv (m_uMVP, 1, GL_FALSE, glm::value_ptr (compositeMvp));
+	        glUniform1f (m_uNodeAlpha, 1.0f);
+		glUniform1i (m_uEffectFinal, 1);
+		glActiveTexture (GL_TEXTURE0);
+		glBindTexture (GL_TEXTURE_2D, effected.texture->getTextureID (0));
+		applyTextDrawState ();
+		const TextDepthState depthState (
+		    textDepthTestEnabled (getScene ().getCamera ().isOrthogonal (), m_text.depthTest));
+		glBindVertexArray (m_vao);
+		glDrawArrays (GL_TRIANGLES, 0, 6);
+	}
     }
     glBindVertexArray (0);
 #if !NDEBUG
