@@ -174,6 +174,16 @@ inline SceneCompositionScope sceneCompositionChildScope (SceneCompositionScope o
     return {true, outer.localProjection || !fullscreenComposer};
 }
 
+// Native 2.8.42 (RenderDoc replays, every blend mode) draws into the root scene
+// colour target with colour write mask RGB only, so its alpha keeps the clear
+// value 1.0; alpha is written only into intermediate effect and composition
+// targets and by the final present blit. `requestedAlpha` is the caller's own
+// mask (CImage's last-pass rule); a composition child target is an
+// intermediate and keeps it.
+inline bool sceneColorAlphaWrite (bool drawsToRootSceneTarget, bool requestedAlpha) {
+    return requestedAlpha && !drawsToRootSceneTarget;
+}
+
 // A fullscreen passthrough's copy quad is clip space. It copies the current
 // target 1:1 wherever the
 // scene stacks are in effect. The local-projection exception (scene MVP) has

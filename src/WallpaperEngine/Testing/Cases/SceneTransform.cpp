@@ -30,6 +30,7 @@ using WallpaperEngine::Render::Wallpapers::sceneCompositionOwner;
 using WallpaperEngine::Render::Wallpapers::sceneCompositionSuppressesParallax;
 using WallpaperEngine::Render::Wallpapers::sceneCompositionChildProjection;
 using WallpaperEngine::Render::Wallpapers::sceneCompositionChildScope;
+using WallpaperEngine::Render::Wallpapers::sceneColorAlphaWrite;
 
 namespace {
 ObjectData node (int id, std::optional<int> parent, glm::vec3 origin, glm::vec3 scale,
@@ -1563,4 +1564,17 @@ TEST_CASE ("rotateObjectSpace composes z, y then x object rotations onto the lay
             worldDifference = std::max (worldDifference, std::abs (world[column][row] - composed[column][row]));
         }
     REQUIRE (worldDifference > 0.1f);
+}
+
+TEST_CASE ("Root scene target draws never write alpha, intermediates keep their mask", "[scene][colormask]") {
+    // Native 2.8.42 RenderDoc: every draw into the scene colour target is RGB
+    // masked; intermediate effect / composition targets keep their alpha.
+    REQUIRE_FALSE (sceneColorAlphaWrite (true, true));
+    REQUIRE_FALSE (sceneColorAlphaWrite (true, false));
+    REQUIRE (sceneColorAlphaWrite (false, true));
+    REQUIRE_FALSE (sceneColorAlphaWrite (false, false));
+    // A composition child target is an intermediate: draws there are not root.
+    const auto child = sceneCompositionChildScope ({}, true);
+    REQUIRE (child.offscreenTarget);
+    REQUIRE (sceneColorAlphaWrite (!child.offscreenTarget, child.offscreenTarget));
 }
