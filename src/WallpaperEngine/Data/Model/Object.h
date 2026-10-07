@@ -253,6 +253,14 @@ struct SceneSpotLightData {
     bool castShadow = false;
     bool useCookie = false;
     std::string cookie = "cookie/flashlight1";
+    /**
+     * Native registers the volumetric descriptors for every modern
+     * light type (castvolumetrics bit 2, density default 2,
+     * volumetricsexponent default 1; constructor).
+     */
+    UserSettingUniquePtr castVolumetrics;
+    UserSettingUniquePtr density;
+    UserSettingUniquePtr volumetricsExponent;
 };
 
 class SceneSpotLight : public Object, public SceneSpotLightData {

@@ -34,8 +34,10 @@
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <memory>
 #include <stdexcept>
 
+#include <glm/gtc/constants.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 
 using namespace WallpaperEngine::Data::Model;
@@ -1952,7 +1954,7 @@ TEST_CASE ("Point volumetrics ray-march the shipped shader to the native contrib
                 glBindSampler (3, sampler);
             }
             volumetrics.accumulate (packPointVolume ({1920.0f, y, -600.0f}, {0.96863f, 0.79216f, 0.57647f},
-                                                     4.21f, radius, 1.74f, 1.0700001f), viewProjection, size, false);
+                                                     4.21f, radius, 1.74f, 1.0700001f), VolumeShape::Point, false, viewProjection, size, false);
             REQUIRE (volumetrics.pending ());
             volumetrics.flush (framebuffer, size);
             REQUIRE_FALSE (volumetrics.pending ());
@@ -2022,7 +2024,7 @@ TEST_CASE ("Point volumetrics ray-march the shipped shader to the native contrib
         for (const float x : {960.0f, 2880.0f}) {
             REQUIRE_FALSE (volumetricBatchEndsBefore (false, false));
             volumetrics.accumulate (packPointVolume ({x, 1080.0f, -600.0f}, {0.96863f, 0.79216f, 0.57647f},
-                                                     4.21f, 500.0f, 1.74f, 1.0700001f), viewProjection, size, false);
+                                                     4.21f, 500.0f, 1.74f, 1.0700001f), VolumeShape::Point, false, viewProjection, size, false);
         }
         volumetrics.flush (framebuffer, size);
         std::vector<uint8_t> pixels (size_t (size.x * size.y * 4));
@@ -2037,6 +2039,188 @@ TEST_CASE ("Point volumetrics ray-march the shipped shader to the native contrib
     glDeleteFramebuffers (1, &framebuffer);
     glDeleteTextures (1, &texture);
     glDeleteVertexArrays (1, &vao);
+}
+
+namespace {
+// Rig for the offline ortho volumetric tests: a 1280x720 RGBA8 target viewed through a
+// 1280x720 ortho (z in [-2000, 2000], y up, world = pixel coordinates).
+struct VolumetricRig {
+    SurfacelessGL gl;
+    glm::ivec2 size {1280, 720};
+    GLuint framebuffer = 0, texture = 0, vao = 0;
+    glm::mat4 viewProjection = glm::ortho (0.0f, 1280.0f, 0.0f, 720.0f, -2000.0f, 2000.0f);
+    std::unique_ptr<WallpaperEngine::Assets::AssetLocator> assets;
+    explicit VolumetricRig (const char* root) {
+        REQUIRE (gl.ready);
+        auto files = std::make_unique<WallpaperEngine::FileSystem::Container> ();
+        files->mount (root, "/");
+        assets = std::make_unique<WallpaperEngine::Assets::AssetLocator> (std::move (files));
+        glGenVertexArrays (1, &vao);
+        glBindVertexArray (vao);
+        glGenTextures (1, &texture);
+        glBindTexture (GL_TEXTURE_2D, texture);
+        glTexImage2D (GL_TEXTURE_2D, 0, GL_RGBA8, size.x, size.y, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+        glGenFramebuffers (1, &framebuffer);
+        glBindFramebuffer (GL_FRAMEBUFFER, framebuffer);
+        glFramebufferTexture2D (GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, texture, 0);
+        REQUIRE (glCheckFramebufferStatus (GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE);
+    }
+    ~VolumetricRig () {
+        glDeleteFramebuffers (1, &framebuffer);
+        glDeleteTextures (1, &texture);
+        glDeleteVertexArrays (1, &vao);
+    }
+    std::vector<uint8_t> render (
+        const WallpaperEngine::Render::Wallpapers::VolumeUniforms& volume,
+        WallpaperEngine::Render::Wallpapers::VolumeShape shape, bool fullscreen
+    ) {
+        WallpaperEngine::Render::Wallpapers::CVolumetrics volumetrics (*assets);
+        glBindFramebuffer (GL_FRAMEBUFFER, framebuffer);
+        glClearColor (0, 0, 0, 0);
+        glClear (GL_COLOR_BUFFER_BIT);
+        volumetrics.accumulate (volume, shape, fullscreen, viewProjection, size, false);
+        volumetrics.flush (framebuffer, size);
+        std::vector<uint8_t> pixels (size_t (size.x * size.y * 4));
+        glReadPixels (0, 0, size.x, size.y, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data ());
+        REQUIRE (glGetError () == GL_NO_ERROR);
+        return pixels;
+    }
+    [[nodiscard]] int at (const std::vector<uint8_t>& pixels, int x, int y, int channel = 0) const {
+        return int (pixels[size_t ((y * size.x + x) * 4 + channel)]);
+    }
+};
+
+// The unshadowed march of volumetricsfront.frag at quality 4 along a ray of 8 samples
+// (start + k * (end - start) / 9), written out independently of the shader.
+float marchedChannel (
+    const glm::vec3& start, const glm::vec3& end, const glm::vec3& light, float radius, float exponent, float density,
+    float intensity, float color, bool point, const glm::vec3& forward = {}, float inner = 0, float outer = 0
+) {
+    const float shaderRadius = radius * 0.99f;
+    const glm::vec3 step = (end - start) / 9.0f;
+    float sum = 0.0f;
+    for (int k = 1; k <= 8; ++k) {
+        const glm::vec3 delta = start + step * float (k) - light;
+        const float length = glm::length (delta);
+        const float falloff = std::pow (std::clamp (1.0f - length / shaderRadius, 0.0f, 1.0f), exponent);
+        float cone = 1.0f;
+        if (!point) {
+            const float c = glm::dot (delta / length, forward);
+            const float lo = std::cos (glm::radians (outer)), hi = std::cos (glm::radians (inner));
+            const float t = std::clamp ((c - lo) / (hi - lo), 0.0f, 1.0f);
+            cone = t * t * (3.0f - 2.0f * t);
+        }
+        sum += falloff * cone;
+    }
+    const float scale = intensity * glm::length (end - start) / shaderRadius * (point ? 0.5f : 1.0f);
+    return density * scale * (sum / 8.0f) * color * 0.1f * 255.0f;
+}
+} // namespace
+
+TEST_CASE ("An eye inside a point volume marches from the near plane like volumetrics_fullscreen",
+           "[render][shader][gl][volumetric]") {
+    using namespace WallpaperEngine::Render::Wallpapers;
+    const char* root = std::getenv ("WPE_SHIPPED_ASSETS");
+    if (!root) return;
+    VolumetricRig rig (root);
+    const glm::vec3 light (320.0f, 180.0f, 300.0f);
+    const glm::vec3 color (1.0f, 0.8f, 0.6f);
+    const float radius = 520.0f;
+    const auto volume = packPointVolume (light, color, 1.0f, radius, 2.0f, 1.0f);
+    const auto inside = rig.render (volume, VolumeShape::Point, true);
+    // draws volumetrics_fullscreen: the march starts at the near
+    // plane (z = +2000 under the +-2000 ortho depth) and ends at the volume's
+    // back surface; the shader's own RenderVar maths decides the rest.
+    for (const int offset : {0, 100, 200, 300}) {
+        const int x = 320 + offset;
+        const float lateral = float (offset);
+        const float half = std::sqrt (radius * radius - lateral * lateral);
+        const float expected = marchedChannel ({x + 0.5f, 180.5f, 2000.0f}, {x + 0.5f, 180.5f, light.z - half}, light,
+                                               radius, 1.0f, 2.0f, 1.0f, 1.0f, true);
+        INFO ("offset " << offset << " expected " << expected);
+        REQUIRE (std::abs (rig.at (inside, x, 180) - expected) <= 5);
+        // A start at depth 0 (the D3D near plane read as OpenGL's middle) would nearly extinguish it.
+        REQUIRE (rig.at (inside, x, 180) > 4);
+    }
+    // Nothing is added where no volume surface is behind the pixel (the full-screen triangle covers the view).
+    REQUIRE (rig.at (inside, 1200, 700) == 0);
+    REQUIRE (rig.at (inside, 5, 700) == 0);
+    // The front-face draw of the same volume stays within a few levels of the inside march.
+    const auto outside = rig.render (volume, VolumeShape::Point, false);
+    REQUIRE (std::abs (rig.at (outside, 320, 180) - rig.at (inside, 320, 180)) <= 6);
+}
+
+TEST_CASE ("Spot volumetrics march the cone volume between its light-NDC caps",
+           "[render][shader][gl][volumetric][spotlight]") {
+    using namespace WallpaperEngine::Render::Wallpapers;
+    const char* root = std::getenv ("WPE_SHIPPED_ASSETS");
+    if (!root) return;
+    VolumetricRig rig (root);
+    // A spot at (640, 600, -200) pointing down the screen (-Y): node column 0 is the forward.
+    const glm::vec3 apex (640.0f, 600.0f, -200.0f);
+    glm::mat4 world = glm::translate (glm::mat4 (1.0f), apex);
+    world = glm::rotate (world, -glm::half_pi<float> (), glm::vec3 (0, 0, 1));
+    REQUIRE (glm::length (glm::vec3 (world[0]) - glm::vec3 (0, -1, 0)) < 1e-5f);
+    const float radius = 450.0f, inner = 10.0f, outer = 25.0f;
+    const auto projection = spotLightProjection (world, outer, radius, true);
+    REQUIRE (projection.has_value ());
+    const auto volume = packSpotVolume (world, *projection, {1.0f, 0.8f, 0.6f}, 3.0f, radius, inner, outer, 2.0f, 1.5f);
+    const auto pixels = rig.render (volume, VolumeShape::Spot, false);
+    const glm::vec3 axis (0, -1, 0);
+    // Axial distance t below the apex, lateral offset u: the ray along z crosses the cone
+    // surface (half-angle atan(0.99 tan outer) in light NDC) at z = apex.z +- h.
+    const auto expected = [&] (float t, float u, float channelColor) {
+        const float reach = 0.99f * t * std::tan (glm::radians (outer));
+        if (u >= reach) return 0.0f;
+        const float h = std::sqrt (reach * reach - u * u);
+        const glm::vec3 point (apex.x + u, apex.y - t, 0.0f);
+        return marchedChannel ({point.x, point.y, apex.z + h}, {point.x, point.y, apex.z - h}, apex, radius, 1.5f, 2.0f,
+                               3.0f, channelColor, false, axis, inner, outer);
+    };
+    for (const auto& [t, u] : {std::pair {150.0f, 0.0f}, std::pair {150.0f, 30.0f}, std::pair {300.0f, 0.0f},
+                               std::pair {300.0f, 60.0f}, std::pair {300.0f, 100.0f}}) {
+        const int x = int (apex.x + u), y = int (apex.y - t);
+        INFO ("t " << t << " u " << u << " expected " << expected (t, u, 1.0f));
+        REQUIRE (std::abs (rig.at (pixels, x, y, 0) - expected (t, u, 1.0f)) <= 5);
+        REQUIRE (std::abs (rig.at (pixels, x, y, 1) - expected (t, u, 0.8f)) <= 5);
+        REQUIRE (std::abs (rig.at (pixels, x, y, 2) - expected (t, u, 0.6f)) <= 5);
+    }
+    // Behind the apex, beside the cone and beyond its radius nothing is added.
+    REQUIRE (rig.at (pixels, 640, int (apex.y) + 60) == 0);
+    REQUIRE (rig.at (pixels, 640 + 160, int (apex.y) - 150) == 0);
+    REQUIRE (rig.at (pixels, 640, int (apex.y - radius) - 20) == 0);
+    // The cone is symmetric about its axis.
+    REQUIRE (std::abs (rig.at (pixels, 640 + 40, 450) - rig.at (pixels, 640 - 40, 450)) <= 1);
+}
+
+TEST_CASE ("An eye inside a spot cone draws the full-screen march", "[render][shader][gl][volumetric][spotlight]") {
+    using namespace WallpaperEngine::Render::Wallpapers;
+    const char* root = std::getenv ("WPE_SHIPPED_ASSETS");
+    if (!root) return;
+    VolumetricRig rig (root);
+    // A spot behind the view looking down -Z: world z = +400, node column 0 = (0, 0, -1).
+    const glm::vec3 apex (320.0f, 180.0f, 400.0f);
+    glm::mat4 world = glm::translate (glm::mat4 (1.0f), apex);
+    world = glm::rotate (world, glm::half_pi<float> (), glm::vec3 (0, 1, 0));
+    REQUIRE (glm::length (glm::vec3 (world[0]) - glm::vec3 (0, 0, -1)) < 1e-5f);
+    const float radius = 800.0f, inner = 20.0f, outer = 50.0f;
+    const auto projection = spotLightProjection (world, outer, radius, true);
+    REQUIRE (projection.has_value ());
+    const auto volume = packSpotVolume (world, *projection, {1.0f, 0.8f, 0.6f}, 1.0f, radius, inner, outer, 2.0f, 1.0f);
+    // The 0.2 nudge along the view keeps the eye (0, 0, 0) inside; moving the apex to the side does not.
+    const glm::mat4 inverse = glm::inverse (*projection);
+    REQUIRE (eyeInsideSpotVolume ({0, 0, 0}, {0, 0, -1}, world, inverse, 0.0f, radius));
+    glm::mat4 aside = world;
+    aside[3] = glm::vec4 (2000.0f, 180.0f, 400.0f, 1.0f);
+    REQUIRE_FALSE (eyeInsideSpotVolume ({0, 0, 0}, {0, 0, -1}, aside, glm::inverse (*spotLightProjection (aside, outer, radius, true)), 0.0f, radius));
+    const auto pixels = rig.render (volume, VolumeShape::Spot, true);
+    // Along the axis the march runs from the near plane (z = 2000) to the cone's far cap (z = apex.z - radius + 1).
+    const glm::vec3 start (320.5f, 180.5f, 2000.0f);
+    const glm::vec3 end (320.5f, 180.5f, apex.z - std::max (radius, 1.01f));
+    const float expected = marchedChannel (start, end, apex, radius, 1.0f, 2.0f, 1.0f, 1.0f, false, {0, 0, -1}, inner, outer);
+    INFO ("expected " << expected);
+    REQUIRE (rig.at (pixels, 320, 180) > 0);
+    REQUIRE (std::abs (rig.at (pixels, 320, 180) - expected) <= 6);
 }
 
 TEST_CASE ("Shipped lit image shaders compile live tube loops", "[render][shader][gl][tubelight]") {

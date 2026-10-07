@@ -75,13 +75,14 @@ std::string withVolumetricIntrinsics (std::string source) {
     return source;
 }
 
-// The shipped volumetricsback.vert transform; the colour output stores the
+// The shipped volumetricsback.vert transform (spot volumes scale xy by 0.99); the colour output stores the
 // normalized device depth that native samples from its depth target.
 const char* kBackVertex =
     "#version 330\n"
     "uniform mat4 g_ViewProjectionMatrix;\nuniform mat4 g_AltViewProjectionMatrix;\n"
+    "uniform vec3 g_VolumeScale;\n"
     "in vec3 a_Position;\n"
-    "void main () { gl_Position = g_ViewProjectionMatrix * (g_AltViewProjectionMatrix * vec4 (a_Position, 1.0)); }\n";
+    "void main () { gl_Position = g_ViewProjectionMatrix * (g_AltViewProjectionMatrix * vec4 (a_Position * g_VolumeScale, 1.0)); }\n";
 const char* kBackFragment =
     "#version 330\nout vec4 out_Depth;\n"
     "void main () { out_Depth = vec4 (gl_FragCoord.z * 2.0 - 1.0); }\n";
@@ -195,26 +196,47 @@ CVolumetrics::~CVolumetrics () {
     for (GLuint* texture : {&m_backTexture, &m_limitTexture, &m_lightTexture})
         if (*texture) glDeleteTextures (1, texture);
     if (m_backDepth) glDeleteRenderbuffers (1, &m_backDepth);
-    for (GLuint* buffer : {&m_sphereVertices, &m_sphereIndices, &m_quadVertices})
+    for (GLuint* buffer : {&m_sphereVertices, &m_sphereIndices, &m_quadVertices, &m_coneVertices, &m_coneIndices,
+                           &m_triangleVertices})
         if (*buffer) glDeleteBuffers (1, buffer);
     if (m_vao) glDeleteVertexArrays (1, &m_vao);
-    for (GLuint program : {m_backProgram, m_frontProgram, m_combineProgram})
+    for (GLuint program : {m_backProgram, m_combineProgram, m_frontPrograms[0][0], m_frontPrograms[0][1],
+                           m_frontPrograms[1][0], m_frontPrograms[1][1]})
         if (program) glDeleteProgram (program);
 }
 
-void CVolumetrics::ensurePrograms () {
-    if (m_frontProgram) return;
+GLuint CVolumetrics::frontProgram (bool point, bool fullscreen) {
+    GLuint& program = m_frontPrograms[point ? 1 : 0][fullscreen ? 1 : 0];
+    if (program) return program;
     // the front material's combos for an unshadowed,
-    // cookie-less point light at the renderer's volumetric quality.
-    const ComboMap combos {{"POINTLIGHT", 1}, {"QUALITY", kVolumetricQuality}};
+    // cookie-less volume at the renderer's volumetric quality. A point light
+    // sets POINTLIGHT; picks volumetrics_fullscreen (FULLSCREEN = 1)
+    // instead of volumetrics_front when the eye is inside the volume.
+    ComboMap combos {{"QUALITY", kVolumetricQuality}};
+    if (point) combos.emplace ("POINTLIGHT", 1);
+    if (fullscreen) combos.emplace ("FULLSCREEN", 1);
     const ComboMap overrides;
     const TextureMap textures;
     const ShaderConstantMap constants;
     Shaders::Shader front (m_assets, "volumetricsfront", combos, overrides, textures, textures, constants);
+    auto vertexSource = front.vertex ();
+    if (fullscreen) {
+        // The shipped vertex shader places the full-screen triangle at depth 0,
+        // the D3D near plane (REVERSEDEPTH is undefined). The scene's OpenGL
+        // projections use [-1, 1] normalized depth, whose near plane is -1.
+        const std::string native = "vec4(a_Position.xy, 0.0, 1.0)";
+        const auto at = vertexSource.find (native);
+        if (at == std::string::npos) throw std::runtime_error ("volumetricsfront fullscreen depth not found");
+        vertexSource.replace (at, native.size (), "vec4(a_Position.xy, -1.0, 1.0)");
+    }
     const auto [vertex, fragment] = Shaders::GLSLContext::get ().toGlsl (
-        front.vertex (), withVolumetricIntrinsics (front.fragment ()));
+        vertexSource, withVolumetricIntrinsics (front.fragment ()));
     if (vertex.empty () || fragment.empty ()) throw std::runtime_error ("volumetricsfront did not translate");
-    m_frontProgram = link (vertex, fragment);
+    return program = link (vertex, fragment);
+}
+
+void CVolumetrics::ensurePrograms () {
+    if (m_vao) return;
     m_backProgram = link (kBackVertex, kBackFragment);
     m_combineProgram = link (kCombineVertex, kCombineFragment);
 
@@ -245,6 +267,20 @@ void CVolumetrics::ensurePrograms () {
     glGenBuffers (1, &m_quadVertices);
     glBindBuffer (GL_ARRAY_BUFFER, m_quadVertices);
     glBufferData (GL_ARRAY_BUFFER, sizeof (quad), quad, GL_STATIC_DRAW);
+    // The spot cone (light NDC; far 0 / near 1 of Linux's reversed spot projection).
+    const auto cone = buildSpotVolumeMesh (0.0f, 1.0f);
+    m_coneIndexCount = GLsizei (cone.indices.size ());
+    glGenBuffers (1, &m_coneVertices);
+    glBindBuffer (GL_ARRAY_BUFFER, m_coneVertices);
+    glBufferData (GL_ARRAY_BUFFER, GLsizeiptr (cone.vertices.size () * sizeof (glm::vec3)), cone.vertices.data (), GL_STATIC_DRAW);
+    glGenBuffers (1, &m_coneIndices);
+    glBindBuffer (GL_ELEMENT_ARRAY_BUFFER, m_coneIndices);
+    glBufferData (GL_ELEMENT_ARRAY_BUFFER, GLsizeiptr (cone.indices.size () * sizeof (uint32_t)), cone.indices.data (), GL_STATIC_DRAW);
+    // The volumetrics_fullscreen triangle: (-1,1), (-1,-3), (3,1) at z = 0.
+    const float triangle[] = {-1, 1, 0, -1, -3, 0, 3, 1, 0};
+    glGenBuffers (1, &m_triangleVertices);
+    glBindBuffer (GL_ARRAY_BUFFER, m_triangleVertices);
+    glBufferData (GL_ARRAY_BUFFER, sizeof (triangle), triangle, GL_STATIC_DRAW);
 }
 
 void CVolumetrics::ensureTargets (glm::ivec2 targetSize, bool hdr) {
@@ -278,17 +314,23 @@ void CVolumetrics::ensureTargets (glm::ivec2 targetSize, bool hdr) {
 }
 
 void CVolumetrics::accumulate (
-    const PointVolumeUniforms& volume, const glm::mat4& viewProjection, glm::ivec2 targetSize, bool hdr
+    const VolumeUniforms& volume, VolumeShape shape, bool fullscreen, const glm::mat4& viewProjection,
+    glm::ivec2 targetSize, bool hdr
 ) {
     if (targetSize.x <= 0 || targetSize.y <= 0) return;
     SavedState saved;
     ensurePrograms ();
     ensureTargets (targetSize, hdr);
+    const bool point = shape == VolumeShape::Point;
+    const GLuint front = frontProgram (point, fullscreen);
     glBindVertexArray (m_vao);
     const auto reduced = volumetricBufferSize (targetSize.x, targetSize.y, kVolumetricQuality);
     // The shipped front shader reads screen textures at (x, -y) * 0.5 + 0.5;
     // drawing the depth passes with device Y mirrored stores them at that row.
     const glm::mat4 mirrored = glm::scale (glm::mat4 (1.0f), glm::vec3 (1.0f, -1.0f, 1.0f)) * viewProjection;
+    const GLuint meshVertices = point ? m_sphereVertices : m_coneVertices;
+    const GLuint meshIndices = point ? m_sphereIndices : m_coneIndices;
+    const GLsizei meshIndexCount = point ? m_sphereIndexCount : m_coneIndexCount;
 
     // Back pass (volumetrics_back): the far surface of the volume.
     glBindFramebuffer (GL_FRAMEBUFFER, m_backFramebuffer);
@@ -301,18 +343,21 @@ void CVolumetrics::accumulate (
     glUseProgram (m_backProgram);
     setMatrix (m_backProgram, "g_ViewProjectionMatrix", mirrored);
     setMatrix (m_backProgram, "g_AltViewProjectionMatrix", volume.volume);
-    const auto bindSphere = [this] (GLuint program) {
+    // volumetricsback.vert: non-point volumes shrink x and y by 0.99.
+    if (const GLint scale = glGetUniformLocation (m_backProgram, "g_VolumeScale"); scale >= 0)
+        glUniform3f (scale, point ? 1.0f : 0.99f, point ? 1.0f : 0.99f, 1.0f);
+    const auto bindMesh = [] (GLuint program, GLuint vertices, GLuint indices, GLint components) {
         const GLint position = glGetAttribLocation (program, "a_Position");
-        glBindBuffer (GL_ARRAY_BUFFER, m_sphereVertices);
-        glBindBuffer (GL_ELEMENT_ARRAY_BUFFER, m_sphereIndices);
+        glBindBuffer (GL_ARRAY_BUFFER, vertices);
+        if (indices) glBindBuffer (GL_ELEMENT_ARRAY_BUFFER, indices);
         if (position >= 0) {
             glEnableVertexAttribArray (GLuint (position));
-            glVertexAttribPointer (GLuint (position), 3, GL_FLOAT, GL_FALSE, 0, nullptr);
+            glVertexAttribPointer (GLuint (position), components, GL_FLOAT, GL_FALSE, 0, nullptr);
         }
         return position;
     };
-    GLint position = bindSphere (m_backProgram);
-    glDrawElements (GL_TRIANGLES, m_sphereIndexCount, GL_UNSIGNED_INT, nullptr);
+    GLint position = bindMesh (m_backProgram, meshVertices, meshIndices, 3);
+    glDrawElements (GL_TRIANGLES, meshIndexCount, GL_UNSIGNED_INT, nullptr);
     if (position >= 0) glDisableVertexAttribArray (GLuint (position));
     glDisable (GL_DEPTH_TEST);
 
@@ -323,7 +368,7 @@ void CVolumetrics::accumulate (
     glClearColor (1.0f, 1.0f, 1.0f, 1.0f);
     glClear (GL_COLOR_BUFFER_BIT);
 
-    // Front pass (volumetrics_front): additive into the batch's light buffer.
+    // Front pass (volumetrics_front / volumetrics_fullscreen): additive into the batch's light buffer.
     glBindFramebuffer (GL_FRAMEBUFFER, m_lightFramebuffer);
     glViewport (0, 0, reduced.x, reduced.y);
     if (!m_pending) {
@@ -337,26 +382,31 @@ void CVolumetrics::accumulate (
     // maximum keeps the native single front-face alpha per volume.
     glBlendEquationSeparate (GL_FUNC_ADD, GL_MAX);
     glBlendFuncSeparate (GL_ONE, GL_ONE, GL_ONE, GL_ONE);
-    glUseProgram (m_frontProgram);
-    setMatrix (m_frontProgram, "g_ViewProjectionMatrix", viewProjection);
-    setMatrix (m_frontProgram, "g_AltViewProjectionMatrix", volume.volume);
-    setMatrix (m_frontProgram, "g_EffectModelMatrix", glm::inverse (viewProjection));
-    setMatrix (m_frontProgram, "g_AltModelMatrix", glm::mat4 (1.0f));
-    setVector (m_frontProgram, "g_RenderVar0", glm::vec4 (0.0f));
-    setVector (m_frontProgram, "g_RenderVar1", volume.spotParams);
-    setVector (m_frontProgram, "g_RenderVar2", volume.originDensity);
-    setVector (m_frontProgram, "g_RenderVar3", glm::vec4 (0.0f));
-    setVector (m_frontProgram, "g_RenderVar4", volume.colorExponent);
-    setVector (m_frontProgram, "g_Texture1Resolution", glm::vec4 (targetSize, 1.0f / glm::vec2 (targetSize)));
-    setVector (m_frontProgram, "g_Texture3Resolution", glm::vec4 (reduced, 1.0f / glm::vec2 (reduced)));
+    glUseProgram (front);
+    setMatrix (front, "g_ViewProjectionMatrix", viewProjection);
+    setMatrix (front, "g_AltViewProjectionMatrix", volume.volume);
+    setMatrix (front, "g_EffectModelMatrix", glm::inverse (viewProjection));
+    setMatrix (front, "g_AltModelMatrix", volume.lightProjection);
+    setVector (front, "g_RenderVar0", glm::vec4 (0.0f));
+    setVector (front, "g_RenderVar1", volume.spotParams);
+    setVector (front, "g_RenderVar2", volume.originDensity);
+    setVector (front, "g_RenderVar3", volume.forward);
+    setVector (front, "g_RenderVar4", volume.colorExponent);
+    setVector (front, "g_Texture1Resolution", glm::vec4 (targetSize, 1.0f / glm::vec2 (targetSize)));
+    setVector (front, "g_Texture3Resolution", glm::vec4 (reduced, 1.0f / glm::vec2 (reduced)));
     glActiveTexture (GL_TEXTURE1);
     glBindTexture (GL_TEXTURE_2D, m_backTexture);
     glActiveTexture (GL_TEXTURE3);
     glBindTexture (GL_TEXTURE_2D, m_limitTexture);
-    setSampler (m_frontProgram, "g_Texture1", 1);
-    setSampler (m_frontProgram, "g_Texture3", 3);
-    position = bindSphere (m_frontProgram);
-    glDrawElements (GL_TRIANGLES, m_sphereIndexCount, GL_UNSIGNED_INT, nullptr);
+    setSampler (front, "g_Texture1", 1);
+    setSampler (front, "g_Texture3", 3);
+    if (fullscreen) {
+        position = bindMesh (front, m_triangleVertices, 0, 3);
+        glDrawArrays (GL_TRIANGLES, 0, 3);
+    } else {
+        position = bindMesh (front, meshVertices, meshIndices, 3);
+        glDrawElements (GL_TRIANGLES, meshIndexCount, GL_UNSIGNED_INT, nullptr);
+    }
     if (position >= 0) glDisableVertexAttribArray (GLuint (position));
     glActiveTexture (GL_TEXTURE3);
     glBindTexture (GL_TEXTURE_2D, 0);
