@@ -166,6 +166,8 @@ private:
     void refreshTubeLights ();
     /** Native: a root volumetric point light draws its volume when the light itself renders. */
     void renderVolumetricLight (const ScenePointLight& light);
+    void renderVolumetricLight (const SceneSpotLight& light);
+    void submitVolumetricLight (int lightId, const VolumeUniforms& volume, VolumeShape shape, bool inside);
     void registerSpotLight (const SceneSpotLight* light);
     void renderShadowAtlas ();
     void assignLegacyLightSlot (const ScenePointLight* light);

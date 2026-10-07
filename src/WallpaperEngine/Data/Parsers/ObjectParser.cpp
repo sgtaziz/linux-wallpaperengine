@@ -347,6 +347,9 @@ ObjectUniquePtr ObjectParser::parse (const JSON& it, const Project& project) {
                 .castShadow = it.optional ("castshadow", false),
                 .useCookie = it.optional ("usecookie", false),
                 .cookie = it.optional<std::string> ("cookie", "cookie/flashlight1"),
+                .castVolumetrics = it.user ("castvolumetrics", project.properties, false),
+                .density = it.user ("density", project.properties, 2.0f),
+                .volumetricsExponent = it.user ("volumetricsexponent", project.properties, 1.0f),
             };
         };
         if (lightIt->is_string () && lightIt->get<std::string> () == "lspot")

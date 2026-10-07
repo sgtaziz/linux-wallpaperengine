@@ -854,6 +854,7 @@ void CScene::renderFrame (const glm::ivec4& viewport) {
         const auto& data = root->getObject ();
         if (data.is<ScenePointLight> () || data.is<SceneSpotLight> () || data.is<SceneTubeLight> ()) {
             if (data.is<ScenePointLight> ()) renderVolumetricLight (*data.as<ScenePointLight> ());
+            else if (data.is<SceneSpotLight> ()) renderVolumetricLight (*data.as<SceneSpotLight> ());
             continue;
         }
         if (m_volumetrics && m_volumetrics->pending ()
@@ -1321,22 +1322,62 @@ void CScene::renderVolumetricLight (const ScenePointLight& light) {
     const float radius = light.radius->value->getFloat ();
     const auto volume = packPointVolume (origin, light.color->value->getVec3 (), light.intensity->value->getFloat (),
         radius, light.density->value->getFloat (), light.volumetricsExponent->value->getFloat ());
+    if (!(radius > 0.0f) || !std::isfinite (volume.originDensity.w) || !std::isfinite (volume.colorExponent.w)) return;
+    // picks volumetrics_fullscreen when the eye is inside the volume of a perspective camera
+    // (native ortho replays always draw the mesh).
+    const auto& eye = getCamera ().getEye ();
+    const bool inside = volumetricFullscreen (getCamera ().isOrthogonal (),
+        eyeInsidePointVolume (eye, glm::normalize (getCamera ().getCenter () - eye), origin, radius));
+    submitVolumetricLight (light.id, volume, VolumeShape::Point, inside);
+}
+
+void CScene::renderVolumetricLight (const SceneSpotLight& light) {
+    if (m_volumetricsFailed || !light.castVolumetrics || !light.castVolumetrics->value->getBool () || kVolumetricQuality == 0)
+        return;
+    // The COOKIE (usecookie) and SHADOW (castshadow with a non-zero shadow
+    // quality,) front-shader variants are not reproduced:
+    // such a volume is skipped rather than drawn without its cookie or shadow.
+    if (light.useCookie || (light.castShadow && getShadowQuality () != 0)) return;
+    const auto transform = resolveSceneTransform (light,
+        [this] (int parentId) -> const Object* { return findObjectData (parentId); },
+        [this] (const Object& parent, const std::string& name) {
+            return getPuppetAttachmentTransform (parent.id, name);
+        });
+    if (!transform.visible) return;
+    const float radius = light.radius->value->getFloat ();
+    // (spot): the light's view-projection also bounds the volume.
+    const auto projection = spotLightProjection (transform.authoredMatrix, light.outerCone->value->getFloat (), radius,
+                                                 getCamera ().isOrthogonal ());
+    if (!projection) return;
+    const auto volume = packSpotVolume (transform.authoredMatrix, *projection, light.color->value->getVec3 (),
+        light.intensity->value->getFloat (), radius, light.innerCone->value->getFloat (),
+        light.outerCone->value->getFloat (), light.density->value->getFloat (),
+        light.volumetricsExponent->value->getFloat ());
+    if (!(radius > 0.0f) || !std::isfinite (volume.originDensity.w) || !std::isfinite (volume.colorExponent.w)
+        || !std::isfinite (volume.spotParams.y) || !std::isfinite (volume.spotParams.z)) return;
+    const float* forward = glm::value_ptr (volume.forward);
+    for (int i = 0; i < 4; ++i)
+        if (!std::isfinite (forward[i])) return;
+    const auto& eye = getCamera ().getEye ();
+    // Linux's spot projection is reversed (far depth 0); native passes 's far value.
+    const bool inside = volumetricFullscreen (getCamera ().isOrthogonal (),
+        eyeInsideSpotVolume (eye, glm::normalize (getCamera ().getCenter () - eye),
+                             transform.authoredMatrix, volume.volume, 0.0f, radius));
+    submitVolumetricLight (light.id, volume, VolumeShape::Spot, inside);
+}
+
+void CScene::submitVolumetricLight (int lightId, const VolumeUniforms& volume, VolumeShape shape, bool inside) {
     const float* values = glm::value_ptr (volume.volume);
     for (int i = 0; i < 16; ++i)
         if (!std::isfinite (values[i])) return;
-    if (!(radius > 0.0f) || !std::isfinite (volume.originDensity.w) || !std::isfinite (volume.colorExponent.w)) return;
-    // The camera-inside variant (volumetrics_fullscreen) is not reproduced:
-    // such a volume is skipped rather than drawn from its front faces.
-    const auto& eye = getCamera ().getEye ();
-    if (eyeInsidePointVolume (eye, glm::normalize (getCamera ().getCenter () - eye), origin, radius)) return;
     if (!m_volumetrics) m_volumetrics = std::make_unique<CVolumetrics> (getAssetLocator ());
     const glm::mat4 viewProjection = m_activeRenderProjection
         * sceneAuthoredToCamera (getWidth (), getHeight (), getCamera ().isOrthogonal ());
     try {
-        m_volumetrics->accumulate (volume, viewProjection,
+        m_volumetrics->accumulate (volume, shape, inside, viewProjection,
             {int (m_sceneFBO->getRealWidth ()), int (m_sceneFBO->getRealHeight ())}, m_hdrPostprocessing);
     } catch (const std::exception& e) {
-        sLog.error ("Cannot render volumetric light ", light.id, ": ", e.what ());
+        sLog.error ("Cannot render volumetric light ", lightId, ": ", e.what ());
         m_volumetrics.reset ();
         m_volumetricsFailed = true;
     }
