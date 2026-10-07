@@ -84,9 +84,14 @@ private:
     long computeCharacterSize26_6 () const;
     void setupEffects ();
     void resizeEffectTargets ();
+    void updateEffectFinalQuad ();
     bool hasVisibleEffects () const;
     glm::vec2 layerPadding () const;
-    std::shared_ptr<const TextureProvider> runEffects ();
+    struct EffectResult {
+	std::shared_ptr<const TextureProvider> texture;
+	bool drewFinal = false; // final step already drew into the scene target
+    };
+    EffectResult runEffects (const std::shared_ptr<const CFBO>& sceneTarget, const glm::mat4& finalMvp);
 
     const Text& m_text;
     std::string m_horizontalAlign;
@@ -162,6 +167,8 @@ private:
     std::vector<SizedTarget> m_sizedTargets;
     std::vector<MaterialPassUniquePtr> m_virtualEffectMaterials;
     GLuint m_passPosition = 0;
+    GLuint m_passPositionFinal = 0; // target-pixel quad of the final step
+    glm::mat4 m_effectFinalMvp = glm::mat4 (1.0f);
     GLuint m_passTexCoord = 0;
     glm::mat4 m_effectIdentity = glm::mat4 (1.0f);
     glm::vec4 m_effectiveColor4 = glm::vec4 (1.0f);
