@@ -248,16 +248,8 @@ void CPass::setupRenderFramebuffer () const {
 	    break;
     }
 
-    switch (this->m_pass.depthwrite) {
-	case DepthwriteMode_Enabled:
-	    glDepthMask (true);
-	    break;
-
-	case DepthwriteMode_Disabled:
-	default:
-	    glDepthMask (false);
-	    break;
-    }
+    // Native forces depth write off for any blended (translucent/additive) pass.
+    glDepthMask (resolveDepthWrite (this->m_blendingmode, this->m_pass.depthwrite));
 }
 
 void CPass::setupRenderTexture () {

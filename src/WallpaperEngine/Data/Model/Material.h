@@ -30,6 +30,15 @@ enum DepthwriteMode {
     DepthwriteMode_Enabled = 2,
 };
 
+/**
+ * Native 2.8.42 (DXVK captures l34/rdc-remote): depth write is enabled only for a non-blended
+ * pass whose authored depthwrite is enabled; additive and translucent passes never write depth.
+ */
+constexpr bool resolveDepthWrite (BlendingMode blending, DepthwriteMode depthwrite) {
+    const bool blended = blending == BlendingMode_Translucent || blending == BlendingMode_Additive;
+    return !blended && depthwrite == DepthwriteMode_Enabled;
+}
+
 struct MaterialPass {
     /** Blending mode */
     BlendingMode blending;
