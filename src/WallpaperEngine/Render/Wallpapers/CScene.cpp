@@ -833,6 +833,15 @@ void CScene::renderFrame (const glm::ivec4& viewport) {
         restore ();
     }
     if (clearEnabled) glClear (GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    else {
+        // Scene-target draws no longer write alpha; keep it at the native
+        // clear value when the scene does not clear its colour.
+        glColorMask (GL_FALSE, GL_FALSE, GL_FALSE, GL_TRUE);
+        glClearColor (0.0f, 0.0f, 0.0f, 1.0f);
+        glClear (GL_COLOR_BUFFER_BIT);
+        glColorMask (GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+        glClearColor (clearColor.r, clearColor.g, clearColor.b, 1.0f);
+    }
     const auto flushVolumetrics = [this] {
         if (m_volumetrics && m_volumetrics->pending ())
             m_volumetrics->flush (m_sceneFBO->getFramebuffer (),

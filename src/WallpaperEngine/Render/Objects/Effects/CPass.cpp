@@ -13,6 +13,7 @@
 #include "WallpaperEngine/Render/TextureAnimation.h"
 #include "WallpaperEngine/Render/UserTextureSelection.h"
 #include "WallpaperEngine/Render/Objects/CImage.h"
+#include "WallpaperEngine/Render/Wallpapers/SceneTransform.h"
 #include "WallpaperEngine/Render/Shaders/SceneShaderCombos.h"
 
 #include "WallpaperEngine/Render/Shaders/Variables/ShaderVariable.h"
@@ -636,12 +637,22 @@ void CPass::render () {
     }
 
     this->setupRenderFramebuffer ();
+    // Native draws into the root scene colour target never write alpha.
+    const bool rootSceneTarget = !this->m_depthDestination && this->m_drawTo
+        && this->m_drawTo == this->m_renderable.getScene ().getFBO ();
+    GLboolean previousMask[4] = {GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE};
+    if (rootSceneTarget) {
+	glGetBooleanv (GL_COLOR_WRITEMASK, previousMask);
+	glColorMask (previousMask[0], previousMask[1], previousMask[2],
+	    Wallpapers::sceneColorAlphaWrite (true, previousMask[3] != GL_FALSE) ? GL_TRUE : GL_FALSE);
+    }
     this->setupRenderTexture ();
     this->setupRenderUniforms ();
     this->setupRenderReferenceUniforms ();
     this->setupRenderAttributes ();
     this->renderGeometry ();
     this->cleanupRenderSetup ();
+    if (rootSceneTarget) glColorMask (previousMask[0], previousMask[1], previousMask[2], previousMask[3]);
 }
 
 std::shared_ptr<const FBOProvider> CPass::getFBOProvider () const { return this->m_fboProvider; }
