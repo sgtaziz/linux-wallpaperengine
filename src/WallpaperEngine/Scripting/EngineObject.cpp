@@ -118,7 +118,9 @@ JSValue engine_get_frametime (JSContext* ctx, JSValueConst this_val, int argc, J
 }
 
 JSValue engine_get_runtime (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
-    return JS_NewFloat64 (ctx, g_Time);
+    auto* owner = get_engine_object (ctx, this_val);
+    if (!owner) return JS_EXCEPTION;
+    return JS_NewFloat64 (ctx, WallpaperEngine::Scripting::engineRuntime (owner->getScene ()));
 }
 
 JSValue engine_get_daytime (JSContext* ctx, JSValueConst this_val, int argc, JSValueConst* argv) {
@@ -333,7 +335,7 @@ JSValue EngineObject::registerAudioBuffers (uint32_t resolution) {
     return result;
 }
 
-void EngineObject::tick () {
+void EngineObject::tick (float delta) {
     const auto& spectrum = m_scene.getAudioSpectrum ();
     JSContext* ctx = m_engine.getContext ();
     for (const auto& registration : m_audioBuffers) {
@@ -358,7 +360,7 @@ void EngineObject::tick () {
             JS_FreeValue (ctx, buffer);
         }
     }
-    m_timers.tick ();
+    m_timers.tick (delta);
 }
 
 std::optional<std::string> EngineObject::registeredAssetPath (JSValueConst value) const {

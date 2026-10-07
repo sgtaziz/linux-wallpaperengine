@@ -132,7 +132,7 @@ void Camera::advanceFrame (float dt, const std::vector<const SceneCamera*>& came
     m_runtimeTransforms = m_runtimeOverride;
     // Native shakes the frame copy of whichever pose won above;
     // the stored script transforms stay unshaken.
-    m_shake = Shake::evaluate (m_camera, m_scene.getParticleSceneTime (), m_isOrthogonal, m_height);
+    m_shake = Shake::evaluate (m_camera, m_scene.getSceneTime (), m_isOrthogonal, m_height);
     m_pose = m_shake.apply (m_pose);
     m_lookat = glm::lookAt (m_pose.eye, m_pose.center, m_pose.up);
     if (m_width > 0 && m_height > 0) {

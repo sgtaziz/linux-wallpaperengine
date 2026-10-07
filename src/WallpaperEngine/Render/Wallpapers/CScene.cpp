@@ -563,9 +563,10 @@ void CScene::renderFrame (const glm::ivec4& viewport) {
         m_presentationTextureSize = glm::vec2 (viewport.z, viewport.w);
     }
     // Native advances this scene clock before its particle
-    // tree ticks. The float sent to the particle context wraps after 432000 s.
-    m_particleSceneTime = advanceParticleSceneClock (
-        m_particleSceneTimeAccumulator, getDeltaTime ());
+    // tree ticks and its scripts run. The float sent to the particle context
+    // and to engine.runtime wraps after 432000 s.
+    m_sceneTime = advanceParticleSceneClock (
+        m_sceneTimeAccumulator, getDeltaTime ());
     // A scene owns its filter history. Repeated viewports at the same scene
     // time consume one published frame; a paused scene retains its last one.
     const auto& recorder = this->getAudioContext ().getRecorder ();
@@ -1038,7 +1039,7 @@ float CScene::getTime () const { return g_Time; }
 
 float CScene::getDeltaTime () const { return g_Time - g_TimeLast; }
 
-float CScene::getParticleSceneTime () const { return m_particleSceneTime; }
+float CScene::getSceneTime () const { return m_sceneTime; }
 
 float CScene::getFps () const {
     const float dt = g_Time - g_TimeLast;

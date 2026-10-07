@@ -54,7 +54,11 @@ public:
     [[nodiscard]] float getTime () const;
     [[nodiscard]] float getDeltaTime () const;
     [[nodiscard]] float getFps () const;
-    [[nodiscard]] float getParticleSceneTime () const;
+    /**
+     * Seconds of scene frames since the scene was built (native root clock,
+     * ): drives particles, camera shake and engine.runtime.
+     */
+    [[nodiscard]] float getSceneTime () const;
     [[nodiscard]] float getPreviousParticleSceneDuration () const { return m_particleFrameDurations.previous; }
 
     const glm::vec2* getMousePosition () const;
@@ -188,8 +192,8 @@ private:
     Audio::Drivers::Recorders::SceneSpectrumState m_audioSpectrum;
     std::mt19937 m_particleRandom { 5489u };
     ParticleSceneFrameDurations m_particleFrameDurations;
-    double m_particleSceneTimeAccumulator { 0.0 };
-    float m_particleSceneTime { 0.0f };
+    double m_sceneTimeAccumulator { 0.0 };
+    float m_sceneTime { 0.0f };
     std::vector<const ScenePointLight*> m_pointLightObjects = {};
     std::unique_ptr<CVolumetrics> m_volumetrics = nullptr;
     bool m_volumetricsFailed = false;
