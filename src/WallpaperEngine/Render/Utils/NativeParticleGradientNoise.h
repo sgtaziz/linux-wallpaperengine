@@ -60,7 +60,7 @@ inline float nativeBirthParticleGradientNoise (float coordinate) {
           + (gradient (nativeParticleGradientTable[index]) * fraction) * a0) * 0.395f;
 }
 
-// samples frequency * original coordinate each iteration, then
+// Native samples frequency * original coordinate each iteration, then
 // divides the sequential weighted sum by its amplitude sum. Count zero
 // deliberately returns 0/0; the parser bounds the authored count to 0..32.
 inline float nativeBirthParticleFBMNoise (float coordinate, float frequency, int count) {

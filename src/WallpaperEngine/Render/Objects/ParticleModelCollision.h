@@ -42,7 +42,7 @@ inline std::optional<PuppetSkeletonData::EmissionBound> modelCollisionFallbackBo
 }
 
 inline CollisionCapsule modelCollisionCapsule (glm::vec3 extent, const glm::mat4& transform) {
-    // chooses signed axis components by squared magnitude. Equal
+    // Native chooses signed axis components by squared magnitude. Equal
     // axes retain the earlier axis; radius uses the larger remaining extent.
     glm::vec3 major (extent.x, 0, 0), first (0, extent.y, 0), second (0, 0, extent.z);
     if (extent.y * extent.y > extent.x * extent.x) std::swap (major, first);
@@ -76,7 +76,7 @@ inline std::vector<CollisionCapsule> modelCollisionCapsules (
     result.reserve (bounds.size ());
     const glm::mat4 source = inverseInvocation * sourceWorld;
     for (size_t index = 0; index < bounds.size (); ++index) {
-        // substitutes identity if the corresponding pose is absent.
+        // Native substitutes identity if the corresponding pose is absent.
         const auto bone = index < currentGlobals.size () ? currentGlobals[index] : glm::mat4 (1);
         const auto& bound = bounds[index];
         result.push_back (modelCollisionCapsule (

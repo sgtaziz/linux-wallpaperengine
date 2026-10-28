@@ -28,7 +28,7 @@ TEST_CASE ("Point lights parse the native volumetric descriptors and defaults", 
     REQUIRE (light.castVolumetrics->value->getBool ());
     REQUIRE (light.density->value->getFloat () == 1.74f);
     REQUIRE (light.volumetricsExponent->value->getFloat () == 1.0700001f);
-    // registers the volumetric descriptors as script properties.
+    // Native registers the volumetric descriptors as script properties.
     const auto bindings = WallpaperEngine::Scripting::scriptPropertyBindings (light);
     for (const auto& [name, value] : {std::pair {"castvolumetrics", light.castVolumetrics->value.get ()},
                                       std::pair {"density", light.density->value.get ()},
@@ -43,7 +43,7 @@ TEST_CASE ("Point lights parse the native volumetric descriptors and defaults", 
     REQUIRE_FALSE (empty.castVolumetrics->value->getBool ());
     REQUIRE (empty.density->value->getFloat () == 2.0f);
     REQUIRE (empty.volumetricsExponent->value->getFloat () == 1.0f);
-    // accepts {value, user}: the bit follows the user property.
+    // Native accepts {value, user}: the bit follows the user property.
     auto toggle = std::make_shared<PropertyBoolean> (PropertyData {"vol", "vol"}, true);
     project.properties["vol"] = toggle;
     const auto bound = ObjectParser::parse (JSON::parse (
@@ -91,7 +91,7 @@ TEST_CASE ("Volumetric buffers and the inside test follow ", "[scene][volumetric
 TEST_CASE ("Modern spot and tube lights parse the volumetric descriptors and expose them to scripts",
            "[scene][volumetric][parser][spotlight][tubelight]") {
     Project project {};
-    // registers castvolumetrics, density and volumetricsexponent for every modern light type.
+    // Native registers castvolumetrics, density and volumetricsexponent for every modern light type.
     const auto spot = ObjectParser::parse (JSON::parse (R"({"id":3,"light":"lspot","castvolumetrics":true,
         "density":1.5,"volumetricsexponent":0.75,"radius":300.0,"innercone":12.0,"outercone":28.0})"), project);
     const auto& light = *spot->as<SceneSpotLight> ();

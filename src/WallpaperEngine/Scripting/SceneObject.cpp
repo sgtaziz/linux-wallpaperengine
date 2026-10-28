@@ -292,7 +292,7 @@ JSValue scene_get_setting (JSContext* ctx, JSValueConst this_val, int, JSValueCo
     const auto& setting = property.setting (container->getScene ().getScene ());
     if (!setting || !setting->value) return JS_UNDEFINED;
     auto& value = *setting->value;
-    // Native type-2 getter is the one layer origin uses: it
+    // Native's Vec3 getter, which layer origin uses,
     // copies the three floats out, so a read is a detached Vec3 snapshot and
     // only an assignment back through the setter changes the scene value.
     if (property.type == SceneSettingType::Vec3) {

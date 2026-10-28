@@ -13,7 +13,7 @@ struct ImagePrelightingBasis {
 };
 
 // Native supplies centered source-pixel vertices for prelighting.
-// preserves the authored world matrix for shared materials, and
+// It preserves the authored world matrix for shared materials, and
 // scales its XY columns by logical/source dimensions only for model.instanced
 // (flag 0x800, distinct from autosize 0x8). Linux allocates full-resolution
 // composites; the native reduced-quality model-stack adjustment is separate.

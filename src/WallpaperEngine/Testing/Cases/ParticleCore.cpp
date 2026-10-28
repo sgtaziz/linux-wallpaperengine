@@ -76,7 +76,7 @@ TEST_CASE ("Emitter birth defaults match the original machine entry on reused ph
         REQUIRE (particle.poolSlot == slot);
         REQUIRE (particle.birthId == 45);
     }
-    // writes lifetime 1 for every birth; instance lifetime only
+    // Native writes lifetime 1 for every birth; instance lifetime only
     // patches lifetimerandom records, so the ordinary path has no other default.
     ParticleInstance ordinary;
     initializeEmitterBirth (ordinary, {1, 1, 1}, 1, 160, .25f, false, false);
@@ -279,7 +279,7 @@ TEST_CASE ("Image emission alignment retains built integer offsets until geometr
     }
     alignment.rebuild ("topleft", {32, 32});
     glm::vec2 logicalSize (64, 48);
-    // A getter consumes stored; changing size cannot silently
+    // A getter consumes stored +/+; changing size cannot silently
     // re-evaluate it. The explicit alignment callback does geometry setup.
     REQUIRE (alignment.world (glm::mat4 (1))[3] == glm::vec4 (16, -16, 0, 1));
     alignment.rebuild ("bottomright", logicalSize);
@@ -841,8 +841,7 @@ TEST_CASE ("Control-point attraction envelope weights the capped impulse", "[par
 }
 
 TEST_CASE ("Control-point attraction flag 1 deletes along the step segment", "[particle][controlpoint][attract]") {
-    // Original 2.8.42 via interpreter (w10
-    // controlpointattract oracle delete-flag1/3, deletethreshold 4): the
+    // Native (deletethreshold 4): the
     // closest point of previous->current to the control point is tested.
     const glm::vec3 c (10.0f, 20.0f, 0.0f);
     const float threshold = 4.0f;
@@ -905,7 +904,7 @@ TEST_CASE ("Shared particle RGB gain follows native birth gates", "[particle][in
         return particleInstanceBirthRgbGain (rootTint, rootPreset, nodePreset,
             brightness, rootFlags, nodeFlags, tintCompiled, isRoot, hdr);
     };
-    // uses the HDR root brightness and the compiled color flag
+    // Native uses the HDR root brightness and the compiled color flag
     // as independent RGB factors. It leaves alpha and material overbright to
     // their own streams.
     REQUIRE (gain (tint, preset, preset, 2.0f, 0, 0, true, false, true)
@@ -953,7 +952,7 @@ TEST_CASE ("Compiled particle color endpoints receive a separate HSV tint",
 }
 
 TEST_CASE ("Ordered colour changes compose on the current colour stream", "[particle][color][colorchange]") {
-    // Original 2.8.42 opcode 5 replay (, birth
+    // Native replay (birth
     // RGB .9 .8 .7, life 0.4): C1 = .2..0.8 (1 .5 .25)->(.2 .4 1), C2 = 0..1
     // (.5 1 1)->(1 1 .5). Native multiplies the current stream, so C1C2 and
     // C2C1 both give birth * C1 * C2 (RCPPS ramp tolerance), not birth * C2.
@@ -972,7 +971,7 @@ TEST_CASE ("Ordered colour changes compose on the current colour stream", "[part
 }
 
 TEST_CASE ("Overlapping alphafade windows OR the native ramp bits", "[particle][alphafade]") {
-    // Original 2.8.42 opcode 3 replay (, birth
+    // Native replay (birth
     // alpha 1, lifetime 12): with fadein > fadeout both masked ramps apply and
     // the factor is their bitwise OR, not the fade-in ramp alone. The OR merges
     // exponent bits, so one RCPPS ulp can move it between ~0.75 and ~2.0: the
@@ -1011,7 +1010,7 @@ TEST_CASE ("Particle preset color summary comes from color components, not autho
     auto object = ObjectParser::parse (data, project);
     const auto* particle = dynamic_cast<const Particle*> (object.get ());
     REQUIRE (particle != nullptr);
-    // takes the summary from the color initializer (colorrandom
+    // Native takes the summary from the color initializer (colorrandom
     // midpoint); colorchange's start color is only the no-initializer fallback.
     REQUIRE (particle->presetColorN == glm::vec3 (1.0f));
     REQUIRE (particle->presetHasColor);
@@ -1204,7 +1203,7 @@ TEST_CASE ("Fixed particle renderer axes follow native factory basis", "[particl
     REQUIRE (skipped);
     REQUIRE (skipped->forward->x == Catch::Approx (-0.66436384f));
     REQUIRE (skipped->forward->y == Catch::Approx (-0.74740932f));
-    // sets right = up x forward, so an
+    // Native sets g_OrientationRight = up x forward, so an
     // in-plane axis leaves the sprite edge-on to an orthographic camera.
     REQUIRE (local->right.z == Catch::Approx (-1.0f));
     REQUIRE (skipped->right.z == Catch::Approx (-1.0f));
@@ -1439,8 +1438,7 @@ TEST_CASE ("Two-pass particle dispatch restores streams before each oscillator l
 }
 
 TEST_CASE ("Position oscillator matches native sine step difference", "[particle][oscillator][position]") {
-    // Original 2.8.42 interpreter outputs (w10 oscillateposition
-    // oracle, step 1/30): authored-frame position deltas. Only y adds r*2pi.
+    // Native outputs (step 1/30): authored-frame position deltas. Only y adds r*2pi.
     const float step = 1.0f / 30.0f;
     const glm::vec3 oddMask { 0.5f, 2.0f, -1.0f };
     const auto near = [] (glm::vec3 actual, glm::vec3 expected) {
@@ -3257,8 +3255,8 @@ TEST_CASE ("Box emitter defaults follow the scene projection", "[particle][box][
 }
 
 TEST_CASE ("Emitter velocity of a zero direction is NaN like native", "[particle][random][box][sphere]") {
-    // scales by speed * rsqrt(length^2): native zr-boxdir box0-move
-    // (directions "0 0 0" plus movement) draws nothing.
+    // Native scales by speed * rsqrt(length^2), so a box
+    // with directions "0 0 0" plus movement draws nothing.
     const auto scaled = emitterVelocity (glm::vec3 (3.0f, 4.0f, 0.0f), 5.0f, 10.0f);
     REQUIRE (scaled == glm::vec3 (6.0f, 8.0f, 0.0f));
     for (const float speed : {0.0f, 2.0f}) {
@@ -3757,9 +3755,9 @@ TEST_CASE ("Rope trail history follows surviving particles and samples once per 
 }
 
 TEST_CASE ("Rope trail uvscrolling pins the texture to the world", "[particle][rope]") {
-    // writes the trail position of history point k as
-    // k - scroll, the per-slot u16 counter that every history sample bumps; ZR-1b
-    // measured the stripes world-pinned natively and head-locked without it.
+    // Native writes the trail position of history point k as
+    // k - scroll, the per-slot u16 counter that every history sample bumps; measured
+    // stripes world-pinned natively and head-locked without it.
     RopeTrailHistory history (2, 4);
     history.born (0, { 0.0f, 0.0f, 0.0f });
     history.born (1, { 1.0f, 0.0f, 0.0f });
@@ -4227,8 +4225,7 @@ TEST_CASE ("Turbulence samples noise at the native particle position", "[particl
 
 TEST_CASE ("Native turbulence reads only the phase span", "[particle][turbulence]") {
     using WallpaperEngine::Render::Utils::nativeTurbulenceVelocityDelta;
-    // Original 2.8.42 interpreter opcode 0x0e (w10 turbulence
-    // oracle, damped clock 0.027194): phasemin 2..5 and 0.5..1.5 shift
+    // Native (damped clock 0.027194): phasemin 2..5 and 0.5..1.5 shift
     // nothing; only phasemax - phasemin reaches the lane.
     const glm::vec3 position (0.17f, -0.31f, 0.53f);
     const auto ortho = nativeTurbulenceVelocityDelta (
@@ -4376,8 +4373,7 @@ TEST_CASE ("Native turbulent birth matches original opcode 9 with rate-scaled ti
 TEST_CASE ("Birth noise kernels match captured native instruction bit vectors",
            "[particle][birth][remap][noise]") {
     using namespace WallpaperEngine::Render::Utils;
-    // Original 2.8.42 instructions, saved native leaf
-    // outputs under masked IEEE/RNE (25 gradient inputs and FBM scale 2).
+    // Native leaf outputs under masked IEEE/RNE (25 gradient inputs and FBM scale 2).
     const std::array<std::pair<uint32_t, uint32_t>, 25> gradientVectors {{
         { 0x00000000u, 0x00000000u },
         { 0x80000000u, 0x80000000u },

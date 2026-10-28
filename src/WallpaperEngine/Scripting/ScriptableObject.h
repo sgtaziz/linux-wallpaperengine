@@ -34,8 +34,8 @@ public:
     bool disablesCursorPropagation () const { return m_disablePropagation; }
     void setSolid (bool solid) { m_solid = solid; }
     void setDisablePropagation (bool disabled) { m_disablePropagation = disabled; }
-    // The layer `name` host property (2.8.42: String, 
-    // setter) stores script writes in the field that the scene's
+    // The layer `name` host property (a String with a setter)
+    // stores script writes in the field that the scene's
     // name lookup compares. It starts as the
     // authored name.
     const std::string& getScriptName () const { return m_scriptName; }

@@ -306,7 +306,7 @@ inline std::vector<std::vector<char32_t>> legacyWordWrap (std::span<const char32
 
 inline std::optional<float> textEllipsisTrialRight (std::span<const char32_t> trial,
                                                     const TextFaceResolver& resolve) {
-    // Measures every shaped glyph, without letter spacing.
+    // Native measures every shaped glyph, without letter spacing.
     std::optional<float> right;
     float pen = 0.0f;
     for (const auto& glyph : shapeNativeTextRow (trial, resolve, true).glyphs) {
@@ -318,7 +318,7 @@ inline std::optional<float> textEllipsisTrialRight (std::span<const char32_t> tr
     return right;
 }
 
-/** split: drop runs starting at/after the
+/** Split: drop runs starting at/after the
  * split, then pop the remaining run's glyphs from the end while their
  * cluster reaches it. Returns true when glyphs remain in that run and the
  * last popped glyph was unsafe to break: native then reprocesses the row
@@ -409,7 +409,7 @@ inline std::vector<TextLaidRow> layoutTextRows (std::span<const char32_t> text,
                 if (!textGlyphHorizontalInk (glyph.face, glyph.glyph.glyphIndex, low, high)) high = 0.0f;
                 return pen + static_cast<float> (glyph.glyph.xOffset26_6 >> 6) + high;
             };
-            // tests the ink right edge, not the advance.
+            // Native tests the ink right edge, not the advance.
             if (!kept.empty () && !isTextBreakWhitespace (row[cluster]) && cluster != previousCluster
                 && limits.maxWidth < inkRight ()) {
                 if (!limitRows || index + 1 < static_cast<size_t> (limits.maxRows)) {
@@ -447,7 +447,7 @@ inline std::vector<TextLaidRow> layoutTextRows (std::span<const char32_t> text,
                     }
                     rows.resize (index + 1);
                     if (count == 0 || row[count - 1] == 0x2026) {
-                        // No replacement; the
+                        // No replacement: the
                         // glyphs kept before the overflow stay, without "…".
                         rows[index].text.assign (row.begin (), row.begin () + static_cast<std::ptrdiff_t> (cluster));
                     } else {

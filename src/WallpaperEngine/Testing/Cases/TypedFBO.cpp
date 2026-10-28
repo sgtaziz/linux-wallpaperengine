@@ -2128,7 +2128,7 @@ TEST_CASE ("An eye inside a point volume marches from the near plane like volume
     const float radius = 520.0f;
     const auto volume = packPointVolume (light, color, 1.0f, radius, 2.0f, 1.0f);
     const auto inside = rig.render (volume, VolumeShape::Point, true);
-    // draws volumetrics_fullscreen: the march starts at the near
+    // Native draws volumetrics_fullscreen: the march starts at the near
     // plane (z = +2000 under the +-2000 ortho depth) and ends at the volume's
     // back surface; the shader's own RenderVar maths decides the rest.
     for (const int offset : {0, 100, 200, 300}) {

@@ -639,8 +639,8 @@ int scriptableobject_property_set (
         else text->setFont (std::move (value));
         return 1;
     }
-    // Text inherits the image `size` host property (Vec2 at 0x2f0, setter
-    // no change callback; the text lookup falls back to
+    // Text inherits the image `size` host property (a Vec2 with no change callback);
+    // the text lookup falls back to
     // the image map). How text layout uses that field after a write is not
     // recovered, so the write is accepted without effect.
     if (text && publicName == "size") return 1;

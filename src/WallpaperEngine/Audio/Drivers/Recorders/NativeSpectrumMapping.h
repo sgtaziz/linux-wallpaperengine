@@ -52,7 +52,7 @@ inline unsigned nativeSpectrumBand (unsigned previous, unsigned bin, unsigned bi
     return std::min (previous + 1, nativeSpectrumMappedBand (bin, binCount, exponent));
 }
 
-// native,: first multiply gain
+// Native scales in this order: first multiply gain
 // by 0.001f, divide the bin count by half the FFT length separately, then
 // multiply the two rounded float32 values.
 inline float nativeSpectrumScale (float gain, unsigned binCount, unsigned fftLength) {

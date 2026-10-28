@@ -75,8 +75,7 @@ JSValue engine_open_user_shortcut (JSContext* ctx, JSValueConst this_val, int ar
     return JS_FALSE;
 }
 
-// Native 2.8 desktop wallpaper capabilities (native IEngine,
-// native registrations): not the editor, not a
+// Native 2.8 desktop wallpaper capabilities: not the editor, not a
 // mobile device, a desktop device, a wallpaper and not a screensaver.
 JSValue engine_is_running_in_editor (JSContext*, JSValueConst, int, JSValueConst*) { return JS_FALSE; }
 JSValue engine_is_mobile_device (JSContext*, JSValueConst, int, JSValueConst*) { return JS_FALSE; }

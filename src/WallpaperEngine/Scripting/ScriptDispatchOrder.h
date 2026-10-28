@@ -11,11 +11,11 @@
 
 namespace WallpaperEngine::Scripting {
 
-// Native 2.8.42 keeps one script list
+// Native keeps one script list that
 // appends each compiled script, and update, resize, media, cursor,
 // applyUserProperties and destroy all walk that list. Scripts are created while
 // the scene loads: the general settings first, then objects in
-// their array order (:656-705), each by loader phase. walks a
+// their array order, each by loader phase. The loader walks a
 // JSON object's keys through jsoncpp's std::map, so within a phase the keys
 // register in byte order. Scripts created later are appended.
 enum class ScriptPhase : uint32_t {

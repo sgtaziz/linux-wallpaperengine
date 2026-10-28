@@ -9,8 +9,7 @@
 namespace WallpaperEngine::Render::Objects {
 
 // Native draws the final step of a text object's effect chain with
-// the target-pixel quad built
-// straight into the scene with the object's matrices, while earlier steps use
+// the target-pixel quad built straight into the scene with the object's matrices, while earlier steps use
 // the 2x2 clip quad into intermediates. Vertex shaders that
 // offset a_Position by g_Texture0Resolution (skew MODE 1) therefore work in
 // target pixels there.

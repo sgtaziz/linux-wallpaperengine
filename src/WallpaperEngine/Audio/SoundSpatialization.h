@@ -73,8 +73,8 @@ inline float inverseDistanceClampedGain (float distance, float referenceDistance
 
 /**
  * Native applies a sound layer's attenuation (rolloff) and mindistance
- * (reference distance) to its voices only inside play() (, called
- * ); the per-frame update moves the position alone.
+ * (reference distance) to its voices only inside play(); the per-frame update
+ * moves the position alone.
  * Script writes therefore stay pending until the next play().
  */
 struct SoundDistanceLatch {

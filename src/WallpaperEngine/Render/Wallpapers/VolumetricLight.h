@@ -61,7 +61,7 @@ inline PointVolumeUniforms packPointVolume (
 }
 
 /**
- * draws the full-screen variant instead of the front faces when
+ * Native draws the full-screen variant instead of the front faces when
  * the eye, nudged 0.2 along the view, lies inside a point volume.
  */
 inline bool eyeInsidePointVolume (const glm::vec3& eye, const glm::vec3& forward, const glm::vec3& origin, float radius) {
@@ -157,7 +157,7 @@ inline bool eyeInsideSpotVolume (
 inline bool volumetricFullscreen (bool orthographicCamera, bool eyeInside) { return !orthographicCamera && eyeInside; }
 
 /**
- * finishes a pending volumetric batch before drawing an
+ * Native finishes a pending volumetric batch before drawing an
  * object only when that object is drawn (visible) and is not a light; lights
  * and invisible objects leave the batch open.
  */

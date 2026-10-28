@@ -53,7 +53,7 @@ inline bool valid (const Source& source) {
     });
 }
 
-// normalizes TEXS frames by the dimensions of the page they were
+// Native normalizes TEXS frames by the dimensions of the page they were
 // uploaded to; the first frame feeds g_RenderVar1.xy.
 inline glm::vec4 nativeFrameSize (const Source& source) {
     const float frameWidth = source.authored.front ().z / static_cast<float> (source.mipWidth);

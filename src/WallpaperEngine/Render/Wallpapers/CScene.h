@@ -55,8 +55,8 @@ public:
     [[nodiscard]] float getDeltaTime () const;
     [[nodiscard]] float getFps () const;
     /**
-     * Seconds of scene frames since the scene was built (native root clock,
-     * ): drives particles, camera shake and engine.runtime.
+     * Seconds of scene frames since the scene was built (native root clock):
+     * drives particles, camera shake and engine.runtime.
      */
     [[nodiscard]] float getSceneTime () const;
     [[nodiscard]] float getPreviousParticleSceneDuration () const { return m_particleFrameDurations.previous; }
@@ -101,7 +101,7 @@ public:
     [[nodiscard]] int getSpotFeatureCount () const { return int (m_spotFeatureProjections.size ()); }
     [[nodiscard]] const glm::mat4* getSpotFeatureProjections () const { return m_spotFeatureProjections.data (); }
     [[nodiscard]] const glm::vec4* getSpotFeatureTransforms () const { return m_spotFeatureTransforms.data (); }
-    /** Native context byte 0x1ac shadow quality. */
+    /** Native shadow quality. */
     [[nodiscard]] int getShadowQuality () const { return nativeShadowQuality; }
     /**
      * Light-owned sampled resources (`_rt_shadowAtlas`, `_alias_lightCookie`), resolved

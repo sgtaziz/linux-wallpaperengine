@@ -80,7 +80,7 @@ inline std::optional<glm::vec3> maintainControlPointDistance (
 inline glm::vec3 maintainBetweenControlPoints (
     glm::vec3 position, const ConstraintControlPoint& start,
     const ConstraintControlPoint& end, float envelopeWeight = 1.0f) {
-    // opcodes 12/34: carry the old segment's axial coordinate
+    // Native opcodes 12/34: carry the old segment's axial coordinate
     // onto the new segment; its perpendicular displacement is retained.
     const glm::vec3 current = end.position - start.position;
     const glm::vec3 previous = end.previousPosition - start.previousPosition;
@@ -110,7 +110,7 @@ inline float movementNearControlPointMultiplier (
     glm::vec3 position, glm::vec3 center, float innerDistance, float outerDistance,
     float innerReduction, float outerReduction, float rawDeltaTime,
     float envelopeWeight = 1.0f) {
-    // packs native rcpps and equal-value fallbacks. 
+    // Native packs rcpps and equal-value fallbacks.
     // opcodes 13/35 clamp per-pass reduction BEFORE the lifetime envelope.
     const glm::vec3 radial = position - center;
     const float squared = constraintSquaredLength (radial);

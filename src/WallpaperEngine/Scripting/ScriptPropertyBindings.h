@@ -31,11 +31,11 @@ inline auto scriptPropertyBindings (const WallpaperEngine::Data::Model::Object& 
 }
 
 // Native sound property lookup searches the sound table
-// Built (volume, mintime...), then the layer's
-// dynamic table, then falls back to the base layer lookup 
-// over built (origin, scale, angles,
+// (volume, mintime...), then the layer's
+// dynamic table, then falls back to the base layer lookup
+// over the base table (origin, scale, angles,
 // parallaxDepth, sortorder, name, solid, disablepropagation). Those base vec3
-// entries load, which reaches the generic loader 
+// entries load, which reaches the generic loader
 // that retains "script". A sound layer therefore runs scripts on its
 // transform values as well as on volume. "visible" lives in a different table
 // that the sound vtable does not reach,
@@ -54,8 +54,7 @@ inline std::vector<ScriptPropertyBinding> scriptPropertyBindings (const Sound& s
 }
 
 // Native general settings table registers each field with a typed
-// loader (bool family, float, int, vec3
-// ). Every one of them calls the generic property loader,
+// loader (bool family, float, int, vec3). Every one of them calls the generic property loader,
 // which retains "script"/"scriptproperties", so a general field can carry a
 // script or a property animation just like a layer field. These are the
 // fields the Linux scene model keeps, under their native names.
@@ -106,8 +105,7 @@ struct MaterialConstantBinding {
 };
 
 // Native material loading keeps each pass's constantshadervalues
-// and applies them through the material's property table (at
-// 435). Those typed loaders reach the generic loader, which
+// and applies them through the material's property table. Those typed loaders reach the generic loader, which
 // appends a "script" to the scene script list. The image's
 // own model material is the one its base passes bind, so each of its pass
 // constants is a script-bearing value like an effect material constant.

@@ -23,8 +23,7 @@ EngineTimers* findInstance (JSContext* ctx, JSValueConst owner) {
     return it == instances.end () ? nullptr : it->second;
 }
 
-// The function returned by setTimeout and setInterval (2.8.42,
-// 2.7.3); see EngineTimers::cancel.
+// The function returned by setTimeout and setInterval; see EngineTimers::cancel.
 JSValue cancelTimer (JSContext* ctx, JSValueConst, int, JSValueConst*, int, JSValueConst* data) {
     auto* timers = findInstance (ctx, data[0]);
     if (!timers) return JS_FALSE;
@@ -222,10 +221,8 @@ void EngineTimers::call (JSValueConst callback, const Origin& origin) {
         JS_SetPropertyStr (m_context, m_engine->getGlobalThis (), "thisLayer", JS_DupValue (m_context, origin.layer));
         JS_SetPropertyStr (m_context, m_engine->getGlobalThis (), "thisObject", JS_DupValue (m_context, origin.thisObject));
     }
-    // Native tick (2.7.3; 2.8.42 loads it for the call
-    // ) calls v8::Function::Call with the owning script's handle
-    // as the receiver; the loader stores
-    // Module::GetModuleNamespace there.
+    // Native calls v8::Function::Call with the owning script's module
+    // namespace as the receiver.
     JSValue result = JS_Call (m_context, callback, origin.receiver, 0, nullptr);
     if (JS_IsException (result)) {
 	JSValue exception = JS_GetException (m_context);
@@ -239,8 +236,7 @@ void EngineTimers::call (JSValueConst callback, const Origin& origin) {
 
 void EngineTimers::tick (float delta) {
     // Native tick runs from the scene frame
-    // after animation events and before update() (native 
-    // engine). It walks the scripts (registration order here), then
+    // after animation events and before update(). It walks the scripts (registration order here), then
     // each script's timers in creation order, timeouts and intervals alike, over
     // a copy of each list taken before its callbacks run: a timer scheduled by a
     // callback is neither advanced nor fired until the next frame, and a

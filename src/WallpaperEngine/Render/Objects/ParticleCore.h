@@ -60,7 +60,7 @@ inline void initializeEmitterBirth (
 
 // Initializers update baseline size/RGB/alpha. Separate current streams keep
 // the raw birth defaults until the operator interpreter restores baselines.
-// IMAGE flag 0x10000 supplies a temporary selected-pixel RGB gain here, not
+// The IMAGE flag supplies a temporary selected-pixel RGB gain here, not
 // the runtime gain restored by opcode 3 after the initializer call.
 template <typename Particle>
 inline void restorePhysicalBirthCurrentDefaults (
@@ -71,7 +71,7 @@ inline void restorePhysicalBirthCurrentDefaults (
     if (separateAlpha) particle.alpha = alphaGain;
 }
 
-// captures the selected CP translation/basis once per emitter
+// Native captures the selected CP translation/basis once per emitter
 // invocation. Birth initializers may write that CP, but subsequent births in
 // this batch still use the capture; the next emitter invocation sees writes.
 inline EmitterBirthTransform captureEmitterBirthTransform (
@@ -110,7 +110,7 @@ inline glm::vec3 particleInstanceBirthRgbGain (
     // still compare against their own preset color.
     const bool nodeTintValid = particleInstanceTintValid (rootTint,
         rootPresetTint, nodePresetTint, rootFlags, nodeFlags, rootNode);
-    // sets compiled 0x200000 for !hascolor or scene version <5.
+    // Native sets the compiled color bit for !hascolor or scene version <5.
     // The caller supplies that compiled bit, independent of HDR quality.
     const float brightness = hdrActive && (nodeFlags & 8u) == 0
         ? rootBrightness : 1.0f;
@@ -201,8 +201,8 @@ inline FixedRendererFactoryAxes fixedRendererBasis (glm::vec3 axis) {
 
 inline std::optional<FixedRendererBasis> fixedRendererLocalBasis (
     glm::vec3 authoredAxis, const glm::mat3& reflectedSceneLinear, bool skipWorldTransform) {
-    // mode 2: the factory axis is the sprite's forward (,
-    // bound as g_OrientationForward), not its right. Default
+    // mode 2: the factory axis is the sprite's forward (bound
+    // as g_OrientationForward), not its right. Default
     // flags first multiply axis and up by the scene-stack linear matrix M;
     // flag bit 0 skips that step. Every path then multiplies by M^T,
     // normalizes, and sets right = normalize(up x forward). The Y
@@ -347,7 +347,7 @@ inline glm::vec3 nativeSphereDisplacement (float azimuthUnit, float axialUnit,
                                            float radiusUnit, const glm::vec3& directions,
                                            float distanceMin, float distanceMax,
                                            float cone, const glm::vec3& sign) {
-    // Opcode 1,: angle, axial cone coordinate and cube-root
+    // Angle, axial cone coordinate and cube-root
     // radius are independent draws. The vector is normalized *after* the
     // authored direction scaling; its pre-normalized length remaps distance.
     const float azimuth = azimuthUnit * glm::two_pi<float> ();
@@ -427,7 +427,7 @@ inline glm::vec3 imageEmitterPoint (const glm::mat4& matrix, const glm::vec3& pi
 inline glm::vec3 imageEmitterSourceVelocity (
     const glm::vec3& current, const glm::vec3& previous, float sceneDelta, float speed
 ) {
-    // divides each displacement by the current scene
+    // Native divides each displacement by the current scene
     // delta before multiplying the sampled speed, not the attempt interval.
     return {((current.x - previous.x) / sceneDelta) * speed,
             ((current.y - previous.y) / sceneDelta) * speed,
@@ -439,7 +439,7 @@ inline glm::mat4 imageEmitterInvocationMatrix (
     bool forced, bool world
 ) {
     // Script API calls the emitter directly on the scene's identity
-    // stack. Automatic local emission instead runs inside 's push,
+    // stack. Automatic local emission instead runs inside the node's push,
     // which includes the current parent/child stack, not just authored origin.
     if (forced || world) return glm::mat4 (1.0f);
     const glm::mat4 flip = glm::scale (glm::mat4 (1.0f), glm::vec3 (1, -1, 1));
@@ -475,7 +475,7 @@ inline glm::vec3 nativeParticlePosition (
 }
 
 inline glm::uvec2 imageEmitterReadbackSize (uint32_t sourceWidth, uint32_t sourceHeight) {
-    // caps the source at 3840x2160 while preserving its aspect,
+    // Native caps the source at 3840x2160 while preserving its aspect,
     // then divides each capped dimension by four with a two-pixel floor.
     if (sourceWidth == 0 || sourceHeight == 0) return {};
     uint32_t boundedWidth = sourceWidth, boundedHeight = sourceHeight;
@@ -666,7 +666,7 @@ inline glm::vec3 controlPointAttractVelocityDelta (glm::vec3 particle,
     return -radial * (impulse / distance);
 }
 
-// inserts omitted scale/threshold/deletethreshold from the same
+// Native inserts omitted scale/threshold/deletethreshold from the same
 // scene-context bit as the vortex defaults.
 struct ControlPointAttractDefaults {
     float scale;
@@ -878,7 +878,7 @@ inline bool usesBlendOpcode (BlendEnvelope envelope) {
 }
 
 // Native packs adjusted endpoints and reciprocal durations;
-// multiplies the two saturated ramps at normalized lifetime age.
+// Native multiplies the two saturated ramps at normalized lifetime age.
 inline float blendWeight (float age, BlendEnvelope envelope, bool nativeRuntime = false) {
     if (nativeRuntime) {
         const float inStart = std::min (envelope.inStart, envelope.inEnd - 0.0001f);
@@ -939,7 +939,7 @@ inline float capVelocityDefault (bool isOrthogonal) {
     return isOrthogonal ? 100.0f : 1.0f;
 }
 
-// passes the same scene-context bit to. An omitted
+// Native passes the same scene-context bit to the defaults. An omitted
 // turbulent speed bound is inserted as 100/250 in orthographic scenes and
 // 0.5/1 in perspective scenes; authored bounds remain independent.
 inline glm::vec2 turbulentVelocitySpeedDefaults (bool isOrthogonal) {
@@ -955,7 +955,7 @@ struct TurbulenceDefaults {
     glm::vec3 mask;
 };
 
-// receives the same scene-context bit as the vortex defaults.
+// Native receives the same scene-context bit as the vortex defaults.
 inline TurbulenceDefaults turbulenceDefaults (bool isOrthogonal) {
     return isOrthogonal
         ? TurbulenceDefaults { 0.01f, 500.0f, 1000.0f, 20.0f, glm::vec3 (1.0f, 1.0f, 0.0f) }
@@ -1096,7 +1096,7 @@ inline float reduceRemapVector (float x, float y, float z,
 
 inline float reduceBirthRemapVector (float x, float y, float z,
                                             RemapVectorComponent component) {
-    // reduces Y/Z first, then X; MAXSS/MINSS helpers
+    // Native reduces Y/Z first, then X; MAXSS/MINSS helpers
     // choose the first argument for equal/unordered operands.
     if (component == RemapVectorComponent::Max) return std::max (x, std::max (y, z));
     if (component == RemapVectorComponent::Min) return std::min (x, std::min (y, z));
@@ -1328,7 +1328,7 @@ inline float oscillatorMultiplier (float age, float random, float frequencyMin,
     return blendedMultiplier (scale, normalizedAge, envelope);
 }
 
-// inserts an omitted oscillateposition scalemax as 10 in
+// Native inserts an omitted oscillateposition scalemax as 10 in
 // orthographic scenes and 0.5 in perspective scenes.
 inline float oscillatePositionScaleMaxDefault (bool isOrthogonal) {
     return isOrthogonal ? 10.0f : 0.5f;
@@ -1447,7 +1447,7 @@ inline float alphaRandomExponentSample (float unit, float min, float max, float 
     return (min + std::pow (unit, exponent) * (max - min)) * instanceAlpha;
 }
 
-// opcodes 2/3/6 multiply the size/RGB/alpha baseline streams, so a
+// Native opcodes 2/3/6 multiply the size/RGB/alpha baseline streams, so a
 // repeated record composes with the earlier one. The ordinary Linux path seeds
 // those streams with display defaults that the first record replaces with the
 // value native multiplication of the raw default produces; later records of
@@ -1486,8 +1486,8 @@ inline float initializerLaneValue (float unit, float exponent, InitializerRange 
 
 // Particle preset flag 0x10 omits every instance-speed patch descriptor in
 // (velocity/angular-velocity random,
-// movement, angular movement, vortex 5085/5334 and
-// map sequence 2449).
+// movement, angular movement, vortex and
+// map sequence).
 inline float instanceSpeedGain (float instanceSpeed, uint32_t particleFlags) {
     return (particleFlags & 0x10u) != 0u ? 1.0f : instanceSpeed;
 }
@@ -1515,8 +1515,7 @@ inline glm::vec3 velocityRandomSample (std::mt19937& rng, const glm::vec3& min,
     return result;
 }
 
-// Opcodes 10 (rotation, unpatched) and 12 (angular velocity, speed patch op10
-// ) draw X, Y, Z with one shared record exponent.
+// Opcodes 10 (rotation, unpatched) and 12 (angular velocity, speed patch) draw X, Y, Z with one shared record exponent.
 inline glm::vec3 angularRandomSample (std::mt19937& rng, const glm::vec3& min,
                                       const glm::vec3& max, float exponent, float gain) {
     glm::vec3 result (0.0f);
@@ -1585,7 +1584,7 @@ inline std::optional<RopeGeometry> ropeOrdinaryGeometry (uint32_t capacity,
                                                          float authoredInteriorCount,
                                                          size_t floatsPerVertex) {
     if (!std::isfinite (authoredInteriorCount)) return std::nullopt;
-    // clamps the authored count to [0,32]. forwards
+    // Native clamps the authored count to [0,32] and forwards
     // that count unchanged as TRAILSUBDIVISION; the geometry shader inserts
     // that many interior pairs, giving N+1 rendered subsegments.
     const float interiors = std::clamp (authoredInteriorCount, 0.0f, 32.0f);
@@ -1602,7 +1601,7 @@ inline RopeOrdinaryUV ropeOrdinaryUV (uint32_t aliveCount, uint32_t capacity,
                                     float oldestAge, float authoredUVScale,
                                     bool scrolling, bool smoothing,
                                     uint32_t expiredCount = 0) {
-    // uses original particle count, not generated subdivision
+    // Native uses original particle count, not generated subdivision
     // vertices. The native node stores reciprocal UV scale.
     const float reciprocalUVScale = 1.0f / authoredUVScale;
     const float effectiveSpan = emissionRate * uniformLifetime;
@@ -1926,7 +1925,7 @@ inline float effectiveRate (float authored, float overrideRate) {
 }
 
 // Every emitter factory pairs its
-// rate patch with patch op1 on maxtoemitperperiod. stores
+// rate patch with patch op1 on maxtoemitperperiod. It stores
 // (int)(int64)((float)authored * count): cvttss2si truncates, and NaN or an
 // out-of-range product yields 0x8000000000000000, whose low word is zero.
 inline uint32_t instanceMaxPerPeriod (uint32_t authored, float count) {
@@ -2072,7 +2071,7 @@ uint32_t advanceEmitterForced (const EmitterScheduleConfig& config,
         }
         requested += rateCount;
     }
-    // stores credit after subtracting the *uncapped* whole-rate
+    // Native stores credit after subtracting the *uncapped* whole-rate
     // amount and the full forced+instant count, even if the slot pool clips.
     state.fractional -= static_cast<float> (pending + whole);
     return static_cast<uint32_t> (std::min<uint64_t> (requested, available));

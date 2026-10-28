@@ -129,7 +129,7 @@ public:
      * Native registers each general field with a typed loader that
      * reaches the generic property loader, which retains "script"
      * and "scriptproperties" like any layer property. Native
-     * binds the scene object as these scripts' owner ((list, scene)).
+     * binds the scene object as these scripts' owner.
      * Linux limitation: the scene owner is not modelled as a layer here, so
      * thisLayer and thisObject are undefined while these modules run. No
      * installed general-setting script reads them.

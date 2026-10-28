@@ -57,7 +57,7 @@ inline SpotLightCategory spotLightCategory (bool shadow, bool cookie) {
     return SpotLightCategory ((shadow ? 1 : 0) | (cookie ? 2 : 0));
 }
 
-// Native context vector 0x160 (published as g_ViewForward) is the live view
+// Native g_ViewForward is the live view
 // direction: the negated third row of the view rotation the frame renders with.
 inline glm::vec3 viewForward (const glm::mat4& view) {
     const glm::vec3 forward (-view[0][2], -view[1][2], -view[2][2]);
@@ -65,10 +65,9 @@ inline glm::vec3 viewForward (const glm::mat4& view) {
     return length > 0 && std::isfinite (length) ? forward / length : glm::vec3 (0.0f);
 }
 
-// Native sorts the scene lights every frame (, stable for
+// Native sorts the scene lights every frame (stable for
 // fewer than 33 lights) by type, then by their raw castshadow|usecookie flags
-// descending, then by dot(authored origin, context vector 0x160) ascending.
-// The context vector is the live view forward (viewForward).
+// descending, then by dot(authored origin, live view forward) ascending.
 inline bool spotLightPrecedes (int leftFlags, float leftDepth, int rightFlags, float rightDepth) {
     if (leftFlags != rightFlags) return leftFlags > rightFlags;
     return leftDepth < rightDepth;
@@ -101,7 +100,7 @@ private:
     int m_cursor[4] {};
 };
 
-// Native context byte 0x1ac selects the shadow quality. The original host
+// Native selects the shadow quality from host settings. The original host
 // in the native captures was configured with shadows=ultra, which selects
 // quality four; Linux has no separate host shadow-quality setting.
 constexpr int nativeShadowQuality = 4;
@@ -181,7 +180,7 @@ inline glm::mat4 spotLightGLCasterProjection (const glm::mat4& projection) {
 struct SpotLightInput {
     bool castShadow = false;
     bool useCookie = false;
-    /** dot(authored local origin, view forward); native. */
+    /** dot(authored local origin, view forward). */
     float depth = 0.0f;
     SpotLightUniforms uniforms {glm::vec4 (0.0f), glm::vec4 (0.0f), glm::vec4 (0.0f), glm::vec4 (0.0f)};
     /** Sampling projection (spotLightProjection); empty when degenerate. */
@@ -261,7 +260,7 @@ inline SpotLightPacking packSpotLights (
 struct TubeLightInput {
     /** Raw castshadow|usecookie flags (sort key only; tubes draw unshadowed). */
     int flags = 0;
-    /** dot(authored local origin, view forward); native. */
+    /** dot(authored local origin, view forward). */
     float depth = 0.0f;
     TubeLightUniforms uniforms {glm::vec4 (0.0f), glm::vec4 (0.0f), glm::vec4 (0.0f)};
 };

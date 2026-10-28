@@ -79,9 +79,7 @@ TEST_CASE ("Inactive child patch traversal retains generated values and allocati
 }
 
 namespace {
-// Expected values are the unchanged native death dispatch, executed
-// from native (.cache/milestone-repair/
-// ). Children never
+// Expected values are the unchanged native death dispatch. Children never
 // finish; active counts are taken after each tick. Boundary cases set the
 // probability to the first draw, or to one ulp below it.
 enum class Boundary { None, Equal, Below };
@@ -259,8 +257,7 @@ struct BirthScenario {
     uint32_t mtNext;
 };
 
-// Original 2.8.42 with traced MT words (P1 oracle):
-// the parent's emission words before the dispatch, each dispatch draw (slots
+// Traced native MT words: the parent's emission words before the dispatch, each dispatch draw (slots
 // relative to the tick's first birth), and the child warm-up words that
 // follow an accepted draw.
 std::vector<BirthScenario> nativeBirthOracle () {
@@ -377,7 +374,7 @@ TEST_CASE ("Warm-up records expired slots only for rope renderers", "[particle][
 }
 
 TEST_CASE ("Event child stacks compose the parent's current stack with the last anchor", "[particle][child][event]") {
-    // Original 2.8.42 (P2 oracle). Every node anchors at
+    // Every node anchors at
     // t0 with (S0, p0); live follow re-anchors each tick with (S_t, p_t);
     // spawn, death and a follow detached at t1 keep the t0 anchor.
     const glm::mat4 s0 (glm::vec4 (0, 2, 0, 0), glm::vec4 (-2, 0, 0, 0), glm::vec4 (0, 0, 1, 0), glm::vec4 (100, -50, 0, 1));
@@ -422,7 +419,7 @@ TEST_CASE ("Event child stacks compose the parent's current stack with the last 
 }
 
 TEST_CASE ("Child particle nodes take the owner's camera parallax shift once", "[particle][child][event][parallax]") {
-    // shifts the view stack by the root scene object's parallax for
+    // Native shifts the view stack by the root scene object's parallax for
     // the whole draw; only changes the model stack (P2 oracle).
     const glm::vec3 parallax (12.5f, -7.0f, 0.0f);
     const glm::mat4 root = glm::rotate (glm::translate (glm::mat4 (1.0f), glm::vec3 (40, 30, 0)), 0.5f, glm::vec3 (0, 0, 1));
