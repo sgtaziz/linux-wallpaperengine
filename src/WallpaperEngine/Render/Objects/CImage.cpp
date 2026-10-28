@@ -202,7 +202,7 @@ CImage::CImage (Wallpapers::CScene& scene, const Image& image) :
 	const auto& effect = image.effects[effectIndex];
 	const std::string prefix = "imageEffect" + std::to_string (effectIndex)
 	    + "_object" + std::to_string (getId ()) + "_";
-	// Native binds the effect's keys (:165), then each pass in
+	// Native binds the effect's keys, then each pass in
 	// order with its constantshadervalues sorted.
 	auto queue = [this, &prefix, effectIndex] (const std::string& suffix, const UserSettingUniquePtr& setting,
 	                                         uint32_t pass, const std::string& jsonKey, bool effectOwner = false,
@@ -1468,7 +1468,7 @@ void CImage::setupPasses (const std::function<void (std::shared_ptr<const CFBO>)
 	// Scene-space perspective finals need the intermediate texture's basis
 	// converted alongside the camera presentation reflection. Fullscreen copy
 	// and effect quads use an identity clip-space projection: native
-	// preserve framebuffer orientation there, so reversing V
+	// preserves framebuffer orientation there, so reversing V
 	// would mirror the already projected scene a second time.
         // Offscreen base passes retain the full source UV range. Native only
         // applies the ordinary model padding on its direct scene quad.
@@ -1769,7 +1769,7 @@ void CImage::renderWithChildren (const std::function<void (std::shared_ptr<const
 	&& m_passes.size () <= m_basePassCount) return;
 
     if (!this->resolveTransform (this->getImage ()).visible) {
-        // Native marks referenced images with 0x1010
+        // Native marks referenced images so it
         // keeps those images drawable even while hidden. Their intermediate
         // textures remain inputs to dependent layers, while the existing
         // shouldRenderFinalPass visibility gate suppresses presentation.

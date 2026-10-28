@@ -16,7 +16,7 @@ struct BetweenControlPointsState {
 };
 
 inline float betweenControlPointsStep (float count) {
-    // stores 1/max(count-1.0001), unlike the circular mapper.
+    // Native stores 1/max(count-1.0001), unlike the circular mapper.
     return 1.0f / std::max (count - 1.0f, 0.0001f);
 }
 

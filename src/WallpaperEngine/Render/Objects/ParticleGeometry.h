@@ -92,7 +92,7 @@ inline std::vector<float> ropeDrawVertices (
     return vertices;
 }
 
-// Native warmup temporarily clears the node's event byte, so births
+// Native warmup temporarily clears the node's event flags, so births
 // dispatch nothing and expiry records slots only for rope renderers.
 class SuppressBirthEvents {
 public:

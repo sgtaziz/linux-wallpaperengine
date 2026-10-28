@@ -556,7 +556,7 @@ void CScene::renderFrame (const glm::ivec4& viewport) {
     };
     // Native WM_SIZE -> resizes root/auxiliary targets in both
     // camera modes. Authored orthographic dimensions remain scene units;
-    // applies the output crop through projection instead.
+    // Native applies the output crop through projection instead.
     if (viewport.z > 1 && viewport.w > 1) {
         resizeSceneTargets (viewport.z, viewport.w);
         refreshPresentation ();
@@ -582,8 +582,7 @@ void CScene::renderFrame (const glm::ivec4& viewport) {
     // ensure the virtual mouse position is up to date
     this->updateMouse (viewport);
 
-    // Native updates image controls before SceneScript callbacks (
-    // before). Joined handles observe the cached
+    // Native updates image controls before SceneScript callbacks. Joined handles observe the cached
     // texture's last sampled cursor without advancing it.
     for (const auto& object : m_objectsByRenderOrder)
         if (object->is<Objects::CImage> ())
@@ -1245,8 +1244,7 @@ void CScene::refreshSpotLights () {
         };
         if (!finite (packed.color) || !finite (packed.origin)
             || !finite (packed.direction) || !finite (packed.exponent)) continue;
-        // The native sort key reads the node's local origin (,
-        // rewritten as a local value reparent path).
+        // The native sort key reads the node's local origin.
         inputs.push_back ({light->castShadow, light->useCookie,
             glm::dot (light->origin->value->getVec3 (), direction), packed,
             spotLightProjection (transform.authoredMatrix, light->outerCone->value->getFloat (),
@@ -1323,7 +1321,7 @@ void CScene::renderVolumetricLight (const ScenePointLight& light) {
     const auto volume = packPointVolume (origin, light.color->value->getVec3 (), light.intensity->value->getFloat (),
         radius, light.density->value->getFloat (), light.volumetricsExponent->value->getFloat ());
     if (!(radius > 0.0f) || !std::isfinite (volume.originDensity.w) || !std::isfinite (volume.colorExponent.w)) return;
-    // picks volumetrics_fullscreen when the eye is inside the volume of a perspective camera
+    // Native picks volumetrics_fullscreen when the eye is inside the volume of a perspective camera
     // (native ortho replays always draw the mesh).
     const auto& eye = getCamera ().getEye ();
     const bool inside = volumetricFullscreen (getCamera ().isOrthogonal (),
@@ -1335,7 +1333,7 @@ void CScene::renderVolumetricLight (const SceneSpotLight& light) {
     if (m_volumetricsFailed || !light.castVolumetrics || !light.castVolumetrics->value->getBool () || kVolumetricQuality == 0)
         return;
     // The COOKIE (usecookie) and SHADOW (castshadow with a non-zero shadow
-    // quality,) front-shader variants are not reproduced:
+    // quality) front-shader variants are not reproduced:
     // such a volume is skipped rather than drawn without its cookie or shadow.
     if (light.useCookie || (light.castShadow && getShadowQuality () != 0)) return;
     const auto transform = resolveSceneTransform (light,

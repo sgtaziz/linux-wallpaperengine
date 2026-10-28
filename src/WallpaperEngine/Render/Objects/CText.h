@@ -54,7 +54,7 @@ public:
     [[nodiscard]] const std::string& getVerticalAlign () const { return m_verticalAlign; }
     void setHorizontalAlign (std::string alignment) { m_horizontalAlign = std::move (alignment); }
     void setVerticalAlign (std::string alignment) { m_verticalAlign = std::move (alignment); }
-    // The `font` host property (2.8.42: String at 0x490, change
+    // The `font` host property (a String with a change
     // callback). The callback's relayout compares the
     // font with the one last laid out and rebuilds the text with the new font
     // when they differ. render () does the same with this value.

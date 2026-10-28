@@ -74,14 +74,13 @@ void dispatchNativeBirthEvents (size_t bornCount, const std::vector<NativeBirthD
     }
 }
 
-// Warm-up clears node byte. 
-// records expired slots, which follow detach and death dispatch walk, only
-// for death/follow bits or a rope renderer buffer.
+// Native records expired slots, which follow detach and death dispatch walk,
+// only for death/follow event bits or a rope renderer buffer.
 [[nodiscard]] constexpr bool nativeRecordsExpiredSlots (bool eventsEnabled, bool ropeRenderer) {
     return eventsEnabled || ropeRenderer;
 }
 
-// writes an event node's anchor B·T(particle)·descriptor to.
+// Native writes an event node's anchor B·T(particle)·descriptor.
 // B is identity when the child and parent presets agree, the parent stack S
 // for a world child of a local parent, and S⁻¹ for a local child of a world
 // parent; nullopt when that S is singular.

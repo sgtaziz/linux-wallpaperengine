@@ -737,8 +737,7 @@ TEST_CASE ("Easing the eye and the cursor term separately equals easing native's
 }
 
 TEST_CASE ("Effect texture projection unprojects the viewport pointer into native layer UV", "[scene][pointer]") {
-    // Native 2.8.42 probe (, ptrprobe band 6/7): the
-    // xray-style (inverse * (pointer * 2 - 1, Y flipped)).xy / w * 0.5 is the
+    // Native: the xray-style (inverse * (pointer * 2 - 1, Y flipped)).xy / w * 0.5 is the
     // pointer's offset from the layer's on-screen centre over its on-screen
     // size, Y up, for cover-cropped and uncropped canvases alike. The Linux
     // path is end to end for Wayland/GLFW output: the output state has vflip,
@@ -1546,7 +1545,7 @@ TEST_CASE ("rotateObjectSpace composes z, y then x object rotations onto the lay
     requireAngles (rotateObjectSpaceAngles (glm::vec3 (0.0f), glm::vec3 (0.3f, 0.5f, 0.7f)), {0.3f, 0.5f, 0.7f});
     requireAngles (rotateObjectSpaceAngles (glm::vec3 (0.2f, -0.3f, 0.1f), glm::vec3 (0.0f)), {0.2f, -0.3f, 0.1f});
     // From authored angles the rotations are about the layer's own axes:
-    // values from a float32 transcription.
+    // Expected values from a float32 transcription.
     requireAngles (rotateObjectSpaceAngles ({-0.48869f, 0.0f, 0.08727f}, {0.3f, 0.5f, 0.7f}),
                    {-0.218127f, 0.759729f, 0.474971f});
     requireAngles (rotateObjectSpaceAngles ({-0.48869f, 0.0f, 0.08727f}, {0.0f, 0.4f, 0.0f}),

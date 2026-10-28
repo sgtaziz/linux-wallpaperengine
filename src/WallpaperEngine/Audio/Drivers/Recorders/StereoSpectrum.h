@@ -64,9 +64,8 @@ public:
         const float* average;
     };
 
-    // native hands native the start of one
-    // resolution's [left, right, combined] blocks (16, 32, else 64), and
-    // native copies them into left/right/average.
+    // Native selects one resolution's [left, right, combined] blocks (16, 32,
+    // else 64) and copies them into left/right/average.
     // average is the combined block, not the mean of the reduced channels.
     [[nodiscard]] static ScriptBlocks scriptBlocks (const Bands& bands, uint32_t resolution) {
         if (resolution == 16)

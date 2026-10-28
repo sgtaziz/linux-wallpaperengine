@@ -35,8 +35,7 @@ private:
 };
 
 /**
- * engine.runtime: native asks the host (vfunc,
- * selector 2), and native answers with the scene root clock
+ * engine.runtime: native asks the host and answers with the scene root clock
  * that zeroes with the scene and advances by each frame's delta
  * before the scripts update. Load time and paused time are never included.
  */

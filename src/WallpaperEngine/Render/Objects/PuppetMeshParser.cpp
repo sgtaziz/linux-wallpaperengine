@@ -282,7 +282,7 @@ PuppetSkeletonData parseSkeletonAt (std::span<const uint8_t> bytes, size_t offse
 	result.scalarTrackCount = section.u32 ();
 	if (result.scalarTrackCount == 0) {
 	    // Native reads a group table followed by the
-	    // mapping records that assign each bone's field. The nonempty
+	    // mapping records that assign each bone's mapping index. The nonempty
 	    // group/constraint payload remains outside this bounded subset.
 	    const uint16_t groupCount = section.u16 ();
 	    if (groupCount == 0) {
@@ -305,7 +305,7 @@ PuppetSkeletonData parseSkeletonAt (std::span<const uint8_t> bytes, size_t offse
 		    result.mappingRecordByBone[boneIndex] = i;
 		}
 		result.boneMappingKnown = true;
-		// reads one extent+matrix record per bone after
+		// Native reads one extent+matrix record per bone after
 		// the mapping tail. Unknown scalar/group tails remain undecoded.
 		if (section.remaining () != 0 && section.u8 () != 0) {
 		    if (boneCount > section.remaining () / 76)

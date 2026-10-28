@@ -14,7 +14,7 @@ namespace WallpaperEngine::Scripting {
 enum class LayerWrite { Assign, Ignore, Exception };
 
 /**
- * Native 2.8.42 native converts every host property write in one
+ * Native converts every host property write in one
  * function. It dispatches on the registered type through the jump
  * table and then calls the host setter. A value of the wrong
  * type jumps straight to the exit, so the property is left unchanged and no
@@ -60,11 +60,9 @@ inline LayerWrite convertLayerBoolean (JSValueConst value, bool& result) {
 }
 
 /**
- * Int case 0. The value must pass IsNumber (: a Smi or a
- * HeapNumber). It is then converted by v8::Value::ToInt32 (, which
- * returns a Smi as it is and otherwise calls Object::ConvertToInt32
- * ), and read by v8::Int32::Value. This is ECMAScript
- * ToInt32: fractions truncate toward zero, values wrap modulo 2^32, and NaN or
+ * Int case 0. The value must pass IsNumber (a Smi or a HeapNumber). It is
+ * then converted by v8::Value::ToInt32 and read by v8::Int32::Value. This is
+ * ECMAScript ToInt32: fractions truncate toward zero, values wrap modulo 2^32, and NaN or
  * Infinity become 0.
  */
 inline LayerWrite convertLayerInt (JSContext* context, JSValueConst value, int32_t& result) {
@@ -105,8 +103,7 @@ inline LayerWrite convertLayerFloat (JSContext* context, JSValueConst value, flo
 inline constexpr float kLayerDegreesToRadians = 0.0174532924f;
 
 /**
- * Vector cases 1, 2 and 3 (Vec4,
- * ). The converter does this:
+ * Vector cases 1, 2 and 3 (Vec4). The converter does this:
  * For an object, it reads x, y, z and
  *   w in that order with Object::Get. Only after all reads does it require
  *   every component to pass IsNumber. If any component fails, the whole write
@@ -169,10 +166,9 @@ inline LayerWrite convertLayerVector (JSContext* context, JSValueConst value, in
 /**
  * Maps a script property name to the key of the retained layer value.
  * Native host property names match exactly and case-sensitively: lookup
- * hashes the name with FNV-1a and
- * compares length and bytes, and each name is its own v8
- * accessor. The text settings are registered in lowercase (native
- * for example "backgroundbrightness"), but the Linux renderer keeps
+ * hashes the name with FNV-1a and compares length and bytes, and each name is its own v8
+ * accessor. The text settings are registered in lowercase (for example
+ * "backgroundbrightness"), but the Linux renderer keeps
  * them under the parser's camel-case keys. A lowercase public name maps to its
  * key. The camel-case key itself is not a native host name, so it returns
  * nullopt and the write becomes an expando.
@@ -200,9 +196,9 @@ inline std::optional<std::string_view> layerPropertyKey (std::string_view name) 
  * Stores a write to a name the layer does not expose as an ordinary data
  * property of the receiver. Native layer wrappers come from a v8
  * ObjectTemplate. Each host property is an accessor and each host method is
- * a data member: 2.7.3, and 2.8.42 SetAccessor with
+ * a data member, with SetAccessor providing
  * getter and setter. The template never installs a
- * named interceptor: the 2.8.42 ObjectTemplate::SetHandler has
+ * named interceptor: ObjectTemplate::SetHandler has
  * no callers. Writing an unknown name, such as `opacity` on a text layer,
  * therefore creates an expando property that later reads return. The
  * handler is not aborted.

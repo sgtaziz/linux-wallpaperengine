@@ -63,7 +63,7 @@ Camera::Pose Camera::poseForSceneCamera (const SceneCamera& camera) {
 }
 
 Camera::Pose Camera::poseForWorldCamera (const glm::mat4& world) {
-    // Native is the full current authored world matrix.
+    // Native uses the full current authored world matrix.
     const glm::vec3 eye (world[3]);
     return {eye, eye - glm::vec3 (world[2]), glm::vec3 (world[1])};
 }
@@ -188,7 +188,7 @@ glm::mat4 Camera::renderLookAtForTransforms (const Pose& pose, bool orthogonal, 
 
 glm::mat4 Camera::makeScriptOrthogonalProjection (float width, float height, float zoom) {
     // Native uses fixed orthographic depth -2000/+2000.
-    // scales XY about the authored canvas center by camera zoom;
+    // Native scales XY about the authored canvas center by camera zoom;
     // our scene positions are centered already. Perspective ignores zoom.
     return glm::ortho (-width * 0.5f, width * 0.5f, -height * 0.5f, height * 0.5f,
                        -2000.0f, 2000.0f)

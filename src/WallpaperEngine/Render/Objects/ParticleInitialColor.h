@@ -27,7 +27,7 @@ inline uint32_t nativeCrtRandomWord (uint32_t& state) {
 }
 
 inline glm::vec3 nativeInitialHsvToRgb (glm::vec3 hsv) {
-    // uses fmod, not floor wrapping. In particular a negative
+    // Native uses fmod, not floor wrapping. In particular a negative
     // HSV-random tint-adjusted hue falls outside every chromatic sector.
     const float chroma = hsv.z * hsv.y;
     const float sector = static_cast<float> (std::fmod (

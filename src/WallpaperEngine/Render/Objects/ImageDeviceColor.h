@@ -4,7 +4,7 @@
 
 namespace WallpaperEngine::Render::Objects {
 
-// Native v2.8.42 image draw paths multiply the
+// Native image draw paths multiply the
 // device-color RGB by image brightness only when the HDR flag is active.
 // Keep alpha separate so brightness never changes transparency.
 inline glm::vec4 imageDeviceColor (glm::vec4 color, float alpha, float brightness, bool hdr) {

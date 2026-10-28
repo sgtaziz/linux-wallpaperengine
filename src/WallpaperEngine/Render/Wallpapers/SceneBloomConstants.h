@@ -10,9 +10,9 @@ namespace WallpaperEngine::Render::Wallpapers {
  * Copies the live scene bloom settings into the non-HDR bloom passes.
  *
  * Native general setters for bloomstrength/bloomthreshold store
- * the float and run change callback, which sets bit 31 of the scene
- * flags. After the SceneScript update, sees that
- * bit and, which uploads "bloomstrength" and
+ * the float and run a change callback, which sets bit 31 of the scene
+ * flags. After the SceneScript update, native sees that
+ * bit and uploads "bloomstrength" and
  * "bloomthreshold" to the bloom material before clearing the bit. A
  * script or animation on these general fields therefore changes the bloom of
  * the frame being drawn. The same non-HDR branch also uploads

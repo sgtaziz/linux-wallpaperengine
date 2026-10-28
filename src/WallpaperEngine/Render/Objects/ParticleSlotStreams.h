@@ -24,7 +24,7 @@ public:
     [[nodiscard]] std::vector<Slot>& streams () { return m_slots; }
     [[nodiscard]] const std::vector<Slot>& streams () const { return m_slots; }
 
-    // starts this cursor once for the whole emitter-record pass.
+    // Native starts this cursor once for the whole emitter-record pass.
     // Every birth advances it, including a birth whose initializer sets zero
     // lifetime. Such a slot becomes reusable on the next emission pass.
     void beginEmissionPass () { m_birthCursor = 0; }
@@ -52,7 +52,7 @@ public:
         return index;
     }
 
-    // ages every four-lane block, including padded/dead lanes. Its
+    // Native ages every four-lane block, including padded/dead lanes. Its
     // ordered expiry comparison leaves NaN markers occupied and clears only
     // the lifetime marker of expired lanes, retaining their other streams.
     template <typename Expired> void ageAndExpire (float duration, Expired&& expired) {

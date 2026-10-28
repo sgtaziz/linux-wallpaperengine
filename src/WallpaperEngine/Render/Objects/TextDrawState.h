@@ -14,8 +14,7 @@ inline void applyTextDrawState () {
 
 // Native text depth contract (native D3/D5/D6/D7 captures, w29 depth-re):
 //  - depth TEST: only in a perspective scene whose text depthtest is not "disabled"
-//    (sets & 0x400 for orthographic scenes; stores
-//    the property; the gate is read);
+//    (orthographic scenes skip it; the property is stored and the gate read);
 //  - depth WRITE: never (the *_depth font materials enable it, but a sphere drawn after
 //    the text still covers the first glyph completely in the native D3 capture).
 // The compare function is not recoverable from the materials; LEQUAL is CPass's default

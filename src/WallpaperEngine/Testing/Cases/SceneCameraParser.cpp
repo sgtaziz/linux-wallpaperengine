@@ -754,7 +754,7 @@ TEST_CASE ("Unscripted orthographic zoom scales the shaken view like native canv
         const glm::vec3 half (size.x * .5f, size.y * .5f, 0);
         for (const auto& shake : {Camera::Shake {}, Camera::Shake {true, glm::vec3 (3.5f, -2.25f, 0)}}) {
             const auto pose = shake.apply (root);
-            // zooms the projection after shook the view,
+            // Native zooms the projection after shaking the view,
             // so the shake translation is scaled with the canvas about its center.
             const float zoom = 1.07f;
             const auto nativeVP = glm::ortho (0.f, size.x, 0.f, size.y, -2000.f, 2000.f)
@@ -844,7 +844,7 @@ TEST_CASE ("Native layer perspective flag accepts a JSON bool or a bool user bin
     using WallpaperEngine::Data::Model::Text;
     using WallpaperEngine::Data::Parsers::ObjectParser;
     using WallpaperEngine::FileSystem::Container;
-    // sets flags bit 0x80 from a JSON bool, or from the bool
+    // Native sets flags bit 0x80 from a JSON bool, or from the bool
     // "value" of an object; the base
     // load always enables that branch. Anything else
     // leaves the 0x2001 default clear.
@@ -898,7 +898,7 @@ TEST_CASE ("Native scene bool flags default true and accept only boolean authori
     using WallpaperEngine::Data::Model::Scene;
     using WallpaperEngine::Data::Parsers::WallpaperParser;
     using WallpaperEngine::FileSystem::Container;
-    // starts flags at 0x26. The bloom,
+    // Native starts flags at 0x26. The bloom,
     // camerafade and clearenabled loaders write their
     // bit only for a JSON bool or {"value": bool}; anything else, including
     // null, leaves the initial set bit.
@@ -1149,8 +1149,8 @@ TEST_CASE ("Omitted general settings take the native scene constructor defaults"
     REQUIRE (scene->camera.projection.fov->value->getFloat () == 50.0f);
     REQUIRE (scene->camera.projection.perspectiveOverrideFov->value->getFloat () == 95.0f);
 
-    // Bool flags: starts at 0x26 (: bloom 0x2, camerafade 0x4,
-    // clearenabled 0x20), so omitted flags are true, and a null clearenabled
+    // Bool flags: starts with bloom, camerafade and
+    // clearenabled set, so omitted flags are true, and a null clearenabled
     // (installed 1407936446) keeps the set bit.
     for (const char* general : {R"({"orthogonalprojection":{"width":1920,"height":1080}})",
                                 R"({"orthogonalprojection":{"width":1920,"height":1080},"clearenabled":null})"}) {
@@ -1250,7 +1250,7 @@ glm::vec2 ndc (const glm::mat4& viewProjection, const glm::vec3& point) {
 TEST_CASE ("Native perspective layers keep the flat orthographic placement at z = 0",
            "[scene][camera][projection][perspective]") {
     using WallpaperEngine::Render::Camera;
-    // keeps the live view's x/y translation and swaps only its depth
+    // Native keeps the live view's x/y translation and swaps only its depth
     // and the projection, so untilted z = 0 layers land exactly as flat ones.
     const float width = 1920, height = 1080;
     const auto parsed = parseOrthographicScene (1920, 1080, "");

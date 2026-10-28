@@ -392,7 +392,7 @@ CParticle::CParticle (Wallpapers::CScene& scene, const Particle& particle, uint3
 	                             || renderer.orientation == "fixed"
 	                             || renderer.orientation == "upright");
 	                 })) {
-	    // walks the compiled renderer stream and invokes type-1
+	    // Native walks the compiled renderer stream and invokes type-1
 	    // sprite draw for every record, including repeated sprite records.
 	    m_spriteRendererCount = static_cast<uint32_t> (m_particle.renderers.size ());
 	} else if (m_particle.renderers.size () >= 2
@@ -694,7 +694,7 @@ void CParticle::setup () {
 	    // Link to mouse if either flags bit 0 is set
 	    m_controlPoints[cp.id].linkMouse = (cp.flags & 1) != 0;
 	    m_controlPoints[cp.id].worldSpace = (cp.flags & 2) != 0;
-            // creates generated CPs with identity basis and the
+            // Native creates generated CPs with identity basis and the
             // authored offset. Ownership suppresses later matrix writers.
             if ((cp.flags & 0x10000u) != 0) {
                 m_controlPoints[cp.id].basis = glm::mat3 (1.0f);
@@ -771,7 +771,7 @@ void CParticle::advanceFrame () {
     m_lastAdvancedFrame = frame;
     if (!m_initialized) return;
     const bool admitted = resolveTransform ().visible;
-    // resets live CPU streams before flushing instance patches.
+    // Native resets live CPU streams before flushing instance patches.
     // CP values, API enable/pause, inactive children and GPU packets survive.
     const uint32_t liveCount = m_slotStreams ? m_slotStreams->nativeCount () : m_particleCount;
     ParticleCore::resetHiddenRoot (admitted, liveCount, [this] {
@@ -1018,7 +1018,7 @@ void CParticle::resetStaticEmitterTree (bool enableEmission) {
 }
 
 void CParticle::clearStaticCpuTree () {
-    // clears live/high-water/index streams and active event nodes,
+    // Native clears live/high-water/index streams and active event nodes,
     // without touching initializer/CP values, node flags or published geometry.
     m_particleCount = 0;
     m_ropeBirthSlots.clear ();
@@ -1355,8 +1355,8 @@ void CParticle::advanceChildren (ParticleCore::TickClock clock) {
 	auto& node = m_childNodes[childIndex];
 	if (!node.detached && node.parentBirthId == 0)
 	    node.runtime->setChildAnchor (m_simulationModelMatrix, glm::vec3 (0.0f), true);
-	// composes every event node from the parent's current stack;
-	// only its anchor stays as last written.
+	// Native composes every event node from the parent's current stack;
+	// only its + anchor stays as last written.
 	else node.runtime->m_childSceneParentMatrix = m_simulationModelMatrix;
 	if (node.follow) {
 	    const auto parent = std::find_if (m_particles.begin (),
@@ -1481,7 +1481,7 @@ void CParticle::spawnChild (size_t descriptor, const ParticleInstance* parent, b
             node.runtime->m_eventParentSlot = parent->poolSlot;
         }
         node.runtime->m_hasChildParentMatrix = true;
-        // anchors at spawn; live follow children re-anchor each
+        // Native anchors at spawn; live follow children re-anchor each
         // tick, and every node composes the parent's current stack.
         node.runtime->setChildAnchor (m_simulationModelMatrix,
             parent ? parent->position : glm::vec3 (0.0f), parent == nullptr);
@@ -1703,7 +1703,7 @@ const glm::vec3& CParticle::getCompositeColor () const { return getColor (); }
 // ========== EMITTERS ==========
 
 void CParticle::setupEmitters () {
-    // Native is initialized only on allocation; partial resets
+    // The native emitter image history is initialized only on allocation; partial resets
     // recreate scheduling state without resetting the source matrix history.
     m_imageEmitterHistory.resize (m_particle.emitters.size ());
     size_t imageDependencyIndex = 0;
@@ -2001,7 +2001,7 @@ EmitterFunc CParticle::createImageEmitter (const ParticleEmitter& emitter, size_
                 }, &periodRestarted);
         if (periodRestarted) resetPeriodicChildren ();
         m_emitterCanProduce[index] = ParticleCore::emitterCanProduceMore (schedule, state);
-        // encloses opcode 3 in positive scheduled births;
+        // Native encloses opcode 3 in positive scheduled births;
         // zero-birth ticks neither prepare nor refresh its image cache.
         if (toEmit == 0) return;
 
@@ -2111,7 +2111,7 @@ EmitterFunc CParticle::createImageEmitter (const ParticleEmitter& emitter, size_
                     m_rng, emitter.offsetMin.z, emitter.offsetMax.z);
             }
             // The cache already stores physical source-pixel coordinates.
-            // Ordinary native image does not scale by authored size.
+            // Ordinary native image sampling does not scale by authored size.
             const glm::vec3 sourcePoint (
                 static_cast<float> (sample.x) + offset.x,
                 -static_cast<float> (sample.y) + offset.y, offset.z);
@@ -2262,7 +2262,7 @@ InitializerFunc CParticle::createInheritControlPointVelocityInitializer (const I
         if (index >= m_controlPoints.size ()) return;
         const auto& cp = m_controlPoints[index];
         const float speed = (m_particle.flags & 0x10u) != 0 ? 1.0f : speedOverrideValue ()->getFloat ();
-        // is the previous OUTER scene duration,
+        // uses the previous OUTER scene duration,
         // independent of this node's rate and any half-duration operator pass.
         // Preserve the native single MT draw on zero-time startup as well;
         // avoid poisoning the finite simulation when native 0/0 is undefined.
@@ -3110,7 +3110,7 @@ OperatorFunc CParticle::createSizeChangeOperator (const SizeChangeOperator& op) 
 	) {
 	    float startTime = startTimeValue->getFloat ();
 	    float endTime = endTimeValue->getFloat ();
-	    // binds both coefficients to the scene instance's size
+	    // Native binds both coefficients to the scene instance's size
 	    // descriptor, in addition to the sizerandom binding.
 	    const float instanceSize = (m_particle.flags & 0x80u) != 0
 	        ? 1.0f : sizeOverride->getFloat ();
@@ -3919,8 +3919,8 @@ void CParticle::updateMatrices () {
     const auto simulationInverse = Wallpapers::inverseFiniteTransform (m_simulationModelMatrix);
     m_controlPointTransformInvertible = simulationInverse.has_value ();
     if (simulationInverse) m_controlPointInverse = *simulationInverse;
-    // substitutes for the own renderer when preset bit
-    // 1 is set, then restores before recursively rendering children.
+    // Native substitutes the scene matrix for the own renderer when preset bit
+    // 1 is set, then restores the node matrix before recursively rendering children.
     // Linux's active scene/composition projection already maps centered world
     // coordinates into the target, so its world draw base is identity.
     this->applyParallaxToModelMatrix ();
@@ -4066,7 +4066,7 @@ void CParticle::setupAtlas (const std::shared_ptr<const TextureProvider>& provid
 void CParticle::updateParticleRenderVars () {
     m_renderVar0 = glm::vec4 (m_trailLength, m_trailMaxLength, m_trailMinLength, 0.0f);
     if (m_useRopeRenderer && m_useTrailRenderer) {
-	// Native writes the normalized countdown phase to,
+	// Native writes the normalized countdown phase,
 	// consumed as g_RenderVar0.z by genericropeparticle.vert.
 	const float phase = m_ropeTrailInterval > 0.0f
 	    ? 1.0f - std::max (m_ropeTrailCountdown, 0.0f) / m_ropeTrailInterval : 0.0f;
@@ -4269,7 +4269,7 @@ void CParticle::applyRendererOrientation (size_t rendererIndex) {
             std::optional<ParticleCore::FixedRendererBasis> basis;
             if (!m_hasChildParentMatrix || (m_particle.flags & 1u) == 0
                 || !getScene ().isLocalCompositionScope ()) {
-                // replaces the current scene matrix with 
+                // Native replaces the current scene matrix with the scene base
                 // before invoking for preset bit 0. The Linux
                 // draw model is that base; local presets retain the full
                 // simulation stack for orientation as well as positions.
@@ -4526,8 +4526,8 @@ void CParticle::buildRopePoints (const std::vector<ParticleInstance>& points,
     const uint32_t totalSubSegments = totalPoints - 1;
     const float uvScale = (std::isfinite (m_ropeUVScale) && m_ropeUVScale != 0.0f)
         ? m_ropeUVScale : 1.0f;
-    // retains the first nonzero lifetime midpoint and emitter
-    // rate in the definition. copies them to node;
+    // Native retains the first nonzero lifetime midpoint and emitter
+    // rate in the definition, copies them to the node and
     // scales them by the instance lifetime/count settings.
     float definitionLifetime = 0.0f;
     for (const auto& initializer : m_particle.initializers) {

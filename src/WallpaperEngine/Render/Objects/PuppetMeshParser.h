@@ -69,7 +69,7 @@ struct PuppetSkeletonData {
     size_t boneRecordsEndOffset = 0;
     uint16_t auxiliaryTransformCount = 0;
     uint32_t scalarTrackCount = 0;
-    // Native is -1 until a later MDLS mapping record names that bone.
+    // Native bone mapping index is -1 until a later MDLS mapping record names that bone.
     // Only the zero-scalar/zero-group subset of that tail is decoded here.
     bool boneMappingKnown = false;
     std::vector<int32_t> mappingRecordByBone;

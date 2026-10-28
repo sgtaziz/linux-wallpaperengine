@@ -1570,7 +1570,7 @@ TEST_CASE ("Per-scene native spectrum filter retains independent histories befor
 TEST_CASE ("Native spectrum normalization preserves reciprocal estimate through history", "[audio][spectrum][native-rcp]") {
     using WallpaperEngine::Audio::Drivers::Recorders::NativeSpectrumSmoother;
     using WallpaperEngine::Audio::Drivers::Recorders::StereoSpectrum;
-    // Original v2.8.42 bytes (RCPPS) and
+    // Native instruction bytes (RCPPS) and
     // (MULPS/SUBPS/MULPS/ADDPS), executed
     // independently with controlled registers and the native 0.01*20 step.
     // These words discriminate DIV even when the coefficient is exactly one.
@@ -1673,7 +1673,7 @@ TEST_CASE ("Scene spectrum rate follows native percent floor", "[audio][spectrum
 
 TEST_CASE ("Native spectrum bounds host elapsed before applying rate and fade", "[audio][spectrum][host-delta]") {
     using WallpaperEngine::Audio::Drivers::Recorders::nativeSpectrumFilterDelta;
-    // Original v2.8.42 instruction windows,
+    // Native instruction windows,
     // executed with controlled
     // host fields/registers. These discriminate a single clamp after scaling.
     REQUIRE (nativeSpectrumFilterDelta (1.0f, 0.5f, 1.0f) == 0.125f);
@@ -1818,7 +1818,7 @@ TEST_CASE ("Every particle audio consumer shares the native audio parser default
     using WallpaperEngine::Data::Model::TurbulentVelocityRandomInitializer;
     using WallpaperEngine::Data::Model::VortexOperator;
     using WallpaperEngine::Data::Parsers::ObjectParser;
-    // inserts "0.8 1.0", exponent 2 and bins 0..1 for every caller in
+    // Native inserts "0.8 1.0", exponent 2 and bins 0..1 for every caller in
     // emitters, turbulentvelocityrandom, turbulence, vortex, vortex_v2.
     Project project {};
     const auto data = JSON::parse (R"({"id":3,"name":"audio-defaults","particle":{

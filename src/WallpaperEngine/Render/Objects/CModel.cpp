@@ -604,8 +604,8 @@ void CModel::renderShadowCaster (const DepthTarget& atlas, const Wallpapers::Sha
         });
     if (!transform.visible) return;
     m_shadowWorld = transform.authoredMatrix;
-    // Native sets stage byte 0x12eb to 0 only around the shadow
-    // submission (2 otherwise); then draws only meshes whose
+    // Native flags the shadow submission only around the shadow
+    // draw; then draws only meshes whose
     // material category is normal (0) or alpha-to-coverage (3).
     for (const auto& mesh : m_meshes)
         if (mesh->supportsShadowCasting ()) mesh->drawShadow (*this, atlas, tile, viewProjection);

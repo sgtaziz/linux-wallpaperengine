@@ -103,7 +103,7 @@ inline bool modelPresentationReversesWinding (bool orthographic, bool localProje
 //   (root.origin.xy - parallaxPos) * cameraparallaxamount * root.parallaxDepth
 // in the native canvas (origin bottom-left, +Y up on screen), and only when
 // the scene has both camera parallax and an orthographic projection
-// (flags & 0x108). forms
+// (flags & 0x108). Native forms
 //   parallaxPos = size*0.5*(1-influence) + size*(x, 1-y)*influence + eye
 // from a top-origin cursor. Linux keeps the cursor in its top-origin pointer
 // convention and stores only (cursor - 0.5) * amount * influence as the
@@ -161,7 +161,7 @@ std::optional<int> sceneCompositionOwner (
 // The draw scope inside composing images. Every composer draws its children
 // into its own offscreen target, but only a non-fullscreen one replaces the
 // scene stacks (native: inverse own transform, identity view,
-// +-size/2 ortho). A fullscreen composer (& 0x2, set from the model's
+// +-size/2 ortho). A fullscreen composer (set from the model's
 // "fullscreen") keeps them, so its children otherwise
 // draw exactly as root objects: same projection, root clip, winding and
 // presentation. A local projection, once entered, persists through nesting.
@@ -229,9 +229,8 @@ inline glm::vec2 sceneParallaxDisplacementTarget (glm::vec2 cursor, float amount
     return (cursor - glm::vec2 (0.5f)) * amount * influence;
 }
 
-// The pixel native's pointer is formed from: GetCursorPos and
-// ScreenToClient give an integer client POINT, which converts to
-// float before the divide, so the pointer moves in whole
+// Native forms the pointer from an integer client pixel position,
+// converted to float before the divide, so the pointer moves in whole
 // pixels. Wayland reports subpixel positions. Takes the bottom-origin
 // framebuffer cursor and returns the top-origin viewport fraction of the
 // pixel it lies in, clamped to the viewport.
@@ -241,10 +240,8 @@ inline glm::dvec2 sceneClientPixelFraction (glm::dvec2 framebufferCursor, const 
     return {std::clamp (x / viewport.z, 0.0, 1.0), std::clamp (y / viewport.w, 0.0, 1.0)};
 }
 
-// Native: the client cursor over the viewport size (
-// ScreenToClient / divps), bound as g_PointerPosition
-// and scaled by the full projection size for camera parallax (,
-// ). A cover-cropped canvas therefore still sweeps its
+// Native: the client cursor over the viewport size, bound as g_PointerPosition
+// and scaled by the full projection size for camera parallax. A cover-cropped canvas therefore still sweeps its
 // whole width. Keep only the visible UV band's axis orientation, which leaves
 // an uncropped scene's cursor unchanged.
 inline glm::vec2 sceneViewportCursor (glm::vec2 viewportCursor, float ustart, float uend, float vstart, float vend) {
@@ -311,8 +308,7 @@ inline glm::vec3 cameraShakeOffset (
     return {x * scale, y * scale, z * scale};
 }
 
-// Native g_ParallaxPosition (shader global 0x6b, bound by
-// ). writes it only while cameraparallax is on,
+// Native g_ParallaxPosition is written only while cameraparallax is on,
 // without an orthographic gate: the smoothed parallax point (the
 // clamped top-origin cursor as (x, 1 - y), scaled by the mouse influence about
 // the canvas centre, plus the eye, eased by the delay weight) divided by the
@@ -426,7 +422,7 @@ inline glm::vec3 projectWorldControlPoint (
 inline glm::mat4 particleMouseProjection (const glm::mat4& cameraProjection, bool orthographic) {
     if (orthographic) {
         glm::mat4 result = cameraProjection;
-        // uses fixed near=-2000, far=2000 for the root 2D view.
+        // Native uses fixed near=-2000, far=2000 for the root 2D view.
         result[0][2] = result[1][2] = 0.0f;
         result[2][2] = 1.0f / 4000.0f;
         result[3][2] = 0.5f;
@@ -509,7 +505,7 @@ inline ResolvedSceneTransform localSceneTransform (const Data::Model::Object& ob
         result.visible = object.groupVisible->value->getBool ();
     }
     // Native stores the full Rz*Ry*Rx basis for every layer.
-    // scales those columns before parent composition; text's
+    // Native scales those columns before parent composition; text's
     // uses this same basis for the measured layout offset.
     glm::vec3 angles;
     if (object.is<Data::Model::Image> ())

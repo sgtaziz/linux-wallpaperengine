@@ -25,7 +25,7 @@ std::vector<CameraPath> rootCameraPaths (const JSON& camera, const Project& proj
     const auto files = camera.optional ("paths");
     if (!files || !files->is_array ()) return result;
     for (const auto& filename : *files) {
-        // clears the list BEFORE EACH file, even a nonstring entry.
+        // Native clears the list BEFORE EACH file, even a nonstring entry.
         result.clear ();
         if (!filename.is_string ()) continue;
         try {
@@ -98,7 +98,7 @@ SceneUniquePtr WallpaperParser::parseScene (const JSON& file, Project& project) 
     const bool autoOrthogonalProjection = hasOrthogonalProjection && projection->optional ("auto", false);
     const int orthogonalWidth = hasOrthogonalProjection ? projection->optional ("width", 0) : 0;
     const int orthogonalHeight = hasOrthogonalProjection ? projection->optional ("height", 0) : 0;
-    // propagates the native orthographic context bit when both
+    // Native propagates the orthographic context bit when both
     // authored dimensions are nonzero, including signed dimensions.
     const bool useOrthogonalProjection = autoOrthogonalProjection ||
                                          (orthogonalWidth != 0 && orthogonalHeight != 0);
@@ -130,7 +130,7 @@ SceneUniquePtr WallpaperParser::parseScene (const JSON& file, Project& project) 
             throw std::invalid_argument ("Scene spot lightconfig exceeds its serialized four-bit count");
 	if (pointLightSlots < 0 || pointLightSlots > 15)
 	    throw std::invalid_argument ("Scene point lightconfig exceeds its serialized four-bit count");
-        // packs the tube count into bits 8-11 of the renderer lighting configuration.
+        // Native packs the tube count into bits 8-11 of the renderer lighting configuration.
         if (tubeLightSlots < 0 || tubeLightSlots > 15)
             throw std::invalid_argument ("Scene tube lightconfig exceeds its serialized four-bit count");
     }
@@ -158,8 +158,8 @@ SceneUniquePtr WallpaperParser::parseScene (const JSON& file, Project& project) 
     // TODO: FIND IF THESE DEFAULTS ARE SENSIBLE OR NOT AND PERFORM PROPER VALIDATION WHEN CAMERA PREVIEW AND CAMERA
     // PARALLAX ARE PRESENT
 
-    // Omitted general fields keep the scene constructor's values (2.8.42
-    // confirmed in native disassembly): clearcolor
+    // Omitted general fields keep the scene constructor's values:
+    // clearcolor
     // zero, cameraparallaxamount 0.5, cameraparallaxdelay 
     // 0.1, cameraparallaxmouseinfluence 0.5, camerashakespeed 
     // 3.0, camerashakeamplitude 0.5, camerashakeroughness 1.0,

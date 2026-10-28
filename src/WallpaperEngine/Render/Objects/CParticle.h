@@ -287,7 +287,7 @@ private:
     std::optional<uint64_t> m_lastAdvancedFrame;
     ParticleCore::GeometryPublication m_publishedGeometry;
     bool m_hasChildParentMatrix { false };
-    // Native child node and the scene matrix-stack entry below it are
+    // Native child node matrix and the scene matrix-stack entry below it are
     // distinct. Event children may replace the latter; static children do not.
     glm::mat4 m_childParentMatrix { 1.0f };
     glm::mat4 m_childSceneParentMatrix { 1.0f };

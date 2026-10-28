@@ -66,7 +66,7 @@ TEST_CASE ("Frame pacer skips the sleep when the frame overruns its budget", "[f
 }
 
 TEST_CASE ("Rope trail history sampled under native pacing skips to the next frame", "[frame-pacer][particle]") {
-    // resets the countdown to the interval without carry. With native
+    // Native resets the countdown to the interval without carry. With native
     // pacing, a three-frame window that sums just short of a 0.1 s interval
     // waits for a fourth frame; a limiter that keeps every frame at or above
     // 1/fps samples every third frame.

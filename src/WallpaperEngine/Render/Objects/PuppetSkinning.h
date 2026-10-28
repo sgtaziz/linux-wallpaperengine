@@ -50,7 +50,7 @@ inline float puppetScalarAtFrames (const PuppetClipHeader::ScalarTrack& track,
 }
 
 inline float puppetApplyScalarLayer (float previous, float sampled, float weight, bool additive) {
-    // writes ordinary scalar lanes after a frame and layer lerp;
+    // Native writes ordinary scalar lanes after a frame and layer lerp;
     // the additive path adds sampled*weight to the retained lane.
     return additive ? previous + sampled * weight : std::lerp (previous, sampled, weight);
 }
@@ -337,7 +337,7 @@ inline std::optional<glm::mat4> puppetEmissionBoneMatrix (
 }
 
 inline std::vector<glm::mat4> puppetEmissionBindGlobals (const PuppetSkeletonData& skeleton) {
-    // uses optional rest matrices for emission without changing the
+    // Native uses optional rest matrices for emission without changing the
     // bind matrices used by the render skin palette.
     return puppetGlobalMatrices (skeleton, puppetUnanimatedLocalMatrices (skeleton));
 }
@@ -359,7 +359,7 @@ struct PuppetEmissionWorldHistory {
     std::vector<glm::mat4> current;
     std::vector<glm::mat4> previous;
 
-    // swaps scene-owned world-bone buffers each frame independently
+    // Native swaps scene-owned world-bone buffers each frame independently
     // of positive emission attempts. A skeleton resize discards history.
     void advance (const glm::mat4& world, std::span<const glm::mat4> localGlobals) {
         if (current.size () != localGlobals.size ()) {

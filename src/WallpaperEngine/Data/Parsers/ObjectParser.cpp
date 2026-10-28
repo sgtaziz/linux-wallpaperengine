@@ -277,7 +277,7 @@ ObjectUniquePtr ObjectParser::parse (const JSON& it, const Project& project) {
     // "value" of an object, which also binds its user property.
     // The base load always enables that binding, for
     // scene.json and createLayer alike.
-    // Anything else, `1` included, leaves the 0x2001 default clear.
+    // Anything else, `1` included, leaves the default clear.
     JSON perspective = JSON::object ();
     if (const auto perspectiveIt = it.find ("perspective"); perspectiveIt != it.end ()) {
         if (perspectiveIt->is_boolean ()) {
@@ -945,7 +945,7 @@ ParticleUniquePtr ObjectParser::parseParticle (const JSON& it, const Project& pr
 	uint32_t maxCount = 100;
 	float startTime = 0.0f;
 	uint32_t flags = 0;
-	// synthesizes the compiled preset's colorn/hascolor from its
+	// Native synthesizes the compiled preset's colorn/hascolor from its
 	// color components, overwriting any top-level authored values. The last
 	// color initializer wins (color-random uses its midpoint); color-change's
 	// start color is only the fallback when no color initializer exists
@@ -1246,7 +1246,7 @@ ParticleInitializerUniquePtr ObjectParser::parseParticleInitializer (
 	    it.color ("max", properties, Builders::ColorBuilder::White)
 	);
     } else if (name == "sizerandom") {
-	// inserts missing bounds according to the native scene
+	// Native inserts missing bounds according to the scene
 	// projection context before decoding the initializer. Perspective
 	// defaults are 0.001..1; orthographic defaults are 5..50.
 	return std::make_unique<SizeRandomInitializer> (
@@ -1322,7 +1322,7 @@ ParticleOperatorUniquePtr ObjectParser::parseParticleOperator (
         for (const auto* key : {"separationthreshold", "neighborthreshold", "maxspeed",
                                "separationfactor", "alignmentfactor", "cohesionfactor", "flags"})
             if (it.contains (key) && !convertible (it.at (key))) return nullptr;
-        // Original literal JSON converters086220/ accept numbers,
+        // Native literal JSON converters accept numbers,
         // boolean and null; strings/settings do not compile into this record.
         const auto scalar = [&it] (const char* key, float fallback) {
             if (!it.contains (key)) return fallback;
@@ -1707,7 +1707,7 @@ ParticleOperatorUniquePtr ObjectParser::parseParticleOperator (
 	    it.user ("phasemin", properties, 0.0f), it.user ("phasemax", properties, glm::two_pi<float> ())
 	);
     } else if (name == "oscillateposition") {
-	// defaults; an omitted scalemax depends on the scene projection.
+	// Defaults; an omitted scalemax depends on the scene projection.
 	return std::make_unique<OscillatePositionOperator> (
 	    it.user ("frequencymin", properties, 1.0f), it.user ("frequencymax", properties, 5.0f),
 	    it.user ("scalemin", properties, 0.0f), it.user ("scalemax", properties, 10.0f),
